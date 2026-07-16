@@ -1,6 +1,8 @@
 #include "Layer.hpp"
 #include "BridgeDetector.hpp"
 #include "ClipperUtils.hpp"
+#include "ContinuousShell.hpp"
+#include "Exception.hpp"
 #include "Geometry.hpp"
 #include "PerimeterGenerator.hpp"
 #include "Point.hpp"
@@ -15,8 +17,31 @@
 
 #include <boost/log/trivial.hpp>
 #include <boost/algorithm/clamp.hpp>
+#include <boost/format.hpp>
 
 namespace Slic3r {
+
+// Continuous-shell woven infill must not sparsify surfaces that need to be solid: the part's own
+// bottom/top shell layers, and INTERNAL top/bottom surfaces (e.g. the floor a bore sits on, or the
+// cap that closes a blind bore). Returns true when empty space (air) lies within `n` layers in
+// direction `dir` (+1 up = top shell, -1 down = bottom shell) over the footprint `here`: either the
+// model ends (an exposed face) or a hole/step leaves part of `here` uncovered by a neighbour slice.
+// A small area threshold ignores slicing noise so only genuine surfaces force solid fill.
+static bool cs_air_within(const Layer *layer, int dir, int n, const ExPolygons &here)
+{
+    const Layer *l = layer;
+    for (int k = 0; k < n; ++k) {
+        l = (dir > 0) ? l->upper_layer : l->lower_layer;
+        if (l == nullptr)
+            return true;                                   // ran off the top/bottom of the part -> open face
+        double uncovered_mm2 = 0.0;
+        for (const ExPolygon &e : diff_ex(here, l->lslices))
+            uncovered_mm2 += e.area() * SCALING_FACTOR * SCALING_FACTOR;
+        if (uncovered_mm2 > 0.5)                            // > 0.5 mm^2 uncovered -> a real top/bottom surface
+            return true;
+    }
+    return false;
+}
 
 Flow LayerRegion::flow(FlowRole role) const
 {
@@ -135,10 +160,77 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
     g.overhang_flow         = this->bridging_flow(frPerimeter, object_config.thick_bridges);
     g.solid_infill_flow     = this->flow(frSolidInfill);
 
-    if (this->layer()->object()->config().wall_generator.value == PerimeterGeneratorType::Arachne && !spiral_mode)
-        g.process_arachne();
-    else
-        g.process_classic();
+    const bool use_continuous_shell = this->layer()->object()->print()->config().continuous_shell_mode.value;
+
+    // Print::validate rejects any continuous-shell setup with more than one printing
+    // region per object, so a merged multi-region layer here means a configuration
+    // slipped through. Mixing normal perimeters into the single-bead print (and letting
+    // the Z planner ramp them) would silently corrupt the output, so fail loudly.
+    if (use_continuous_shell && compatible_regions.size() != 1)
+        throw Slic3r::RuntimeError(
+            (boost::format("Continuous shell mode does not support multiple wall regions (layer %1% merges %2% "
+                           "regions). Remove modifier volumes and per-part setting overrides.")
+             % this->layer()->id() % compatible_regions.size()).str());
+
+    if (!use_continuous_shell) {
+        if (this->layer()->object()->config().wall_generator.value == PerimeterGeneratorType::Arachne && !spiral_mode)
+            g.process_arachne();
+        else
+            g.process_classic();
+    }
+
+    if (use_continuous_shell) {
+        // Continuous shell prints the whole object as one unbroken bead, which is
+        // only possible when every layer is a single connected region. A slice that
+        // splits into several islands cannot be printed this way, so stop slicing
+        // with a clear message instead of silently producing a broken/mixed result.
+        const ExPolygons merged_slice = union_ex(slices.surfaces);
+        if (merged_slice.size() > 1)
+            throw Slic3r::RuntimeError(
+                (boost::format("Continuous shell mode requires a single connected region at every layer, but layer %1% "
+                               "splits into %2% separate regions. Disable continuous shell mode or use a model that stays "
+                               "connected at every height.")
+                 % this->layer()->id() % merged_slice.size()).str());
+
+        ExtrusionEntityCollection continuous_entities;
+        std::string reason;
+        // Woven infill would sparsify every solid cross-section, including surfaces that must stay
+        // solid: the part's bottom/top shell layers and internal top/bottom surfaces (a bore floor,
+        // a blind-bore cap). Detect those and fill the whole cross-section solid there, so the bead
+        // still runs continuously but lays a dense Fermat base/cap instead of open infill.
+        bool force_solid = false;
+        if (region_config.continuous_shell_infill_density.value > 0) {
+            const int tsl = region_config.top_shell_layers.value;
+            const int bsl = region_config.bottom_shell_layers.value;
+            force_solid = (tsl > 0 && cs_air_within(this->layer(), +1, tsl, merged_slice))
+                       || (bsl > 0 && cs_air_within(this->layer(), -1, bsl, merged_slice));
+        }
+        if (ContinuousShellPathBuilder::build_cross_section(
+                slices.surfaces, this->flow(frExternalPerimeter), this->layer()->height, &region_config,
+                continuous_entities, &reason, (this->layer()->id() & 1u) != 0, size_t(this->layer()->id()), force_solid)) {
+            this->perimeters.no_sort = false;
+            this->perimeters.clear();
+            // Perimeter consumers require each top-level item to be an
+            // ExtrusionEntityCollection, even when it contains one multipath.
+            this->perimeters.entities.emplace_back(
+                new ExtrusionEntityCollection(std::move(continuous_entities)));
+            this->fills.clear();
+            this->thin_fills.clear();
+            this->fill_expolygons.clear();
+            this->fill_surfaces.clear();
+            this->fill_no_overlap_expolygons.clear();
+            if (fill_surfaces != nullptr)
+                fill_surfaces->clear();
+            if (fill_no_overlap != nullptr)
+                fill_no_overlap->clear();
+        } else {
+            // Falling back to normal walls for a single layer would reintroduce the
+            // very seams/breaks this mode removes, so fail loudly instead.
+            throw Slic3r::RuntimeError(
+                (boost::format("Continuous shell mode could not generate a continuous path at layer %1%: %2%")
+                 % this->layer()->id() % reason).str());
+        }
+    }
 }
 
 #if 1

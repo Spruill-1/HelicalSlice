@@ -2537,8 +2537,9 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     //m_volumetric_speed = DoExport::autospeed_volumetric_limit(print);
     print.throw_if_canceled();
 
-    if (print.config().spiral_mode.value)
-        m_spiral_vase = make_unique<SpiralVase>(print.config());
+    if (print.config().spiral_mode.value || print.config().continuous_shell_mode.value)
+        m_spiral_vase = make_unique<SpiralVase>(
+            print.config(), print.config().continuous_shell_mode.value);
 
     if (print.config().max_volumetric_extrusion_rate_slope.value > 0){
     		m_pressure_equalizer = make_unique<PressureEqualizer>(print.config());
@@ -3206,9 +3207,14 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
     DoExport::init_ooze_prevention(print, m_ooze_prevention);
     print.throw_if_canceled();
 
-    // Collect custom seam data from all objects.
+    // Collect custom seam data from all objects. Continuous-shell mode NEVER consults the
+    // standard seam placer: place_seam is gated behind !m_continuous_shell_active at the loop
+    // level (its beads are single multipaths and the spiral seam is placed in the path
+    // builder). Running the seam placer's per-perimeter analysis over the dense continuous-
+    // shell geometry is therefore pure wasted work - a large one-time cost - so skip it.
     std::function<void(void)> throw_if_canceled_func = [&print]() { print.throw_if_canceled(); };
-    m_seam_placer.init(print, throw_if_canceled_func);
+    if (!print.config().continuous_shell_mode.value)
+        m_seam_placer.init(print, throw_if_canceled_func);
 
     // BBS: get path for change filament
     if (m_writer.multiple_extruders) {
@@ -3708,9 +3714,10 @@ void GCode::process_layers(
         	if (in.nop_layer_result)
                 return in;
                 
-            spiral_mode.enable(in.spiral_vase_enable);
+            spiral_mode.enable(in.spiral_vase_enable || in.continuous_shell_enable);
             bool last_layer = in.layer_id == layers_to_print.size() - 1;
-            return { spiral_mode.process_layer(std::move(in.gcode), last_layer), in.layer_id, in.spiral_vase_enable, in.cooling_buffer_flush};
+            return { spiral_mode.process_layer(std::move(in.gcode), last_layer), in.layer_id,
+                     in.spiral_vase_enable, in.continuous_shell_enable, in.cooling_buffer_flush };
         });
     const auto pressure_equalizer = tbb::make_filter<LayerResult, LayerResult>(slic3r_tbb_filtermode::serial_in_order,
         [pressure_equalizer = this->m_pressure_equalizer.get()](LayerResult in) -> LayerResult {
@@ -3808,9 +3815,10 @@ void GCode::process_layers(
         [&spiral_mode = *this->m_spiral_vase.get(), &layers_to_print](LayerResult in)->LayerResult {
             if (in.nop_layer_result)
                 return in;
-            spiral_mode.enable(in.spiral_vase_enable);
+            spiral_mode.enable(in.spiral_vase_enable || in.continuous_shell_enable);
             bool last_layer = in.layer_id == layers_to_print.size() - 1;
-            return { spiral_mode.process_layer(std::move(in.gcode), last_layer), in.layer_id, in.spiral_vase_enable, in.cooling_buffer_flush };
+            return { spiral_mode.process_layer(std::move(in.gcode), last_layer), in.layer_id,
+                     in.spiral_vase_enable, in.continuous_shell_enable, in.cooling_buffer_flush };
         });
     const auto pressure_equalizer = tbb::make_filter<LayerResult, LayerResult>(slic3r_tbb_filtermode::serial_in_order,
         [pressure_equalizer = this->m_pressure_equalizer.get()](LayerResult in) -> LayerResult {
@@ -4609,7 +4617,7 @@ LayerResult GCode::process_layer(
     else if (support_layer != nullptr)
         layer_ptr = support_layer;
     const Layer& layer = *layer_ptr;
-    LayerResult   result { {}, layer.id(), false, last_layer };
+    LayerResult   result { {}, layer.id(), false, false, last_layer };
     if (layer_tools.extruders.empty())
         // Nothing to extrude.
         return result;
@@ -4629,20 +4637,30 @@ LayerResult GCode::process_layer(
     // Check whether it is possible to apply the spiral vase logic for this layer.
     // Just a reminder: A spiral vase mode is allowed for a single object, single material print only.
     m_enable_loop_clipping = true;
+    m_continuous_shell_active = false;
     if (m_spiral_vase && layers.size() == 1 && support_layer == nullptr) {
-        bool enable = (layer.id() > 0 || !print.has_brim()) && (layer.id() >= (size_t)print.config().skirt_height.value && ! print.has_infinite_skirt());
-        if (enable) {
-            for (const LayerRegion *layer_region : layer.regions())
-                if (size_t(layer_region->region().config().bottom_shell_layers.value) > layer.id() ||
-                    layer_region->perimeters.items_count() > 1u ||
-                    layer_region->fills.items_count() > 0) {
-                    enable = false;
-                    break;
-                }
+        if (print.config().spiral_mode.value) {
+            bool enable = (layer.id() > 0 || !print.has_brim()) && (layer.id() >= (size_t)print.config().skirt_height.value && ! print.has_infinite_skirt());
+            if (enable) {
+                for (const LayerRegion *layer_region : layer.regions())
+                    if (size_t(layer_region->region().config().bottom_shell_layers.value) > layer.id() ||
+                        layer_region->perimeters.items_count() > 1u ||
+                        layer_region->fills.items_count() > 0) {
+                        enable = false;
+                        break;
+                    }
+            }
+            result.spiral_vase_enable = enable;
+        } else if (m_config.continuous_shell_mode) {
+            // MUST mirror PrintObject::continuous_shell_z exactly: a layer is Z-ramped
+            // if and only if the exporter strips its travels/retractions. The spiral-vase
+            // heuristic above (bottom shells, brim) does not apply - continuous-shell
+            // bottom layers are themselves single beads with no fills.
+            result.continuous_shell_enable = layer.id() >= print.continuous_shell_first_layer();
+            m_continuous_shell_active = result.continuous_shell_enable;
         }
-        result.spiral_vase_enable = enable;
         // If we're going to apply spiralvase to this layer, disable loop clipping.
-        m_enable_loop_clipping = !enable;
+        m_enable_loop_clipping = !(result.spiral_vase_enable || result.continuous_shell_enable);
     }
 
     std::string gcode;
@@ -4680,7 +4698,8 @@ LayerResult GCode::process_layer(
 
     bool need_insert_timelapse_gcode_for_traditional = false;
     if ((!m_wipe_tower || !m_wipe_tower->enable_timelapse_print()) && (is_BBL_Printer() || !m_config.time_lapse_gcode.value.empty())) {
-        need_insert_timelapse_gcode_for_traditional = ((is_i3_printer && !m_spiral_vase) || is_multi_extruder);
+        need_insert_timelapse_gcode_for_traditional = !m_config.continuous_shell_mode &&
+                                                       ((is_i3_printer && !m_spiral_vase) || is_multi_extruder);
     }
 
     bool has_insert_timelapse_gcode = false;
@@ -4697,7 +4716,7 @@ LayerResult GCode::process_layer(
     m_layer = &layer;
     m_object_layer_over_raft = false;
 
-    if (!m_config.time_lapse_gcode.value.empty() && !is_BBL_Printer()) {
+    if (!m_config.time_lapse_gcode.value.empty() && !is_BBL_Printer() && !m_config.continuous_shell_mode) {
         DynamicConfig config;
         config.set_key_value("layer_num", new ConfigOptionInt(m_layer_index));
         config.set_key_value("layer_z", new ConfigOptionFloat(print_z));
@@ -5235,7 +5254,7 @@ LayerResult GCode::process_layer(
         return timelapse_gcode;
     };
 
-    if (!need_insert_timelapse_gcode_for_traditional  && is_BBL_Printer()) { // Equivalent to the timelapse gcode placed in layer_change_gcode
+    if (!need_insert_timelapse_gcode_for_traditional && !m_config.continuous_shell_mode && is_BBL_Printer()) { // Equivalent to the timelapse gcode placed in layer_change_gcode
         if (FILAMENT_CONFIG(retract_when_changing_layer)) {
             gcode += this->retract(false, false, auto_lift_type, true);
         }
@@ -5311,7 +5330,8 @@ LayerResult GCode::process_layer(
                     }
                 }
 
-                if (print.config().enable_wrapping_detection && !has_insert_wrapping_detection_gcode) {
+                if (print.config().enable_wrapping_detection && !m_config.continuous_shell_mode &&
+                    !has_insert_wrapping_detection_gcode) {
                     gcode += this->retract(false, false, auto_lift_type, true);
                     gcode += insert_wrapping_detection_gcode();
                     has_insert_wrapping_detection_gcode = true;
@@ -5332,7 +5352,8 @@ LayerResult GCode::process_layer(
                 has_insert_timelapse_gcode = true;
             }
 
-            if (print.config().enable_wrapping_detection && !has_insert_wrapping_detection_gcode) {
+            if (print.config().enable_wrapping_detection && !m_config.continuous_shell_mode &&
+                !has_insert_wrapping_detection_gcode) {
                 gcode += this->retract(false, false, auto_lift_type, true);
                 gcode += insert_wrapping_detection_gcode();
                 has_insert_wrapping_detection_gcode = true;
@@ -5342,8 +5363,10 @@ LayerResult GCode::process_layer(
         }
 
         if (!gcode_toolchange.empty()) {
-            // Disable vase mode for layers that has toolchange
+            // Disable cross-layer modes for layers that have a toolchange.
             result.spiral_vase_enable = false;
+            result.continuous_shell_enable = false;
+            m_continuous_shell_active = false;
         }
         
         gcode += std::move(gcode_toolchange);
@@ -5786,7 +5809,7 @@ std::string GCode::extrude_loop(const ExtrusionLoop&        loop_ref,
 
     bool is_hole = (loop.loop_role() & elrHole) == elrHole;
 
-    if (m_config.spiral_mode && !is_hole) {
+    if ((m_config.spiral_mode || m_continuous_shell_active) && !is_hole) {
         // if spiral vase, we have to ensure that all contour are in the same orientation.
         if (m_config.wall_direction == WallDirection::CounterClockwise)
             loop.make_counter_clockwise();
@@ -5801,7 +5824,7 @@ std::string GCode::extrude_loop(const ExtrusionLoop&        loop_ref,
     // or, if `start_point` is specified, start the loop at point closest to it
     Point last_pos = start_point ? *start_point : this->last_pos();
     float seam_overhang = std::numeric_limits<float>::lowest();
-    if (!m_config.spiral_mode && description == "perimeter") {
+    if (!m_config.spiral_mode && !m_continuous_shell_active && description == "perimeter") {
         assert(m_layer != nullptr);
         m_seam_placer.place_seam(m_layer, loop, last_pos, seam_overhang);
     } else
@@ -5810,6 +5833,7 @@ std::string GCode::extrude_loop(const ExtrusionLoop&        loop_ref,
     const auto seam_scarf_type = m_config.seam_slope_type.value;
     bool enable_seam_slope = ((seam_scarf_type == SeamScarfType::External && !is_hole) || seam_scarf_type == SeamScarfType::All) &&
         !m_config.spiral_mode &&
+        !m_continuous_shell_active &&
         (loop.role() == erExternalPerimeter || (loop.role() == erPerimeter && m_config.seam_slope_inner_walls)) &&
         layer_id() > 0;
     const auto nozzle_diameter = EXTRUDER_CONFIG(nozzle_diameter);
@@ -7038,7 +7062,9 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
             }
             // BBS: use G1 if not enable arc fitting or has no arc fitting result or in spiral_mode mode or we are doing sloped extrusion
             // Attention: G2 and G3 is not supported in spiral_mode mode
-            if (!m_config.enable_arc_fitting || path.polyline.fitting_result.empty() || m_config.spiral_mode || sloped != nullptr || path.z_contoured) {
+            if (!m_config.enable_arc_fitting || path.polyline.fitting_result.empty() ||
+                m_config.spiral_mode || m_config.continuous_shell_mode ||
+                sloped != nullptr || path.z_contoured) {
                 double path_length = 0.;
                 double total_length = sloped == nullptr ? 0. : path.polyline.length() * SCALING_FACTOR;
                 double saved_z      = m_writer.get_position().z();
@@ -7064,15 +7090,17 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
                         coordf_t z_diff = unscale_(line.b.z());
 
                         double extrusion_ratio = 1;
-                        if (path.role() != erIroning) {
+                        if (path.role() != erIroning && !m_config.continuous_shell_mode) {
                             extrusion_ratio = (path.height + z_diff) / path.height;
                         }
 
                         double e = dE * extrusion_ratio;
 
                         double z = m_nominal_z + z_diff;
-                        if (z < 0.1) {
-                            throw RuntimeError("GCode: very low z");
+                        // Sanity guard against garbage Z only: legitimate contoured beads
+                        // start as low as the first layer height (profiles ship 0.05 mm).
+                        if (z < 0.01) {
+                            throw RuntimeError((boost::format("GCode: computed extrusion Z %1% is below the bed") % z).str());
                         }
                         gcode += m_writer.extrude_to_xyz(Vec3d(dest2d.x(), dest2d.y(), z), e,
                                                          GCodeWriter::full_gcode_comment ? tempDescription : "");
@@ -7271,15 +7299,17 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
                 coordf_t z_diff = unscale_(processed_point.p.z());
 
                 double extrusion_ratio = 1;
-                if (path.role() != erIroning) {
+                if (path.role() != erIroning && !m_config.continuous_shell_mode) {
                     extrusion_ratio = (path.height + z_diff) / path.height;
                 }
 
                 double e = dE * extrusion_ratio;
 
                 double z = m_nominal_z + z_diff;
-                if (z < 0.1) {
-                    throw RuntimeError("GCode: very low z");
+                // Sanity guard against garbage Z only: legitimate contoured beads
+                // start as low as the first layer height (profiles ship 0.05 mm).
+                if (z < 0.01) {
+                    throw RuntimeError((boost::format("GCode: computed extrusion Z %1% is below the bed") % z).str());
                 }
                 gcode += m_writer.extrude_to_xyz(Vec3d(dest2d.x(), dest2d.y(), z), e,
                                                  GCodeWriter::full_gcode_comment ? tempDescription : "");

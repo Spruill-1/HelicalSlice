@@ -5979,6 +5979,152 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloatOrPercent(200, true));
 
+    def = this->add("continuous_shell_mode", coBool);
+    def->label = L("Continuous shell mode");
+    def->category = L("Strength");
+    def->tooltip = L("Enable the experimental cross-layer continuous-shell path generator. This mode is intentionally conservative and only works for simple single-region shells.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("continuous_shell_seam_step", coPercent);
+    def->label = L("Continuous shell seam step");
+    def->category = L("Strength");
+    // xgettext:no-c-format, no-boost-format
+    def->tooltip = L("Continuous shell mode prints without travel moves, so its once-per-layer seam cannot jump to a new spot; "
+                     "instead it is walked a little around the part on every layer. This controls how far the seam advances each "
+                     "layer, as a percentage of the line spacing. 0% keeps the seam in one place (a vertical line); 100% moves it "
+                     "one bead per layer, spreading it into a shallow helix.");
+    def->sidetext = L("%");
+    def->min = 0;
+    def->max = 2000;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(100));
+
+    def = this->add("continuous_shell_seam_jitter", coPercent);
+    def->label = L("Continuous shell seam jitter");
+    def->category = L("Strength");
+    // xgettext:no-c-format, no-boost-format
+    def->tooltip = L("Scatters the continuous shell seam. At 0% the seam is a clean helix (the seam step). "
+                     "Higher values drive an accumulated per-layer random walk of the seam angle: each layer "
+                     "moves only a little (so the bead stays continuous), but over the whole print the seam "
+                     "wanders around the part, breaking up the coherent helical line. Use a stronger value on "
+                     "taller parts to spread the seam fully.");
+    def->sidetext = L("%");
+    def->min = 0;
+    def->max = 2000;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(0));
+
+    def = this->add("continuous_shell_internal_overextrusion", coPercent);
+    def->label = L("Continuous shell internal over-extrusion");
+    def->category = L("Strength");
+    // xgettext:no-c-format, no-boost-format
+    def->tooltip = L("Densifies continuous-shell beads that are provably buried (at least one bead from every free surface, "
+                     "outer or bore) to close internal voids, without bulging any visible face. The value is the fraction of "
+                     "the residual VOID to fill - the gap between the solid model cross-section volume and the volume the "
+                     "nominal beads already deposit. At 100% the buried beads are boosted just enough to bring the total up to "
+                     "the model's solid volume and never beyond, so the excess can never be pushed out to the surface. Surface "
+                     "beads keep nominal flow. 0% disables it.");
+    def->sidetext = L("%");
+    def->min = 0;
+    def->max = 50;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(0));
+
+    def = this->add("continuous_shell_interlock", coPercent);
+    def->label = L("Continuous shell interlock");
+    def->category = L("Strength");
+    // xgettext:no-c-format, no-boost-format
+    def->tooltip = L("Staggers continuous-shell wall beads in Z, like brick-laying. Each buried wall ring is nudged "
+                     "up or down (alternating by ring) so radially-adjacent beads no longer share a Z level, breaking "
+                     "up the continuous horizontal interface between them for a stronger, more isotropic wall. The bead "
+                     "stays fully continuous - the nudge is a gentle ramp, not a jump - and the outer and bore surfaces "
+                     "are left on the smooth spiral. 100% offsets adjacent rings by half a bead height (a full brick "
+                     "interlock); 0% disables it.");
+    def->sidetext = L("%");
+    def->min = 0;
+    def->max = 200;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(100));
+
+    def = this->add("continuous_shell_connector_spread", coPercent);
+    def->label = L("Continuous shell connector spread");
+    def->category = L("Strength");
+    // xgettext:no-c-format, no-boost-format
+    def->tooltip = L("Distributes the once-per-layer point where the continuous-shell bead dives off the outer "
+                     "surface to fill the wall interior. At 0% every ring hands off at nearly the same angle, so "
+                     "the crossings stack into one deep radial groove that winds up the part as a visible spiral "
+                     "seam. Higher values fan each ring's handoff further around the circumference, breaking that "
+                     "one deep groove into shallow, spread-out steps. 100% spreads the handoffs across a full "
+                     "revolution.");
+    def->sidetext = L("%");
+    def->min = 0;
+    def->max = 200;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(0));
+
+    def = this->add("continuous_shell_seam_coast", coPercent);
+    def->label = L("Continuous shell seam coast");
+    def->category = L("Strength");
+    // xgettext:no-c-format, no-boost-format
+    def->tooltip = L("Thins the extrusion flow across the surface-to-interior handoff (the seam crossing) so the "
+                     "material deposited at the surface there is reduced, softening the residual seam groove. 0% "
+                     "keeps full flow; higher values remove more flow at the crossing. Very high values can "
+                     "under-fill the crossing, so raise it gradually.");
+    def->sidetext = L("%");
+    def->min = 0;
+    def->max = 95;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(0));
+
+    def = this->add("continuous_shell_infill_density", coPercent);
+    def->label = L("Continuous shell infill density");
+    def->category = L("Strength");
+    // xgettext:no-c-format, no-boost-format
+    def->tooltip = L("Fills the interior of a SOLID continuous-shell cross-section with sparse infill instead of "
+                     "100% dense, carried by the SAME unbroken bead. The outer solid shell keeps the configured "
+                     "number of walls (Wall loops); past it the fill loops are thinned to this density, spiraling "
+                     "in and out as part of the one continuous path. 0% keeps the interior fully solid (default); "
+                     "100% is also solid. Hollow cross-sections (a modelled bore) are unaffected - only genuinely "
+                     "solid material is sparsified.");
+    def->sidetext = L("%");
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(0));
+
+    def = this->add("continuous_shell_infill_weave", coPercent);
+    def->label = L("Continuous shell infill weave frequency");
+    def->category = L("Strength");
+    // xgettext:no-c-format, no-boost-format
+    def->tooltip = L("Sets how FINE the woven sparse continuous-shell infill is - the number of lobes the "
+                     "interlocking weave makes around each ring. The weave always uses full interlock (a "
+                     "partial weave barely connects the infill, which defeats the point), so this tunes only "
+                     "the lobe frequency: higher = more, smaller lobes (a finer lattice); lower = fewer, larger "
+                     "lobes. 100% is the baseline (6 lobes) and scales linearly. 0% turns the weave off, leaving "
+                     "plain concentric sparse rings. Only applies when Continuous shell infill density is above 0.");
+    def->sidetext = L("%");
+    def->min = 0;
+    def->max = 400;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(100));
+
+    def = this->add("continuous_shell_infill_weave_shift", coPercent);
+    def->label = L("Continuous shell infill weave shift");
+    def->category = L("Strength");
+    // xgettext:no-c-format, no-boost-format
+    def->tooltip = L("How far the woven infill pattern rotates from one layer to the next - the strength of the "
+                     "inter-layer weave. At 0% every layer's lobes land at the same angle, so they stack into "
+                     "columns with no vertical interlock. Higher values twist each layer's lobes further around, "
+                     "so a layer's beads nest into the gaps of the layers above and below. 100% is a half-lobe "
+                     "shift per layer (a sharp, two-layer criss-cross); lower values give a gentler helical weave "
+                     "that spirals over several layers (more gyroid-like). Only applies when the weave is on.");
+    def->sidetext = L("%");
+    def->min = 0;
+    def->max = 200;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(30));
+
     def = this->add("spiral_starting_flow_ratio", coFloat);
     def->label = L("Spiral starting flow ratio");
     // xgettext:no-c-format, no-boost-format

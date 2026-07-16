@@ -3,6 +3,7 @@
 #include <sstream>
 #include <cmath>
 #include <limits>
+#include <algorithm>
 
 namespace Slic3r {
 
@@ -61,7 +62,61 @@ SpiralVase::SpiralPoint nearest_point_on_lines(SpiralVase::SpiralPoint          
     dist = min;
     return closest;
 }
-} // namespace SpiralVase
+
+// Uniform spatial grid over a layer's points so smooth-spiral's per-point nearest-segment
+// query is O(1) local instead of O(N) linear. For continuous-shell each "layer" fed here is
+// the whole wall fill (hundreds of points), so the original O(N^2) per-layer scan is a serial
+// bottleneck. Cell size >= the smoothing radius, so a small fixed neighbourhood inspects only
+// the segments that can be within range - behaviourally identical to the linear scan for the
+// smoothing, which only uses matches within max_xy_smoothing. Each segment is rasterised into
+// every cell it crosses, so long connectors are still found exactly.
+struct SpiralGrid {
+    const std::vector<SpiralVase::SpiralPoint>* P = nullptr;
+    float cell = 1.f, inv = 1.f, minx = 0.f, miny = 0.f;
+    int   nx = 1, ny = 1;
+    std::vector<std::vector<int>> buckets;
+    int cell_index(int gx, int gy) const { return gy * nx + gx; }
+    void build(const std::vector<SpiralVase::SpiralPoint>* pts, float cell_size) {
+        P = pts;
+        cell = std::max(cell_size, 1e-3f); inv = 1.f / cell;
+        minx = miny = std::numeric_limits<float>::max();
+        float maxx = -std::numeric_limits<float>::max(), maxy = -std::numeric_limits<float>::max();
+        for (const auto& p : *pts) { minx = std::min(minx, p.x); miny = std::min(miny, p.y); maxx = std::max(maxx, p.x); maxy = std::max(maxy, p.y); }
+        nx = std::max(1, int((maxx - minx) * inv) + 1);
+        ny = std::max(1, int((maxy - miny) * inv) + 1);
+        buckets.assign(size_t(nx) * size_t(ny), {});
+        for (int i = 0; i + 1 < int(pts->size()); ++i) {
+            const SpiralVase::SpiralPoint a = (*pts)[i], b = (*pts)[i + 1];
+            const int steps = std::max(1, int(distance(a, b) * inv) + 1);
+            int last = -1;
+            for (int s = 0; s <= steps; ++s) {
+                const float t  = float(s) / float(steps);
+                const int   gx = std::clamp(int((a.x + (b.x - a.x) * t - minx) * inv), 0, nx - 1);
+                const int   gy = std::clamp(int((a.y + (b.y - a.y) * t - miny) * inv), 0, ny - 1);
+                const int   ci = cell_index(gx, gy);
+                if (ci != last) { buckets[ci].push_back(i); last = ci; }
+            }
+        }
+    }
+    SpiralVase::SpiralPoint nearest(SpiralVase::SpiralPoint q, bool& found, float& dist) const {
+        found = false; float best = std::numeric_limits<float>::max();
+        SpiralVase::SpiralPoint bp(0, 0);
+        if (P == nullptr || P->size() < 2) { dist = best; return bp; }
+        const int gx = std::clamp(int((q.x - minx) * inv), 0, nx - 1);
+        const int gy = std::clamp(int((q.y - miny) * inv), 0, ny - 1);
+        constexpr int R = 2; // cell >= smoothing radius, so a radius-2 neighbourhood always covers it
+        for (int dy = -R; dy <= R; ++dy) for (int dx = -R; dx <= R; ++dx) {
+            const int cx = gx + dx, cy = gy + dy;
+            if (cx < 0 || cy < 0 || cx >= nx || cy >= ny) continue;
+            for (int i : buckets[cell_index(cx, cy)]) {
+                float d; SpiralVase::SpiralPoint c = nearest_point_on_line(q, (*P)[i], (*P)[i + 1], d);
+                if (d < best) { best = d; bp = c; found = true; }
+            }
+        }
+        dist = best; return bp;
+    }
+};
+} // namespace SpiralVaseHelpers
 
 std::string SpiralVase::process_layer(const std::string &gcode, bool last_layer)
 {
@@ -119,8 +174,8 @@ std::string SpiralVase::process_layer(const std::string &gcode, bool last_layer)
     // For absolute extruder distances it will be switched off.
     // Tapering the absolute extruder distances requires to process every extrusion value after the first transition
     // layer.
-    bool  transition_in = m_transition_layer && m_config.use_relative_e_distances.value;
-    bool  transition_out = last_layer && m_config.use_relative_e_distances.value;
+    bool  transition_in = !m_continuous_shell_mode && m_transition_layer && m_config.use_relative_e_distances.value;
+    bool  transition_out = !m_continuous_shell_mode && last_layer && m_config.use_relative_e_distances.value;
 
     float starting_flowrate  = float(m_config.spiral_starting_flow_ratio.value);
     float finishing_flowrate = float(m_config.spiral_finishing_flow_ratio.value);
@@ -128,8 +183,31 @@ std::string SpiralVase::process_layer(const std::string &gcode, bool last_layer)
 
     float len = 0.f;
     SpiralVase::SpiralPoint last_point = previous_layer != NULL && previous_layer->size() >0? previous_layer->at(previous_layer->size()-1): SpiralVase::SpiralPoint(0,0);
-    m_reader.parse_buffer(gcode, [&new_gcode, &z, total_layer_length, layer_height, transition_in, &len, &current_layer, &previous_layer, &transition_gcode, transition_out, smooth_spiral, &max_xy_dist_for_smoothing, &last_point, starting_flowrate, finishing_flowrate, min_segment_length]
+    const bool continuous_shell_mode = m_continuous_shell_mode;
+    // Build a spatial grid over the previous layer once so smooth-spiral's nearest-segment
+    // query is O(1) local instead of scanning every previous-layer segment per point (the
+    // continuous-shell O(N^2)-per-layer serial bottleneck).
+    SpiralVaseHelpers::SpiralGrid prev_grid;
+    // Cell size must be >= the smoothing radius for the fixed neighbourhood search to be
+    // exhaustive, and is floored at 1 mm so a tiny (user-settable down to 0) smoothing
+    // radius cannot blow the bucket allocation up to (bbox/epsilon)^2. A cell larger
+    // than the radius is always correct - buckets just hold a few more segments. With a
+    // zero radius no match can ever satisfy dist < radius, so skip the build entirely.
+    if (smooth_spiral && previous_layer != NULL && previous_layer->size() >= 2 && max_xy_dist_for_smoothing > EPSILON)
+        prev_grid.build(previous_layer, std::max(max_xy_dist_for_smoothing, 1.f));
+    m_reader.parse_buffer(gcode, [&new_gcode, &z, total_layer_length, layer_height, transition_in, &len, &current_layer, &previous_layer, &transition_gcode, transition_out, smooth_spiral, &max_xy_dist_for_smoothing, &last_point, starting_flowrate, finishing_flowrate, min_segment_length, continuous_shell_mode, &prev_grid]
         (GCodeReader &reader, GCodeReader::GCodeLine line) {
+        if (continuous_shell_mode &&
+            (line.cmd_is("G0") || line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3")) &&
+            !line.extruding(reader) &&
+            (line.has(X) || line.has(Y) || line.has(Z) || line.has(E))) {
+            // A continuous shell cannot contain a travel, Z-hop, wipe, or retraction
+            // between adjacent contour segments - drop them. Bare feedrate setters
+            // ("G1 F...", no axis words) MUST pass through: they carry all in-layer
+            // speed control and the ;_EXTRUDE_SET_SPEED markers the cooling buffer
+            // rewrites (the extruding moves themselves carry no F).
+            return;
+        }
         if (line.cmd_is("G1")) {
             // Orca: Filter out retractions at layer change
             if (line.retracting(reader) || (line.extruding(reader) && line.dist_XY(reader) < min_segment_length)) return;
@@ -143,6 +221,7 @@ std::string SpiralVase::process_layer(const std::string &gcode, bool last_layer)
                 float dist_XY = line.dist_XY(reader);
                 if (line.has_x() || line.has_y()) { // Sometimes lines have X/Y but the move is to the last position
                     if (dist_XY > 0 && line.extruding(reader)) { // Exclude wipe and retract
+                        const bool first_continuous_segment = continuous_shell_mode && len == 0.f;
                         len += dist_XY;
                         float factor = len / total_layer_length;
                         if (transition_in){
@@ -159,8 +238,13 @@ std::string SpiralVase::process_layer(const std::string &gcode, bool last_layer)
                             transitionLine.set(E, line.e() * finishing_e_factor, 5 /*decimal_digits*/);
                             transition_gcode += transitionLine.raw() + '\n';
                         }
-                        // This line is the core of Spiral Vase mode, ramp up the Z smoothly
-                        line.set(Z, z + factor * layer_height);
+                        // This line is the core of Spiral Vase mode, ramp up the Z smoothly.
+                        // In continuous-shell mode the whole-object Z planner has already
+                        // written a genuine per-point Z into every extruding move (z_contoured),
+                        // so SpiralVase must NOT overwrite it here - it only strips travels and
+                        // smooths XY for this mode.
+                        if (!continuous_shell_mode)
+                            line.set(Z, z + factor * layer_height);
                         if (smooth_spiral) {
                             // Now we also need to try to interpolate X and Y
                             SpiralVase::SpiralPoint p(line.x(), line.y()); // Get current x/y coordinates
@@ -168,10 +252,12 @@ std::string SpiralVase::process_layer(const std::string &gcode, bool last_layer)
                             if (previous_layer != NULL) {
                                 bool        found    = false;
                                 float       dist     = 0;
-                                SpiralVase::SpiralPoint nearestp = SpiralVaseHelpers::nearest_point_on_lines(p, previous_layer, found, dist);
+                                SpiralVase::SpiralPoint nearestp = prev_grid.nearest(p, found, dist);
                                 if (found && dist < max_xy_dist_for_smoothing) {
                                     // Interpolate between the point on this layer and the point on the previous layer
-                                    SpiralVase::SpiralPoint target = SpiralVaseHelpers::add(SpiralVaseHelpers::scale(nearestp, 1 - factor), SpiralVaseHelpers::scale(p, factor));
+                                    SpiralVase::SpiralPoint target = first_continuous_segment ?
+                                        last_point :
+                                        SpiralVaseHelpers::add(SpiralVaseHelpers::scale(nearestp, 1 - factor), SpiralVaseHelpers::scale(p, factor));
 
                                     // Remove tiny movement
                                     // We need to figure out the distance of this new line!

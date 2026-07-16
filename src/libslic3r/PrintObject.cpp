@@ -9,6 +9,7 @@
 #include "Geometry.hpp"
 #include "I18N.hpp"
 #include "Layer.hpp"
+#include "ContinuousShell.hpp"
 #include "MutablePolygon.hpp"
 #include "PrintConfig.hpp"
 #include "SLA/IndexedMesh.hpp"
@@ -763,6 +764,48 @@ bool PrintObject::need_z_contouring() const
     return false;
 }
 
+bool PrintObject::has_continuous_shell() const
+{
+    return this->print()->config().continuous_shell_mode.value;
+}
+
+// Whole-object per-point Z planner for continuous-shell mode (L1). Runs at the
+// posContouring stage, after the per-layer bead centrelines have been built by
+// build_cross_section. Rewrites each continuous-shell layer's bead so it rises one
+// layer height across its own XY arc and marks it z_contoured; the exporter then
+// emits a genuine continuous non-planar Z. SpiralVase only strips travels and
+// smooths XY for this mode - it does not own the Z ramp.
+void PrintObject::continuous_shell_z()
+{
+    if (!this->set_started(posContouring))
+        return;
+
+    m_print->set_status(40, L("Continuous shell Z"));
+    BOOST_LOG_TRIVIAL(debug) << "Continuous-shell Z planner - start";
+
+    // Layers below continuous_shell_first_layer() stay planar (bed adhesion and skirt
+    // layers) and are NOT ramped. This boundary must match GCode::process_layer, which
+    // strips travels/retractions for exactly the ramped layers.
+    const size_t first_layer = m_print->continuous_shell_first_layer();
+    // Never let the ramp or a woven Z-dip reach the bed: clamp every point to at least
+    // half the first layer height (the exporter rejects anything below 0.01 mm).
+    const double min_z_abs = 0.5 * m_print->config().initial_layer_print_height.value;
+    // Layers are independent (each call touches only that layer's own perimeters).
+    tbb::parallel_for(tbb::blocked_range<size_t>(first_layer, m_layers.size()),
+        [this, min_z_abs](const tbb::blocked_range<size_t> &range) {
+            for (size_t layer_idx = range.begin(); layer_idx < range.end(); ++layer_idx) {
+                m_print->throw_if_canceled();
+                Layer *layer = m_layers[layer_idx];
+                for (LayerRegion *region : layer->regions())
+                    ContinuousShellPathBuilder::apply_continuous_z(&region->perimeters, layer->height,
+                                                                   min_z_abs - layer->print_z);
+            }
+        });
+
+    BOOST_LOG_TRIVIAL(debug) << "Continuous-shell Z planner - end";
+    this->set_done(posContouring);
+}
+
 void PrintObject::contour_z()
 {
     if (!this->set_started(posContouring)) {
@@ -904,7 +947,12 @@ void PrintObject::generate_support_material()
 void PrintObject::estimate_curled_extrusions()
 {
     if (this->set_started(posEstimateCurledExtrusions)) {
-        if ( std::any_of(this->print()->m_print_regions.begin(), this->print()->m_print_regions.end(), [](const PrintRegion* region) {
+        // Continuous-shell mode is a single spiral-vase-like continuous bead that bypasses the
+        // per-perimeter tool-path processing (seam placer, simplify, arc fitting). The
+        // per-extrusion malformation/curl estimate (SupportSpotsGenerator, built for layered
+        // perimeters) is very expensive over that dense bead and is not consulted by the
+        // continuous-shell path, so skip it in that mode.
+        if (!this->has_continuous_shell() && std::any_of(this->print()->m_print_regions.begin(), this->print()->m_print_regions.end(), [](const PrintRegion* region) {
                 const auto& cfg = region->config().enable_overhang_speed.values;
                 return std::any_of(cfg.begin(), cfg.end(), [](const unsigned char v) { return (bool) v; });
             })) {

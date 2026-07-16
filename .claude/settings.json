@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-ChildItem *)",
+      "PowerShell(Get-Item *)",
+      "PowerShell(Get-Process *)",
+      "PowerShell(Select-Object *)",
+      "PowerShell(Select-String *)",
+      "PowerShell(Sort-Object *)",
+      "PowerShell(Measure-Object *)",
+      "PowerShell(Compare-Object *)",
+      "PowerShell(Test-Path *)"
+    ]
+  }
+}

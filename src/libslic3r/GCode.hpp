@@ -170,13 +170,15 @@ struct LayerResult {
     size_t      layer_id;
     // Is spiral vase post processing enabled for this layer?
     bool        spiral_vase_enable { false };
+    // Is cross-layer continuous shell post processing enabled for this layer?
+    bool        continuous_shell_enable { false };
     // Should the cooling buffer content be flushed at the end of this layer?
     bool        cooling_buffer_flush { false };
 	// Is indicating if this LayerResult should be processed, or it is just inserted artificial LayerResult.
     // It is used for the pressure equalizer because it needs to buffer one layer back.
     bool        nop_layer_result { false };
 
-    static LayerResult make_nop_layer_result() { return {"", std::numeric_limits<coord_t>::max(), false, false, true}; }
+    static LayerResult make_nop_layer_result() { return {"", std::numeric_limits<coord_t>::max(), false, false, false, true}; }
 };
 
 class GCode {
@@ -185,7 +187,8 @@ public:
     GCode() :
     	m_origin(Vec2d::Zero()),
         m_enable_loop_clipping(true),
-        m_resonance_avoidance(true),
+    	m_continuous_shell_active(false),
+    	m_resonance_avoidance(true),
         m_enable_cooling_markers(false),
         m_enable_extrusion_role_markers(false),
         m_last_processor_extrusion_role(erNone),
@@ -557,6 +560,7 @@ private:
     RetractWhenCrossingPerimeters       m_retract_when_crossing_perimeters;
     TimelapsePosPicker                  m_timelapse_pos_picker;
     bool                                m_enable_loop_clipping;
+    bool                                m_continuous_shell_active;
     //resonance avoidance
     bool                                m_resonance_avoidance; 
     // If enabled, the G-code generator will put following comments at the ends

@@ -498,6 +498,9 @@ private:
     void ironing();
     bool need_z_contouring() const;
     void contour_z();
+    // L1 continuous-shell: whole-object per-point Z planner, run at posContouring.
+    bool has_continuous_shell() const;
+    void continuous_shell_z();
     void generate_support_material();
     void estimate_curled_extrusions();
     void simplify_extrusion_path();
@@ -926,6 +929,15 @@ public:
     bool                has_infinite_skirt() const;
     bool                has_skirt() const;
     bool                has_brim() const;
+    // Continuous shell: first layer index printed as a continuous bead (Z-ramped by
+    // PrintObject::continuous_shell_z AND travel-stripped by the exporter). Layers below
+    // it are planar base layers (bed adhesion / skirt layers). This is the single source
+    // of truth for both sides - if the planner and GCode::process_layer disagree, ramped
+    // beads get exported with travels and retractions intact.
+    size_t              continuous_shell_first_layer() const {
+        const int skirt_layers = m_config.skirt_loops.value > 0 ? m_config.skirt_height.value : 0;
+        return std::max<size_t>(1, size_t(std::max(0, skirt_layers)));
+    }
     //BBS
     bool                has_auto_brim() const    {
         return std::any_of(m_objects.begin(), m_objects.end(), [](PrintObject* object) { return object->config().brim_type == btAutoBrim; });

@@ -284,7 +284,10 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             // Spiral Vase forces different kind of slicing than the normal model:
             // In Spiral Vase mode, holes are closed and only the largest area contour is kept at each layer.
             // Therefore toggling the Spiral Vase on / off requires complete reslicing.
-            || opt_key == "spiral_mode") {
+            || opt_key == "spiral_mode"
+            // Continuous shell replaces perimeter/infill generation and the whole-object
+            // Z plan; recompute from slicing like spiral_mode when toggled.
+            || opt_key == "continuous_shell_mode") {
             osteps.emplace_back(posSlice);
         } else if (
                opt_key == "print_sequence"
@@ -1360,6 +1363,54 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
         }
     }
 
+    if (m_config.continuous_shell_mode.value) {
+        // Continuous shell prints each object as one unbroken bead from first layer
+        // to last. Several settings fundamentally break that guarantee; reject them
+        // with a clear message rather than producing a broken toolpath. Harmless or
+        // simply-overridden settings are left alone (only a soft warning is raised).
+
+        // Two continuous-Z modes cannot both own the toolpath.
+        if (m_config.spiral_mode)
+            return {L("Continuous shell mode and Spiral vase mode cannot be enabled at the same time."), nullptr, "continuous_shell_mode"};
+
+        // Multiple objects are allowed, but only when each is printed start-to-finish
+        // (By object). Under by-layer sequencing the single bead would be interleaved
+        // across objects, breaking continuity.
+        size_t total_copies_count = 0;
+        for (const PrintObject* object : m_objects)
+            total_copies_count += object->instances().size();
+        if (total_copies_count > 1 && m_config.print_sequence != PrintSequence::ByObject)
+            return {L("Please select \"By object\" print sequence to print multiple objects in continuous shell mode."), nullptr, "continuous_shell_mode"};
+
+        // The prime/wipe tower interrupts the continuous bead.
+        if (m_config.enable_prime_tower)
+            return {L("The prime tower is not compatible with continuous shell mode."), nullptr, "enable_prime_tower"};
+
+        // A draft shield / infinite skirt is printed on every layer, so no layer could
+        // ever be a pure continuous bead.
+        if (this->has_infinite_skirt())
+            return {L("A draft shield is not compatible with continuous shell mode."), nullptr, "continuous_shell_mode"};
+
+        for (const PrintObject* object : m_objects) {
+            // Supports interrupt the continuous bead.
+            if (object->config().enable_support || object->config().enforce_support_layers > 0)
+                return {L("Supports are not compatible with continuous shell mode."), nullptr, "enable_support"};
+
+            // One bead per layer means one wall region per object: any modifier volume or
+            // per-part override that creates a second printing region would silently force
+            // the affected layers back to normal perimeters (LayerRegion requires a single
+            // compatible region), so reject the setup outright.
+            if (object->all_regions().size() > 1)
+                return {L("Continuous shell mode does not support objects with multiple materials, modifier volumes, or per-part setting overrides."), nullptr, "continuous_shell_mode"};
+        }
+
+        // Settings this mode simply overrides: warn so the result isn't surprising.
+        // (wall_loops is genuinely consumed - it sets the solid shell ring count around
+        // woven infill and serpentine caps - so it gets no warning.)
+        if (m_default_region_config.sparse_infill_density.value > 0)
+            warn(L("Continuous shell mode fills the whole cross-section; the sparse infill density setting is ignored."), "sparse_infill_density");
+    }
+
     // Cache of layer height profiles for checking:
     // 1) Whether all layers are synchronized if printing with wipe tower and / or unsynchronized supports.
     // 2) Whether layer height is constant for Organic supports.
@@ -2352,8 +2403,11 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
 
         // Z-Contouring
         for (PrintObject *obj : m_objects) {
-            bool need_contouring = need_slicing_objects.count(obj) != 0 && obj->need_z_contouring();
-            if (need_contouring) {
+            bool need = need_slicing_objects.count(obj) != 0;
+            if (need && obj->has_continuous_shell()) {
+                // L1 continuous-shell whole-object Z planner (own posContouring path).
+                obj->continuous_shell_z();
+            } else if (need && obj->need_z_contouring()) {
                 obj->contour_z();
             } else {
                 if (obj->set_started(posContouring))

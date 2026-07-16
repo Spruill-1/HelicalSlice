@@ -1234,6 +1234,15 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                 wipe_before_external_loop))
     ((ConfigOptionEnum<WallInfillOrder>, wall_infill_order))
     ((ConfigOptionBool,                 precise_outer_wall))
+    ((ConfigOptionPercent,              continuous_shell_seam_step))
+    ((ConfigOptionPercent,              continuous_shell_seam_jitter))
+    ((ConfigOptionPercent,              continuous_shell_internal_overextrusion))
+    ((ConfigOptionPercent,              continuous_shell_interlock))
+    ((ConfigOptionPercent,              continuous_shell_connector_spread))
+    ((ConfigOptionPercent,              continuous_shell_seam_coast))
+    ((ConfigOptionPercent,              continuous_shell_infill_density))
+    ((ConfigOptionPercent,              continuous_shell_infill_weave))
+    ((ConfigOptionPercent,              continuous_shell_infill_weave_shift))
     ((ConfigOptionPercent,              bridge_density))
     ((ConfigOptionFloat,                 filter_out_gap_fill))
     ((ConfigOptionFloatsOrPercentsNullable, small_perimeter_speed))
@@ -1616,6 +1625,10 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionBool,               single_loop_draft_shield))
     ((ConfigOptionFloat,              min_skirt_length))
     ((ConfigOptionFloats,             slow_down_layer_time))
+    // Print-scope like spiral_mode: the mode owns the whole print's toolpath and G-code
+    // post-processing, so it must not vary per object/region (the per-ring tuning options
+    // continuous_shell_* remain region options).
+    ((ConfigOptionBool,               continuous_shell_mode))
     ((ConfigOptionBool,               spiral_mode))
     ((ConfigOptionBool,               spiral_mode_smooth))
     ((ConfigOptionFloatOrPercent,     spiral_mode_max_xy_smoothing))

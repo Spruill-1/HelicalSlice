@@ -629,7 +629,20 @@ find_package(TBB REQUIRED)
 # The Intel TBB library will use the std::exception_ptr feature of C++11.
 # add_definitions(-DTBB_USE_CAPTURED_EXCEPTION=0)
 
-find_package(OpenSSL REQUIRED)
+if (WIN32)
+    if (EXISTS "${CMAKE_PREFIX_PATH}/lib/cmake/openssl/openssl-config.cmake")
+        set(OpenSSL_DIR "${CMAKE_PREFIX_PATH}/lib/cmake/openssl" CACHE PATH "Path to the vendored OpenSSL CMake package" FORCE)
+        set(OpenSSL_ROOT_DIR "${CMAKE_PREFIX_PATH}" CACHE PATH "Path to the vendored OpenSSL root" FORCE)
+        set(OPENSSL_ROOT_DIR "${CMAKE_PREFIX_PATH}" CACHE PATH "Path to the vendored OpenSSL root" FORCE)
+        set(OpenSSL_USE_STATIC_LIBS ON CACHE BOOL "Use the vendored OpenSSL static libraries" FORCE)
+    endif ()
+endif ()
+
+if (WIN32 AND EXISTS "${CMAKE_PREFIX_PATH}/lib/cmake/openssl/openssl-config.cmake")
+    find_package(OpenSSL CONFIG REQUIRED PATHS "${CMAKE_PREFIX_PATH}/lib/cmake/openssl" NO_DEFAULT_PATH)
+else ()
+    find_package(OpenSSL REQUIRED)
+endif ()
 find_package(CURL REQUIRED)
 find_package(Freetype REQUIRED)
 

@@ -17,12 +17,15 @@ public:
     public:
         float x, y;
     };
-    SpiralVase(const PrintConfig &config) : m_config(config)
+    SpiralVase(const PrintConfig &config, bool continuous_shell_mode = false) : m_config(config)
     {
         m_reader.z() = (float)m_config.z_offset;
         m_reader.apply_config(m_config);
         m_previous_layer = NULL;
-        m_smooth_spiral = config.spiral_mode_smooth;
+        // Continuous shell paths need the same XY transition smoothing as
+        // spiral vase mode so changing contours do not create layer seams.
+        m_smooth_spiral = config.spiral_mode_smooth || continuous_shell_mode;
+        m_continuous_shell_mode = continuous_shell_mode;
     };
 
     void 		enable(bool en) {
@@ -44,6 +47,7 @@ private:
     bool 				m_transition_layer = false;
     // Whether to interpolate XY coordinates with the previous layer. Results in no seam at layer changes
     bool                m_smooth_spiral = false;
+    bool                m_continuous_shell_mode = false;
     std::vector<SpiralPoint> * m_previous_layer;
 };
 }

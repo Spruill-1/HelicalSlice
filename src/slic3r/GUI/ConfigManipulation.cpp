@@ -703,6 +703,15 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
     toggle_line("spiral_mode_max_xy_smoothing", has_spiral_vase && config->opt_bool("spiral_mode_smooth"));
     toggle_line("spiral_starting_flow_ratio", has_spiral_vase);
     toggle_line("spiral_finishing_flow_ratio", has_spiral_vase);
+
+    // Continuous shell: grey the tuning options out while the mode is off.
+    bool has_continuous_shell = config->opt_bool("continuous_shell_mode");
+    for (auto el : {"continuous_shell_seam_step", "continuous_shell_seam_jitter",
+                    "continuous_shell_internal_overextrusion", "continuous_shell_interlock",
+                    "continuous_shell_connector_spread", "continuous_shell_seam_coast",
+                    "continuous_shell_infill_density", "continuous_shell_infill_weave",
+                    "continuous_shell_infill_weave_shift"})
+        toggle_line(el, has_continuous_shell);
     bool has_top_shell    = config->opt_int("top_shell_layers") > 0 || (has_spiral_vase && config->opt_int("bottom_shell_layers") > 1);
     bool has_bottom_shell = config->opt_int("bottom_shell_layers") > 0;
     bool has_solid_infill = has_top_shell || has_bottom_shell;
