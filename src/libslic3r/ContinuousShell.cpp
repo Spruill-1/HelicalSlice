@@ -1,11 +1,15 @@
 #include "ContinuousShell.hpp"
 
 #include "ClipperUtils.hpp"
+#include "Geometry/ConvexHull.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
+#include <mutex>
 #include <vector>
 
 namespace Slic3r {
@@ -150,11 +154,15 @@ double seam_jitter_walk(size_t layer_index)
 // radians per layer. Consecutive layers then started/ended far apart, and because
 // continuous-shell mode drops the inter-layer travel move, each gap was laid down as
 // a long extruding chord straight across the part (visible stringing under a cap).
+// deep_concave: the caller determined the region has a genuine notch (deeper than
+// ~2 bead widths past the convex hull). Rings then anchor by ARC FRACTION with
+// gap-skipping joins instead of by absolute angle - see the anchor block below.
 Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_step_rad, double seam_jitter_rad,
                          double ring_spacing, size_t layer_index, bool has_bore, std::vector<char> *internal,
                          coord_t interlock_amp = 0, std::vector<coord_t> *z_off = nullptr,
                          double connector_spread = 0.0, size_t infill_shell_loops = 0,
-                         const ExPolygon *region = nullptr)
+                         const ExPolygon *region = nullptr, std::vector<float> *fill_mul = nullptr,
+                         bool deep_concave = false)
 {
     Polyline spiral;
     if (rings_in.empty())
@@ -268,8 +276,22 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
             std::rotate(pts.begin(), pts.begin() + best, pts.end());
     };
 
+    // On a CONCAVE cross-section the angle->point map is discontinuous: a tiny seam
+    // step can teleport the nearest-in-angle anchor across a notch, and since the
+    // layer join lands on ring 0's anchor, consecutive LAYERS then join with a chord
+    // through air (unfixable by in-layer containment - it happens between layers).
+    // For concave regions anchor ring 0 by ARC FRACTION instead: map the seam angle
+    // to a position along the ring's own perimeter, measured from a geometrically
+    // stable origin (the x-extremal vertex - an extreme point is always on the convex
+    // hull, so it moves continuously as the part tapers). Arc position is continuous
+    // in the seam angle for ANY shape; convex regions keep the pure angle anchor
+    // (identical behaviour, byte-stable output).
     std::vector<std::vector<Point>> grid;
     grid.reserve(rings.size());
+    // Per-ring anchor twist expressed as a point-index offset (rings share N points,
+    // evenly spaced by arc), used by the arc-anchored path to keep the Fermat
+    // connectors spiraling inward exactly like the angle-anchored path does.
+    const long twist_pts = std::lround(double(N) * ring_twist / (2.0 * M_PI));
     for (size_t ri = 0; ri < rings.size(); ++ri) {
         // Every ring must sweep the same rotational direction, otherwise morphing a
         // CCW ring (outer contour) to a CW ring (a hole contour, per Slic3r's
@@ -280,7 +302,73 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
         std::vector<Point> pts = resample_closed(oriented, N);
         if (pts.empty())
             return {};
-        anchor_to_angle(pts, ring_angle[ri]);
+        if (!deep_concave) {
+            // Convex/gently-concave: the original absolute-angle anchor (byte-stable).
+            anchor_to_angle(pts, ring_angle[ri]);
+        } else if (ri == 0) {
+            // Deep notch: the angle->point map is discontinuous (a small seam step can
+            // teleport the anchor across the notch BETWEEN LAYERS, chording through
+            // air). Anchor ring 0 by ARC FRACTION instead - position along the ring's
+            // own perimeter from a stable origin (the x-extremal vertex; an extreme
+            // point is always on the convex hull, so it moves continuously as the part
+            // tapers). Arc position is continuous in the seam angle for ANY shape.
+            size_t origin = 0;
+            for (size_t k = 1; k < pts.size(); ++k)
+                if (pts[k].x() > pts[origin].x() ||
+                    (pts[k].x() == pts[origin].x() && pts[k].y() > pts[origin].y()))
+                    origin = k;
+            auto frac_of = [&](size_t layer) -> double {
+                const double theta = double(layer) * seam_step_rad
+                                   + seam_jitter_rad * seam_jitter_walk(layer);
+                double f = std::fmod(theta, 2.0 * M_PI) / (2.0 * M_PI);
+                return f < 0.0 ? f + 1.0 : f;
+            };
+            auto idx_of = [&](double frac) -> size_t {
+                return (origin + size_t(std::llround(frac * double(N)))) % N;
+            };
+            // GAP SKIP: as the seam precesses across a slit / finger gap, the raw
+            // inter-layer join (previous layer's anchor -> this layer's anchor) would
+            // chord the gap through air. Advance this layer's start until the join
+            // segment stays in material, so the seam JUMPS past the gap in one layer
+            // instead of dragging through it. The previous anchor is recomputed with
+            // the same rule (one level of lookback - the seam angle is a pure function
+            // of layer index, so this stays deterministic and layer-local).
+            auto adjusted_idx = [&](size_t prev_idx, size_t raw_idx) -> size_t {
+                size_t idx = raw_idx;
+                for (size_t step = 0; step < N; ++step) {
+                    if (region->contains(Line(pts[prev_idx], pts[idx])))
+                        return idx;
+                    idx = (idx + 1) % N;
+                }
+                return raw_idx;   // nothing contained (degenerate) - keep raw
+            };
+            size_t start = idx_of(frac_of(layer_index));
+            if (layer_index > 0) {
+                size_t prev = idx_of(frac_of(layer_index - 1));
+                if (layer_index > 1)
+                    prev = adjusted_idx(idx_of(frac_of(layer_index - 2)), prev);
+                start = adjusted_idx(prev, start);
+            }
+            if (start > 0)
+                std::rotate(pts.begin(), pts.begin() + start, pts.end());
+        } else {
+            // Deep notch, inner rings: COUPLE each ring to the previous ring's anchor
+            // positionally (nearest point is radially adjacent - rings are one bead
+            // apart everywhere), then advance by the ring twist as an arc offset. This
+            // keeps the inward connector spiral of the angle-anchored design without
+            // re-introducing the discontinuous angle map (whose independent per-ring
+            // anchors caused the gear/spiral regressions in the first experiment).
+            const Point &prev_anchor = grid[ri - 1].front();
+            size_t bestk = 0; double bd = std::numeric_limits<double>::max();
+            for (size_t k = 0; k < pts.size(); ++k) {
+                const double d = (pts[k] - prev_anchor).cast<double>().squaredNorm();
+                if (d < bd) { bd = d; bestk = k; }
+            }
+            long s = (long(bestk) + twist_pts) % long(N);
+            if (s < 0) s += long(N);
+            if (s > 0)
+                std::rotate(pts.begin(), pts.begin() + s, pts.end());
+        }
         grid.push_back(std::move(pts));
     }
 
@@ -302,6 +390,39 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
     };
     auto flag = [&](bool is_internal) { if (internal) internal->push_back(is_internal ? char(1) : char(0)); };
     auto zoff = [&](coord_t z) { if (z_off) z_off->push_back(z); };
+    auto fmul = [&](float m) { if (fill_mul) fill_mul->push_back(m); };
+
+    // Wrap-window fill (seam-valley compensation, ANNULAR chains). The arc-length ramp
+    // spans the whole tour, so each ring climbs only its share of one layer height per
+    // revolution. Between consecutive layers this leaves, once per wrap at each ring's
+    // own start meridian, a slot (1 + share)*h tall instead of h - the bead there is
+    // systematically underfilled by its ring's ramp share. On the surfaces this prints
+    // as the helical seam valley; on buried rings it is a stack of aligned micro-voids
+    // through the wall (a weak line). Compensate exactly: the points laid within the
+    // first seam-step of arc after each ring's start (the ones under the tall slot) get
+    // flow * (1 + share_r). Derived, not tuned - and zero when the tour has no ramp
+    // discontinuity to heal (single ring).
+    std::vector<double> ring_share(n_rings, 0.0);
+    size_t wrap_pts = 0;
+    if (has_bore && n_rings > 1) {
+        double total_len = 0.0;
+        std::vector<double> len(n_rings, 0.0);
+        for (size_t ri = 0; ri < n_rings; ++ri) {
+            const std::vector<Point> &c = grid[ri];
+            for (size_t k = 0; k < c.size(); ++k)
+                len[ri] += (c[(k + 1) % c.size()] - c[k]).cast<double>().norm();
+            total_len += len[ri];
+        }
+        if (total_len > 0.0)
+            for (size_t ri = 0; ri < n_rings; ++ri)
+                ring_share[ri] = len[ri] / total_len;
+        // Points within the first seam-step of arc; at least 2 because the emitter keys
+        // a segment's flow on its SECOND point - a window must cover at least one full
+        // segment past the ring start to deposit anything (a zero/tiny step still heals
+        // the point-like discontinuity at the join itself).
+        const double step = std::max(seam_step_rad, 0.0);
+        wrap_pts = std::max<size_t>(2, size_t(std::llround(double(N) * step / (2.0 * M_PI))));
+    }
 
     // Brick interlock: nudge buried wall rings up/down in Z so radially-adjacent beads
     // stop sharing a Z level (a continuous horizontal interface is the wall's weak plane).
@@ -318,8 +439,8 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
     };
 
     if (grid.size() == 1) {
-        for (size_t k = 0; k < N; ++k) { spiral.points.push_back(grid[0][k]); flag(false); zoff(0); }
-        spiral.points.push_back(grid[0][0]); flag(false); zoff(0);
+        for (size_t k = 0; k < N; ++k) { spiral.points.push_back(grid[0][k]); flag(false); zoff(0); fmul(1.f); }
+        spiral.points.push_back(grid[0][0]); flag(false); zoff(0); fmul(1.f);
         return spiral;
     }
 
@@ -392,7 +513,12 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
                     std::rotate(c.begin(), c.begin() + bestk, c.end());
             }
         }
-        for (size_t k = 0; k < N; ++k) { spiral.points.push_back(c[k]); flag(internal_ring); zoff(zo); }
+        for (size_t k = 0; k < N; ++k) {
+            spiral.points.push_back(c[k]);
+            flag(internal_ring);
+            zoff(zo);
+            fmul(k < wrap_pts ? float(1.0 + ring_share[idx]) : 1.f);
+        }
     }
 
     return spiral;
@@ -448,6 +574,73 @@ bool march_bands(ExPolygon band, coord_t spacing, bool has_hole,
     return true;
 }
 
+// ---- Multi-bore partition (task #4 prototype, gated on CS_MULTIBORE) -----------------------
+// march_bands models a SINGLE-hole annular wall; a cross-section with >1 hole trips its
+// holes.size()!=1 guard and degrades to the medial-axis fallback (which smears fill across the
+// bores). Split such a section into one single-bore cell per hole by a Voronoi partition of the
+// hole centroids: each cell is the region closer to its own hole than to any other, so it holds
+// exactly one bore and marches as an ordinary annulus. The cut lines are the perpendicular
+// bisectors between hole centroids - they depend only on the hole positions, which drift smoothly
+// up the part, so the partition is stable layer-to-layer (no per-frame flicker).
+
+// Sutherland-Hodgman clip of `poly` to the halfplane of points at least as close to `keep` as to
+// `other` (i.e. the `keep` side of the two sites' perpendicular bisector).
+static Polygon clip_to_halfplane(const Polygon &poly, const Point &keep, const Point &other)
+{
+    if (poly.points.size() < 3)
+        return Polygon{};
+    const Vec2d  n   = (other - keep).cast<double>();        // bisector normal, away from `keep`
+    const Vec2d  mid = 0.5 * (keep + other).cast<double>();
+    const double c   = n.dot(mid);                           // halfplane: n.x <= c is closer to keep
+    Polygon out;
+    const size_t m = poly.points.size();
+    for (size_t i = 0; i < m; ++i) {
+        const Vec2d a = poly.points[i].cast<double>();
+        const Vec2d b = poly.points[(i + 1) % m].cast<double>();
+        const double da = n.dot(a) - c, db = n.dot(b) - c;
+        const bool ai = da <= 0.0, bi = db <= 0.0;
+        if (ai)
+            out.points.emplace_back(coord_t(std::lround(a.x())), coord_t(std::lround(a.y())));
+        if (ai != bi) {                                      // edge crosses the bisector: add cut point
+            const double t = da / (da - db);
+            const Vec2d  x = a + t * (b - a);
+            out.points.emplace_back(coord_t(std::lround(x.x())), coord_t(std::lround(x.y())));
+        }
+    }
+    return out;
+}
+
+// Partition a multi-hole seed into single-bore cells. Any cell that still carries >1 hole (two
+// bores so close they share a Voronoi cell) is recursed on until each piece holds one bore.
+static void partition_bores(const ExPolygon &seed, ExPolygons &out, int depth = 0)
+{
+    if (seed.holes.size() <= 1 || depth > 6) {               // already single-bore (or give up)
+        out.push_back(seed);
+        return;
+    }
+    std::vector<Point> sites;
+    sites.reserve(seed.holes.size());
+    for (const Polygon &h : seed.holes)
+        sites.push_back(h.centroid());
+
+    const BoundingBox bb  = seed.contour.bounding_box();
+    const coord_t     pad = scale_(5.0);
+    const Point mn(bb.min.x() - pad, bb.min.y() - pad), mx(bb.max.x() + pad, bb.max.y() + pad);
+    Polygon box;
+    box.points = { mn, Point(mx.x(), mn.y()), mx, Point(mn.x(), mx.y()) };
+
+    for (size_t i = 0; i < sites.size(); ++i) {
+        Polygon cell = box;
+        for (size_t j = 0; j < sites.size() && cell.points.size() >= 3; ++j)
+            if (j != i)
+                cell = clip_to_halfplane(cell, sites[i], sites[j]);
+        if (cell.points.size() < 3)
+            continue;
+        for (ExPolygon &piece : intersection_ex(seed, Polygons{ cell }))
+            partition_bores(piece, out, depth + 1);          // a piece may still hold >1 bore
+    }
+}
+
 // One connected piece of a (possibly split) cross-section: its concentric loops in
 // radial order (outer contours outer->medial, then, if annular, hole contours
 // medial->bore) plus whether that piece is annular (so spiralize_rings knows its
@@ -479,10 +672,63 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
     std::vector<std::vector<ExPolygon>> chains;
     size_t point_count = 0;
 
+    // Multi-bore partition is ON by default (a multi-hole section otherwise degrades to the
+    // medial fallback, which smears fill across the bores). CS_NO_MULTIBORE opts out for A/B.
+    const bool multibore = std::getenv("CS_NO_MULTIBORE") == nullptr;
+    // A single-bore seed whose wall PINCHES and splits mid-march (sharp teeth, an eccentric keyed
+    // bore, a herringbone base) fragments into an outer full-thickness band + a separately-marched
+    // interior, with the tooth tips pinched off as their own tiny SOLID fragments. Each annular
+    // fragment then holds only PART of the wall (the outer band keeps the outermost AND the
+    // innermost/bore ring, the middle stranded elsewhere), so its loop list has a radial GAP that
+    // the Fermat interleave chords straight across - two full-width surface->bore beads per layer
+    // that pile onto the seam and bulge the exposed face (the gear top-face artifact). Since the
+    // piece has exactly ONE bore, ALL its annular fragments are radially-nested pieces of that one
+    // wall: merge them into one chain (concatenate every band, sort outer->in by |contour area|) so
+    // the converter's outer-run/bore-run grouping yields a contiguous monotone stack again - what an
+    // unsplit march would emit. Solid fragments (pinched-off tooth tips) stay their own chains. An
+    // unsplit piece has one annular fragment already sorted outer->in, so this is byte-identical
+    // there. Applied to a plain seed AND to each single-bore Voronoi cell of a multi-bore section.
+    auto march_and_merge = [&](const ExPolygon &piece, bool single_bore) -> bool {
+        std::vector<std::vector<ExPolygon>> frags;
+        if (!march_bands(piece, spacing, !piece.holes.empty(), frags, point_count))
+            return false;
+        if (single_bore) {
+            std::vector<ExPolygon> annular_bands;
+            for (std::vector<ExPolygon> &frag : frags) {
+                if (!frag.empty() && frag.front().holes.size() == 1)
+                    for (ExPolygon &b : frag) annular_bands.push_back(std::move(b));
+                else
+                    chains.push_back(std::move(frag));      // solid pinched-off piece: keep as-is
+            }
+            if (annular_bands.size() > 1)
+                std::sort(annular_bands.begin(), annular_bands.end(),
+                          [](const ExPolygon &a, const ExPolygon &b) {
+                              return std::abs(a.contour.area()) > std::abs(b.contour.area());
+                          });
+            if (!annular_bands.empty())
+                chains.push_back(std::move(annular_bands));
+        } else {
+            for (std::vector<ExPolygon> &frag : frags)
+                chains.push_back(std::move(frag));
+        }
+        return true;
+    };
+
     ExPolygons current = offset_ex(ExPolygons{ region }, -float(width) / 2.f);
-    for (const ExPolygon &seed : current)
-        if (!march_bands(seed, spacing, !seed.holes.empty(), chains, point_count))
+    for (const ExPolygon &seed : current) {
+        if (multibore && seed.holes.size() > 1) {
+            // Split a multi-hole cross-section into single-bore Voronoi cells, then march each
+            // as an ordinary annulus (keeps every bore hollow instead of the medial fallback).
+            ExPolygons cells;
+            partition_bores(seed, cells);
+            for (const ExPolygon &cell : cells)
+                if (!march_and_merge(cell, cell.holes.size() == 1))
+                    return {};
+            continue;
+        }
+        if (!march_and_merge(seed, seed.holes.size() == 1))
             return {};
+    }
 
     std::vector<ContourChain> out;
 
@@ -901,6 +1147,30 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         return false;
     }
 
+    // Debug region dump (CS_DUMP_REGION=<path>): append each layer's merged contour so
+    // divergences between unit-test polygons and real sliced contours can be replayed
+    // exactly (GUI-subsystem builds cannot print to a console - HANDOFF file-logger rule).
+    if (const char *dump = std::getenv("CS_DUMP_REGION")) {
+        static std::mutex dump_mutex;
+        std::lock_guard<std::mutex> lock(dump_mutex);
+        if (FILE *f = std::fopen(dump, "a")) {
+            std::fprintf(f, "L %zu W %.4f H %.4f S %lld R %d F %d C %zu", layer_index,
+                         double(flow.width()), double(flow.height()),
+                         (long long) flow.scaled_spacing(), int(reverse_path), int(force_solid),
+                         merged.front().contour.points.size());
+            for (const Point &p : merged.front().contour.points)
+                std::fprintf(f, " %lld %lld", (long long) p.x(), (long long) p.y());
+            std::fprintf(f, " H %zu", merged.front().holes.size());
+            for (const Polygon &hole : merged.front().holes) {
+                std::fprintf(f, " %zu", hole.points.size());
+                for (const Point &p : hole.points)
+                    std::fprintf(f, " %lld %lld", (long long) p.x(), (long long) p.y());
+            }
+            std::fprintf(f, "\n");
+            std::fclose(f);
+        }
+    }
+
     // A solid cap/shell with a rectilinear-family surface pattern (top surface pattern): fill the
     // interior with a connected serpentine rotated 45/-45 per layer (cross-hatch inter-layer interlock,
     // clean surface) instead of concentric rings. SOLID (no-bore) planes only; on a split or annular
@@ -971,12 +1241,35 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     const double connector_spread = (config != nullptr) ? config->continuous_shell_connector_spread.value / 100.0 : 0.0;
     const double coast_pct        = (config != nullptr) ? config->continuous_shell_seam_coast.value : 0.0;
 
+    // DEEP-concavity gate (computed once per cross-section): a point of the noise-
+    // simplified contour lying deeper inside the convex hull than two bead widths.
+    // Round/convex parts stay miles under the threshold and keep the byte-stable
+    // absolute-angle anchors; notched parts (gear teeth, slit collars, combs, spiral
+    // bands, dogbones) switch to arc-fraction anchoring with gap-skipping joins,
+    // un-reversed closed tours, and rail-routed connectors.
+    bool deep_concave = false;
+    {
+        Polygons simplified = merged.front().contour.simplify(0.25 * double(flow.scaled_spacing()));
+        if (!simplified.empty() && simplified.front().points.size() >= 4) {
+            const Polygon &sc = simplified.front();
+            const Polygon hull = Geometry::convex_hull(sc.points);
+            const double  threshold = 2.0 * double(flow.scaled_spacing());
+            const Lines   hull_edges = hull.lines();
+            for (const Point &p : sc.points) {
+                double d = std::numeric_limits<double>::max();
+                for (const Line &e : hull_edges)
+                    d = std::min(d, e.distance_to(p));
+                if (d > threshold) { deep_concave = true; break; }
+            }
+        }
+    }
+
     // Fill each connected piece (chain) as its own Fermat spiral, then stitch the pieces
     // together greedily - each next piece is appended at whichever end lands nearest the
     // running tail - so a split cross-section's pieces are joined by the shortest hop
     // (along the wall) instead of long chords across the bore. A simple cross-section has
     // exactly one chain, so this is identical to a single spiral there.
-    struct Sub { Polyline pl; std::vector<char> flags; std::vector<coord_t> zoff; };
+    struct Sub { Polyline pl; std::vector<char> flags; std::vector<coord_t> zoff; std::vector<float> fill; };
     std::vector<Sub> subs;
     // Per-layer reversal exists to give SINGLE-chain solid layers short inter-layer
     // joins (core end meets core start). A stitched MULTI-chain tour instead closes
@@ -984,16 +1277,23 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     // ends at the (precessing) outer anchor - and reversing would break exactly that
     // pairing: odd layers would START at the buried inner ring while the previous
     // layer ended at the outer anchor, chording across any concave notch between.
-    const bool reverse_chains = chains.size() > 1 ? false : reverse_path;
+    // DEEP-CONCAVE solids get the same treatment as multi-chain (no reversal + tour
+    // closure below): reversal makes odd layers start at the buried core, where the
+    // arc-anchor gap-skipping cannot protect the inter-layer join (observed as slit
+    // hops on the clamp-collar shape).
+    const bool closed_tour     = chains.size() > 1 || deep_concave;
+    const bool reverse_chains  = closed_tour ? false : reverse_path;
     for (const ContourChain &chain : chains) {
         std::vector<char> flags;
         std::vector<coord_t> zoff;
+        std::vector<float> fill;
         Polyline sub = spiralize_rings(chain.loops, reverse_chains, seam_step_rad, seam_jitter_rad,
                                        ring_spacing, layer_index, chain.has_bore, &flags, interlock_amp, &zoff,
                                        connector_spread, chain.woven_infill ? woven.shell_loops : 0,
-                                       &merged.front());
-        if (sub.points.size() >= 2 && sub.points.size() == flags.size() && sub.points.size() == zoff.size())
-            subs.push_back({ std::move(sub), std::move(flags), std::move(zoff) });
+                                       &merged.front(), &fill, deep_concave);
+        if (sub.points.size() >= 2 && sub.points.size() == flags.size() && sub.points.size() == zoff.size() &&
+            sub.points.size() == fill.size())
+            subs.push_back({ std::move(sub), std::move(flags), std::move(zoff), std::move(fill) });
     }
     if (subs.empty()) {
         if (reason != nullptr)
@@ -1005,15 +1305,18 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     std::vector<char> internal;
     std::vector<char> connector;        // 1 on inter-chain connector points (thinned flow)
     std::vector<coord_t> interlock_z;   // per-point Z offset (brick interlock), parallel to spiral.points
+    std::vector<float> wrap_fill;       // seam-valley compensation multiplier per point
     auto append_sub = [&](Sub &s, bool rev) {
         if (rev) {
             std::reverse(s.pl.points.begin(), s.pl.points.end());
             std::reverse(s.flags.begin(), s.flags.end());
             std::reverse(s.zoff.begin(), s.zoff.end());
+            std::reverse(s.fill.begin(), s.fill.end());
         }
         spiral.points.insert(spiral.points.end(), s.pl.points.begin(), s.pl.points.end());
         internal.insert(internal.end(), s.flags.begin(), s.flags.end());
         interlock_z.insert(interlock_z.end(), s.zoff.begin(), s.zoff.end());
+        wrap_fill.insert(wrap_fill.end(), s.fill.begin(), s.fill.end());
         connector.insert(connector.end(), s.pl.points.size(), char(0));
     };
 
@@ -1025,7 +1328,7 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     // bead inside the wall, along the wall (through the waist), and back in. Rails
     // sit at 1.5 bead-widths so the connector rides on buried beads, not the surface.
     Polygons rails;
-    if (subs.size() > 1 && !merged.empty()) {
+    if ((subs.size() > 1 || closed_tour) && !merged.empty()) {
         // Densify the rails (Clipper offsets keep only corner vertices): the connector
         // enters/leaves at the NEAREST VERTEX, and with corner-only rails that approach
         // segment can cut across a nearby notch corner. At ~1 mm spacing the nearest
@@ -1045,14 +1348,21 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     }
     auto route_connector = [&](const Point &from, const Point &to) -> Polyline {
         const bool dbg = std::getenv("CS_DEBUG_ROUTE") != nullptr;
-        if ((to - from).cast<double>().norm() <= 2.0 * ring_spacing)
+        const double hop = (to - from).cast<double>().norm();
+        if (hop <= 2.0 * ring_spacing)
             return {};                                    // short local hop: leave straight
         Polyline direct;
         direct.points = { from, to };
-        if (merged.front().contains(direct)) {
-            if (dbg) std::printf("ROUTE (%.2f,%.2f)->(%.2f,%.2f): contained, straight\n",
+        // A straight hop that stays in material is only harmless while it is SHORT. A LONG
+        // contained hop - the multi-bore inter-cell join - lays a bead straight across the
+        // already-filled interior, overlapping the cell fills into a raised ridge. Route long
+        // contained hops along a rail too, so the connector rides on buried beads / hugs a
+        // bore rail (near the shared cell edge) instead of ridging across the surface fill.
+        const bool long_hop = hop > scale_(4.0);
+        if (merged.front().contains(direct) && !long_hop) {
+            if (dbg) std::printf("ROUTE (%.2f,%.2f)->(%.2f,%.2f): contained+short, straight\n",
                                  from.x() / 1e6, from.y() / 1e6, to.x() / 1e6, to.y() / 1e6);
-            return {};                                    // straight hop stays in material
+            return {};                                    // short straight hop stays in material
         }
         if (rails.empty()) {
             if (dbg) std::printf("ROUTE (%.2f,%.2f)->(%.2f,%.2f): NO RAILS\n",
@@ -1077,9 +1387,34 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         }
         if (best_sum >= 1e300 || ia == ib)
             return {};
-        // Walk the shorter arc ia -> ib along the rail.
         const Points &pts = rails[best_rail].points;
         const size_t n = pts.size();
+        // The APPROACH segments (from -> rail entry, rail exit -> to) must also stay
+        // in material: entering at the blindly-nearest vertex can clip a notch corner
+        // obliquely. Slide the entry/exit along the rail (nearest first, expanding)
+        // until the approach segment is contained; rails are dense (~1mm), so a few
+        // steps suffice. Falls back to the nearest vertex if nothing within reach
+        // is contained (degenerate slivers) - still no worse than before.
+        auto contained_approach = [&](const Point &p, size_t k) {
+            Polyline seg; seg.points = { p, pts[k] };
+            return merged.front().contains(seg);
+        };
+        auto slide_to_contained = [&](const Point &p, size_t k0) -> size_t {
+            if (contained_approach(p, k0)) return k0;
+            for (size_t off = 1; off <= std::min<size_t>(n / 2, 64); ++off) {
+                const size_t kf = (k0 + off) % n, kb = (k0 + n - off) % n;
+                if (contained_approach(p, kf)) return kf;
+                if (contained_approach(p, kb)) return kb;
+            }
+            return k0;
+        };
+        ia = slide_to_contained(from, ia);
+        ib = slide_to_contained(to, ib);
+        if (ia == ib) {
+            Polyline arc; arc.points = { pts[ia] };
+            return arc;
+        }
+        // Walk the shorter arc ia -> ib along the rail.
         double fwd = 0., bwd = 0.;
         for (size_t k = ia; k != ib; k = (k + 1) % n) fwd += (pts[(k + 1) % n] - pts[k]).cast<double>().norm();
         for (size_t k = ia; k != ib; k = (k + n - 1) % n) bwd += (pts[(k + n - 1) % n] - pts[k]).cast<double>().norm();
@@ -1091,43 +1426,60 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         return arc;
     };
 
-    std::vector<char> used(subs.size(), 0);
-    append_sub(subs[0], false);   // start on the outermost chain (layer starts at a surface)
-    used[0] = 1;
-    for (size_t n = 1; n < subs.size(); ++n) {
-        const Point tail = spiral.points.back();
-        size_t best = 0; bool best_rev = false; double best_d = std::numeric_limits<double>::max();
-        for (size_t i = 0; i < subs.size(); ++i) {
-            if (used[i]) continue;
-            const double ds = (subs[i].pl.points.front() - tail).cast<double>().squaredNorm();
-            const double de = (subs[i].pl.points.back()  - tail).cast<double>().squaredNorm();
-            if (ds < best_d) { best_d = ds; best = i; best_rev = false; }
-            if (de < best_d) { best_d = de; best = i; best_rev = true; }
+    // Visit the sub-chains in a nearest-neighbour order on their CENTROIDS so consecutive
+    // cells are spatial NEIGHBOURS (short inter-cell hops). The old per-step greedy on nearest
+    // ENDPOINT could strand a far cell for last -> a long chord clear across a multi-bore part
+    // (observed: a 26 mm jump on the 7-bore carrier). A single-chain part has one sub, so this
+    // is identical to a plain spiral there.
+    std::vector<Vec2d> cen(subs.size(), Vec2d(0.0, 0.0));
+    for (size_t i = 0; i < subs.size(); ++i) {
+        for (const Point &p : subs[i].pl.points) cen[i] += p.cast<double>();
+        cen[i] /= double(std::max<size_t>(1, subs[i].pl.points.size()));
+    }
+    std::vector<size_t> order; order.reserve(subs.size());
+    std::vector<char> visited(subs.size(), 0);
+    order.push_back(0); visited[0] = 1;             // start on the first (outer) chain
+    for (size_t k = 1; k < subs.size(); ++k) {
+        size_t best = 0; double bd = std::numeric_limits<double>::max();
+        for (size_t j = 0; j < subs.size(); ++j) {
+            if (visited[j]) continue;
+            const double d = (cen[j] - cen[order.back()]).squaredNorm();
+            if (d < bd) { bd = d; best = j; }
         }
-        const Point head = best_rev ? subs[best].pl.points.back() : subs[best].pl.points.front();
+        order.push_back(best); visited[best] = 1;
+    }
+    append_sub(subs[order[0]], false);
+    for (size_t oi = 1; oi < order.size(); ++oi) {
+        const size_t i = order[oi];
+        const Point tail = spiral.points.back();
+        const double ds = (subs[i].pl.points.front() - tail).cast<double>().squaredNorm();
+        const double de = (subs[i].pl.points.back()  - tail).cast<double>().squaredNorm();
+        const bool rev = de < ds;                    // enter at whichever end lands nearer the tail
+        const Point head = rev ? subs[i].pl.points.back() : subs[i].pl.points.front();
         const Polyline arc = route_connector(tail, head);
         if (std::getenv("CS_DEBUG_ROUTE") != nullptr)
             std::printf("STITCH tail(%.2f,%.2f) -> head(%.2f,%.2f) rev=%d arc=%zu\n",
                         tail.x() / 1e6, tail.y() / 1e6, head.x() / 1e6, head.y() / 1e6,
-                        int(best_rev), arc.points.size());
+                        int(rev), arc.points.size());
         for (const Point &rp : arc.points) {
             spiral.points.push_back(rp);
             internal.push_back(1);          // rails are buried by construction
             interlock_z.push_back(0);
+            wrap_fill.push_back(1.f);
             connector.push_back(1);
         }
         const size_t head_idx = spiral.points.size();
-        append_sub(subs[best], best_rev);
+        append_sub(subs[i], rev);
         if (head_idx < connector.size())
             connector[head_idx] = 1;        // thin the final hop segment onto the chain head
-        used[best] = 1;
     }
-    if (subs.size() > 1 && spiral.points.size() >= 2) {
-        // Close the stitched tour back to its start. Single-chain layers keep their
-        // inter-LAYER join short via reverse_path parity, but a stitched tour ends
-        // deep inside its last lobe - with travels stripped, the NEXT layer's first
-        // extrusion would then chord across the notch through air. Returning to the
-        // (seam-anchored) start point makes the layer join a short surface hop again.
+    if (closed_tour && spiral.points.size() >= 2) {
+        // Close the tour back to its start. Convex single-chain layers keep their
+        // inter-LAYER join short via reverse_path parity, but a stitched multi-chain
+        // tour (or a deep-concave solid, which prints un-reversed) ends deep inside
+        // its last lobe / at its buried core - with travels stripped, the NEXT layer's
+        // first extrusion would then chord across the notch through air. Returning to
+        // the (gap-skipped) start point makes the layer join a short surface hop again.
         const Point tail = spiral.points.back();
         const Point head = spiral.points.front();
         // NOTE: the arc must be materialized - ranging over `route_connector(...).points`
@@ -1137,11 +1489,13 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
             spiral.points.push_back(rp);
             internal.push_back(1);
             interlock_z.push_back(0);
+            wrap_fill.push_back(1.f);
             connector.push_back(1);
         }
         spiral.points.push_back(head);
         internal.push_back(1);
         interlock_z.push_back(0);
+        wrap_fill.push_back(1.f);
         connector.push_back(1);
     }
     if (spiral.points.size() < 2) {
@@ -1150,11 +1504,12 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         return false;
     }
 
-    // Per-point flow multiplier combining two independent effects, both default 1.0 (off):
-    //  * internal over-extrusion densifies provably-buried beads to close voids, and
-    //  * seam coast (A3) thins the flow across the surface<->interior handoffs (the seam
-    //    crossings) so the material deposited at the surface there is reduced, softening the
-    //    once-per-layer seam groove.
+    // Per-point flow multiplier combining three effects:
+    //  * internal over-extrusion densifies provably-buried beads (knob, default off),
+    //  * wrap-window seam-valley fill compensates the once-per-wrap tall slot each ring's
+    //    ramp share creates at its start meridian (derived from geometry, always on), and
+    //  * seam pressure trim thins both sides of the layer join to fight the bulge
+    //    (seam_coast knob, symmetric pre+post-join de-pressurization, default off).
     // Each point keeps its brick-interlock Z offset (interlock_z); apply_continuous_z later
     // ADDS the arc-length ramp on top, so smooth spiral + radial stagger compose into one bead.
     const bool   have_interlock = (interlock_z.size() == spiral.points.size());
@@ -1212,27 +1567,55 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         if (v_buried > 1e-9)
             over_mult = std::min(1.0 + budget / v_buried, 1.5); // safety: never more than +50% on a single bead
     }
-    const double coast_mult     = 1.0 - std::clamp(coast_pct, 0.0, 95.0) / 100.0;
-
     std::vector<double> fmul(spiral.points.size(), 1.0);
-    if (have_flags) {
-        if (over_pct > 0.0)
-            for (size_t i = 0; i < fmul.size(); ++i)
-                if (internal[i] && !connector[i]) fmul[i] *= over_mult;
-        if (coast_pct > 0.0) {
-            // Thin a small window around every surface<->interior transition (the seam crossing).
-            constexpr size_t win = 2;
-            std::vector<char> at_seam(fmul.size(), 0);
-            for (size_t i = 0; i + 1 < internal.size(); ++i)
-                if (internal[i] != internal[i + 1]) {
-                    const size_t lo = (i >= win) ? i - win : 0;
-                    const size_t hi = std::min(fmul.size() - 1, i + 1 + win);
-                    for (size_t j = lo; j <= hi; ++j) at_seam[j] = 1;
-                }
-            for (size_t i = 0; i < fmul.size(); ++i)
-                if (at_seam[i]) fmul[i] *= coast_mult;
+    if (have_flags && over_pct > 0.0)
+        for (size_t i = 0; i < fmul.size(); ++i)
+            if (internal[i] && !connector[i]) fmul[i] *= over_mult;
+
+    // Wrap-window seam-valley fill (derived, on by default): points under the
+    // once-per-wrap tall slot get their ring's ramp-share of extra flow. See
+    // spiralize_rings. CS_WRAP_FILL=<percent> scales the dose for print A/B tests
+    // (0 disables, 100 = full derived dose) - print evidence 2026-07-16: full dose
+    // is a lateral move on seam appearance (wider band, no ridge, slight valley
+    // remains), kept for its buried-void-closing strength rationale pending the
+    // strength-sweep verdict.
+    double fill_scale = 1.0;
+    if (const char *fs = std::getenv("CS_WRAP_FILL"))
+        fill_scale = std::max(0.0, std::atof(fs) / 100.0);
+    if (wrap_fill.size() == fmul.size())
+        for (size_t i = 0; i < fmul.size(); ++i)
+            fmul[i] *= 1.0 + (double(wrap_fill[i]) - 1.0) * fill_scale;
+
+    // Seam pressure-transient trim (seam_coast). SYMMETRIC (2026-07-18): the physical
+    // seam bulge is melt oozing at the layer-join corner. Reducing flow AFTER the join
+    // (the original post-join trim) only lowered the region's baseline, not the bulge
+    // PEAK - the ooze comes from pressure stored on APPROACH, which firmware pressure
+    // advance does not cancel on these z-contoured moves. So trim BOTH sides of the
+    // join with the same exponential decay: the PRE-join half (backward from the tour
+    // end) de-pressurizes the nozzle before the corner so there is less to ooze; the
+    // POST-join half (forward from the tour start) trims whatever still surges out. The
+    // tour end and start are the two sides of the once-per-layer join. coast% = trim
+    // depth at the join; decays over ~16mm; 0 = off (default).
+    if (coast_pct > 0.0 && fmul.size() >= 2) {
+        const double c0  = std::clamp(coast_pct, 0.0, 95.0) / 100.0;
+        const double tau = scale_(5.0);            // decay length ~5mm -> dead by ~16mm
+        double s = 0.0;                            // POST-join: forward from tour start
+        for (size_t i = 1; i < fmul.size(); ++i) {
+            s += (spiral.points[i] - spiral.points[i - 1]).cast<double>().norm();
+            if (s > 4.0 * tau) break;
+            fmul[i] *= 1.0 - c0 * std::exp(-s / tau);
+        }
+        s = 0.0;                                   // PRE-join: backward from tour end
+        for (size_t i = fmul.size() - 1; i > 0; --i) {
+            s += (spiral.points[i] - spiral.points[i - 1]).cast<double>().norm();
+            if (s > 4.0 * tau) break;
+            fmul[i] *= 1.0 - c0 * std::exp(-s / tau);
         }
     }
+    // Quantize to 2% steps so the run-length path emitter below produces a handful of
+    // sub-paths per layer instead of one per point along the smooth trim/fill ramps.
+    for (double &m : fmul)
+        m = std::round(m * 50.0) / 50.0;
     // Inter-chain connectors ride along already-printed buried beads (the rail one
     // bead inside the wall), so they deposit at half flow: enough to stay fused and
     // continuous, without double-filling the wall they travel over.
@@ -1268,6 +1651,21 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
             for (size_t i = 0; i < p3.points.size(); ++i)
                 p3.points[i].z() = interlock_z[i];
         path.paths.emplace_back(make_path(p3, flow, layer_height));
+    }
+
+    // Debug output dump (CS_DUMP_PATH=<path>): the final planned polyline, for
+    // bisecting artifacts between the path builder and the gcode pipeline.
+    if (const char *dump = std::getenv("CS_DUMP_PATH")) {
+        static std::mutex dump_mutex;
+        std::lock_guard<std::mutex> lock(dump_mutex);
+        if (FILE *f = std::fopen(dump, "a")) {
+            std::fprintf(f, "L %zu", layer_index);
+            for (const ExtrusionPath &ep : path.paths)
+                for (const Point3 &p : ep.polyline.points)
+                    std::fprintf(f, " %lld %lld", (long long) p.x(), (long long) p.y());
+            std::fprintf(f, "\n");
+            std::fclose(f);
+        }
     }
 
     entities.clear();

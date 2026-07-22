@@ -6067,10 +6067,10 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Continuous shell seam coast");
     def->category = L("Strength");
     // xgettext:no-c-format, no-boost-format
-    def->tooltip = L("Thins the extrusion flow across the surface-to-interior handoff (the seam crossing) so the "
-                     "material deposited at the surface there is reduced, softening the residual seam groove. 0% "
-                     "keeps full flow; higher values remove more flow at the crossing. Very high values can "
-                     "under-fill the crossing, so raise it gradually.");
+    def->tooltip = L("Thins the extrusion flow right after the layer join, decaying smoothly over the next "
+                     "~15 mm of travel, to cancel the pressure surge that otherwise prints as a bulge trailing "
+                     "the seam. The percentage is the trim depth at the join itself. 0% is off; start around "
+                     "10-20% and raise gradually - too much under-fills the join region.");
     def->sidetext = L("%");
     def->min = 0;
     def->max = 95;

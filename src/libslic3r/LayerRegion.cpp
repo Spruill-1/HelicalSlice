@@ -27,18 +27,30 @@ namespace Slic3r {
 // direction `dir` (+1 up = top shell, -1 down = bottom shell) over the footprint `here`: either the
 // model ends (an exposed face) or a hole/step leaves part of `here` uncovered by a neighbour slice.
 // A small area threshold ignores slicing noise so only genuine surfaces force solid fill.
-static bool cs_air_within(const Layer *layer, int dir, int n, const ExPolygons &here)
+static bool cs_air_within(const Layer *layer, int dir, int n, const ExPolygons &here, coord_t bead)
 {
+    (void) here;
+    // Is `layer` within `n` layers of a genuine exposed top/bottom face (so it must be a solid
+    // shell layer rather than sparse infill)? Check the face BETWEEN CONSECUTIVE layers as we walk
+    // outward: a real horizontal top/bottom surface at layer l is l's area not covered by its
+    // neighbour, and it is BROAD. A steep non-vertical wall (a herringbone gear's helical tooth
+    // flanks) also leaves each layer slightly uncovered by the next, but only as a THIN sliver ~one
+    // bead wide. Comparing consecutive layers (not `here` to a distant layer) keeps that sliver at
+    // ONE layer's lateral shift - it does not accumulate over the span - and eroding by ~half a bead
+    // removes it, while a true top face survives. Without this a twisting wall reads as "air above"
+    // on every layer and forces the whole part 100% solid, defeating sparse infill.
     const Layer *l = layer;
     for (int k = 0; k < n; ++k) {
-        l = (dir > 0) ? l->upper_layer : l->lower_layer;
-        if (l == nullptr)
-            return true;                                   // ran off the top/bottom of the part -> open face
-        double uncovered_mm2 = 0.0;
-        for (const ExPolygon &e : diff_ex(here, l->lslices))
-            uncovered_mm2 += e.area() * SCALING_FACTOR * SCALING_FACTOR;
-        if (uncovered_mm2 > 0.5)                            // > 0.5 mm^2 uncovered -> a real top/bottom surface
+        const Layer *nb = (dir > 0) ? l->upper_layer : l->lower_layer;
+        if (nb == nullptr)
+            return true;                                   // l is the top/bottom layer -> full open face within n
+        ExPolygons face = offset_ex(diff_ex(l->lslices, nb->lslices), -0.5f * float(bead));
+        double face_mm2 = 0.0;
+        for (const ExPolygon &e : face)
+            face_mm2 += e.area() * SCALING_FACTOR * SCALING_FACTOR;
+        if (face_mm2 > 0.5)                                // > 0.5 mm^2 broad exposed face -> real top/bottom surface
             return true;
+        l = nb;
     }
     return false;
 }
@@ -202,8 +214,9 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         if (region_config.continuous_shell_infill_density.value > 0) {
             const int tsl = region_config.top_shell_layers.value;
             const int bsl = region_config.bottom_shell_layers.value;
-            force_solid = (tsl > 0 && cs_air_within(this->layer(), +1, tsl, merged_slice))
-                       || (bsl > 0 && cs_air_within(this->layer(), -1, bsl, merged_slice));
+            const coord_t bead = this->flow(frExternalPerimeter).scaled_width();
+            force_solid = (tsl > 0 && cs_air_within(this->layer(), +1, tsl, merged_slice, bead))
+                       || (bsl > 0 && cs_air_within(this->layer(), -1, bsl, merged_slice, bead));
         }
         if (ContinuousShellPathBuilder::build_cross_section(
                 slices.surfaces, this->flow(frExternalPerimeter), this->layer()->height, &region_config,

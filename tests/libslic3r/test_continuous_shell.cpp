@@ -3,6 +3,8 @@
 #include "libslic3r/ContinuousShell.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/BoundingBox.hpp"
+#include "data_cs_gear_layer.hpp"
 
 #include <cmath>
 #include <limits>
@@ -75,7 +77,9 @@ TEST_CASE("Continuous shell routes split-chain connectors through material (dogb
                  {15000000, 8000000}, {5000000, 8000000}, {5000000, 2000000},
                  {-5000000, 2000000}, {-5000000, 8000000}, {-15000000, 8000000} };
     Surfaces surfaces{ Surface(stInternal, ExPolygon(dog)) };
-    Flow flow(0.5f, 0.25f, 0.5f);
+    // Flow matched to the real 0.4mm-nozzle slicing profile: band/chain topology is
+    // flow-dependent, and a nicer round flow hid the residual chord family entirely.
+    Flow flow(0.42f, 0.2f, 0.4f);
 
     // The notches, shrunk 1mm on each side so boundary-hugging wall beads don't count.
     auto in_notch = [](const Point &p) {
@@ -356,10 +360,13 @@ TEST_CASE("Continuous shell over-extrusion is capped to the residual void (no su
     const double v_on  = measure(100.0, m100);  // fill 100% of the residual void
 
     REQUIRE(v_off > 0.0);
-    REQUIRE(m0 > 0.999);  REQUIRE(m0 < 1.001);        // 0% -> every bead at nominal flow
+    // 0% over-extrusion: beads at nominal flow EXCEPT the always-on wrap-window seam
+    // fill, which adds each ring's ramp share (bounded well below one extra bead) to
+    // the few points at the ring's start meridian.
+    REQUIRE(m0 > 0.999);  REQUIRE(m0 < 1.5);
     REQUIRE(v_on >= v_off - 1e-9);                    // over-extrusion only ever ADDS material
     REQUIRE(v_on <= std::max(v_off, v_model) * 1.02); // and never past the solid model volume -> no bulge
-    REQUIRE(m100 <= 1.5 + 1e-6);                      // per-bead safety cap respected
+    REQUIRE(m100 <= 1.5 * 1.35 + 1e-6);               // per-bead cap x possible wrap fill share
 }
 
 TEST_CASE("Continuous shell interlock staggers buried rings within a bounded Z envelope", "[ContinuousShell]") {
@@ -541,9 +548,12 @@ TEST_CASE("Continuous shell connector spread is a no-op on a solid cross-section
     }
 }
 
-TEST_CASE("Continuous shell seam coast thins flow at the surface handoff (A3)", "[ContinuousShell]") {
-    // seam_coast thins the extrusion across the surface<->interior handoffs to soften the
-    // seam groove, while leaving the surface and interior beads at full flow.
+TEST_CASE("Continuous shell wrap-window fill boosts flow at each ring's start meridian", "[ContinuousShell]") {
+    // The arc-length ramp leaves a once-per-wrap tall slot at each ring's start (the ring
+    // climbs only its share of a layer per revolution), so the points laid within the
+    // first seam-step after a ring's start carry flow * (1 + ring_share). Verify on an
+    // annulus: some sub-paths get a boost bounded by the per-ring share, positioned at
+    // the START of the tour (the outer ring's window is the bead's first sub-path).
     Surface annulus(
         stInternal,
         ExPolygon(
@@ -553,26 +563,69 @@ TEST_CASE("Continuous shell seam coast thins flow at the surface handoff (A3)", 
     Flow flow(0.5f, 0.25f, 0.5f);
     const double base = flow.mm3_per_mm();
 
-    auto flow_extremes = [&](double coast_pct) {
+    PrintRegionConfig cfg;
+    cfg.continuous_shell_seam_step.value = 400;   // wide window -> several boosted points
+    ExtrusionEntityCollection e; std::string reason;
+    REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.25, &cfg, e, &reason, false, 3));
+    auto *mp = dynamic_cast<ExtrusionMultiPath *>(e.entities.front());
+    REQUIRE(mp != nullptr);
+    REQUIRE(mp->paths.size() >= 2);
+    // The tour starts inside the outer ring's wrap window -> boosted first sub-path.
+    REQUIRE(mp->paths.front().mm3_per_mm > base * 1.02);
+    // Boost magnitude is the ring share: strictly less than a full extra bead.
+    double mx = 0.0, mn = std::numeric_limits<double>::max();
+    size_t boosted = 0;
+    for (auto &p : mp->paths) {
+        mx = std::max(mx, p.mm3_per_mm);
+        mn = std::min(mn, p.mm3_per_mm);
+        if (p.mm3_per_mm > base * 1.02) ++boosted;
+    }
+    REQUIRE(mx < base * 1.6);
+    REQUIRE(mn > base * 0.999);           // fill only ADDS; nothing is thinned
+    REQUIRE(boosted >= 2);                // several rings' windows are present
+}
+
+TEST_CASE("Continuous shell seam coast trims both sides of the join, decaying with travel", "[ContinuousShell]") {
+    // Symmetric seam_coast (pre + post-join pressure trim): thins the bead approaching
+    // AND leaving the layer join (the two ends of the tour), decaying exponentially over
+    // ~15mm of travel each; beads far from BOTH ends stay at full flow.
+    Surface annulus(
+        stInternal,
+        ExPolygon(
+            Polygon{{0, 0}, {8000000, 0}, {8000000, 8000000}, {0, 8000000}},
+            Polygon{{3000000, 3000000}, {3000000, 5000000}, {5000000, 5000000}, {5000000, 3000000}}));
+    Surfaces surfaces{ annulus };
+    Flow flow(0.5f, 0.25f, 0.5f);
+    const double base = flow.mm3_per_mm();
+
+    auto build_paths = [&](double coast_pct) {
         PrintRegionConfig cfg;
         cfg.continuous_shell_seam_coast.value = coast_pct;
+        cfg.continuous_shell_seam_step.value  = 0;   // isolate the trim from the wrap fill window
         ExtrusionEntityCollection e; std::string reason;
         REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.25, &cfg, e, &reason, false));
         auto *mp = dynamic_cast<ExtrusionMultiPath *>(e.entities.front());
         REQUIRE(mp != nullptr);
-        double mn = std::numeric_limits<double>::max(), mx = 0.0;
-        for (auto &p : mp->paths) { mn = std::min(mn, p.mm3_per_mm); mx = std::max(mx, p.mm3_per_mm); }
-        return std::make_pair(mn, mx);
+        return mp->paths;
     };
 
-    const auto off = flow_extremes(0.0);
-    REQUIRE(off.first  > base * 0.999);   // no coast -> uniform base flow everywhere
-    REQUIRE(off.second < base * 1.001);
+    const auto off = build_paths(0.0);
+    for (const auto &p : off) {
+        REQUIRE(p.mm3_per_mm > base * 0.999);        // trim off -> nothing thinned
+        REQUIRE(p.mm3_per_mm < base * 1.35);         // (wrap fill may add its bounded boost)
+    }
 
-    const auto on = flow_extremes(50.0);  // 50% coast
-    REQUIRE(on.second  > base * 0.999);   // surface + interior beads keep full flow
-    REQUIRE(on.second  < base * 1.001);
-    REQUIRE(on.first   < base * 0.6);     // the seam crossings are thinned to ~0.5x
+    const auto on = build_paths(40.0);
+    // Both ends (approaching and leaving the join) are thinned toward (1 - 40%).
+    double mn = std::numeric_limits<double>::max();
+    for (const auto &p : on) mn = std::min(mn, p.mm3_per_mm);
+    REQUIRE(mn < base * 0.75);
+    REQUIRE(mn > base * 0.55);
+    // The first AND last sub-paths (nearest the join on each side) are the trimmed ones.
+    REQUIRE(on.front().mm3_per_mm < base * 0.85);
+    REQUIRE(on.back().mm3_per_mm  < base * 0.85);
+    // The trim DECAYS: a middle sub-path (far from both ends) is back near full flow.
+    REQUIRE(on[on.size() / 2].mm3_per_mm > base * 0.95);
 }
 
 TEST_CASE("Continuous shell woven infill sparsifies the interior and weaves it in Z", "[ContinuousShell]") {
@@ -841,4 +894,227 @@ TEST_CASE("Continuous shell infill weave frequency sets the lobe count, amplitud
     const int fine = radial_reversals(200);   // 12 lobes
     REQUIRE(base > 4);                         // there IS a radial weave
     REQUIRE(fine * 3 > base * 4);              // a higher frequency = more lobes = more radial reversals (>1.33x)
+}
+
+TEST_CASE("Continuous shell keeps TWO bores hollow via Voronoi partition (multi-bore)", "[ContinuousShell]") {
+    // Task #4: a cross-section with >1 hole must not smear fill across the bores. march_bands models a
+    // single-hole annular wall, so a two-bore section is split into single-bore Voronoi cells (one per
+    // hole centroid), each marched as an ordinary annulus. 40x24mm block, two 8x8mm square bores at
+    // x=+-11: no bead may land inside, and no chord may cross, either bore void.
+    ExPolygon block;
+    block.contour = Polygon{ {-20000000,-12000000}, {20000000,-12000000},
+                             {20000000, 12000000}, {-20000000, 12000000} };            // CCW outer
+    block.holes.push_back(Polygon{ {-15000000,-4000000}, {-15000000, 4000000},
+                                   {-7000000, 4000000}, {-7000000,-4000000} });         // CW bore 1
+    block.holes.push_back(Polygon{ {7000000,-4000000}, {7000000, 4000000},
+                                   {15000000, 4000000}, {15000000,-4000000} });         // CW bore 2
+    REQUIRE(block.holes.size() == 2);
+
+    Surfaces surfaces{ Surface(stInternal, block) };
+    Flow flow(0.5f, 0.25f, 0.5f);
+    PrintRegionConfig cfg;
+    cfg.wall_loops.value = 2;
+    ExtrusionEntityCollection entities;
+    std::string reason;
+    const bool built = ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.25, &cfg, entities, &reason, false, 4);
+    INFO(reason);
+    REQUIRE(built);
+
+    // Each bore void, shrunk 1mm on all sides so legit beads hugging the bore wall don't count.
+    auto in_bore = [](const Point &p) {
+        auto inrect = [&](coord_t x0, coord_t x1, coord_t y0, coord_t y1) {
+            return p.x() > x0 && p.x() < x1 && p.y() > y0 && p.y() < y1; };
+        return inrect(-14000000, -8000000, -3000000, 3000000)   // bore 1 interior
+            || inrect( 8000000, 14000000, -3000000, 3000000);   // bore 2 interior
+    };
+    std::vector<ExtrusionPath *> paths;
+    for (ExtrusionEntity *e : entities.entities)
+        ContinuousShellPathBuilder::collect_paths(e, paths);
+    REQUIRE_FALSE(paths.empty());
+    size_t bore_pts = 0, bore_mids = 0, total = 0;
+    for (const ExtrusionPath *p : paths)
+        for (size_t i = 0; i < p->polyline.points.size(); ++i) {
+            const Point a(p->polyline.points[i].x(), p->polyline.points[i].y());
+            ++total;
+            if (in_bore(a)) ++bore_pts;
+            if (i > 0) {
+                const Point b(p->polyline.points[i - 1].x(), p->polyline.points[i - 1].y());
+                if (in_bore(Point((a + b) / 2))) ++bore_mids;
+            }
+        }
+    INFO("total points: " << total << " bore_pts: " << bore_pts << " bore_mids: " << bore_mids);
+    CHECK(total > 200);
+    REQUIRE(bore_pts == 0);     // no fill deposited inside either bore
+    REQUIRE(bore_mids == 0);    // no chord crosses either bore
+}
+
+// Build a gear-like annulus centred at (cx, cy): a SHARP-toothed (deep, flat-crested teeth) or
+// smooth outer ring around a keyed (round + rectangular keyway) or plain round bore. The sharp
+// teeth + keyed bore make the inward march PINCH and split - the topology that stranded the wall
+// into gap-carrying fragments and produced the full-width top-face chords.
+static ExPolygon make_gear_annulus(double root_r_mm, double tip_r_mm, int teeth,
+                                   double bore_r_mm, bool toothed, bool keyed,
+                                   coord_t cx = 8000000, coord_t cy = 8000000)
+{
+    const int n_outer = std::max(240, teeth * 16);
+    Points outer; outer.reserve(n_outer);
+    for (int i = 0; i < n_outer; ++i) {
+        const double t     = 2.0 * M_PI * double(i) / double(n_outer);
+        const double phase = std::fmod(double(teeth) * t, 2.0 * M_PI);   // 0..2pi within one tooth
+        // Flat-crested trapezoidal tooth: outer third of the tooth at tip radius, rest at root.
+        double r = root_r_mm;
+        if (toothed)
+            r = (phase > 2.0 && phase < 4.28) ? tip_r_mm : root_r_mm;    // ~raised crest, sharp flanks
+        outer.emplace_back(Point(cx + coord_t(std::llround(r * 1e6 * std::cos(t))),
+                                 cy + coord_t(std::llround(r * 1e6 * std::sin(t)))));
+    }
+    Points bore; const int n_bore = 96; bore.reserve(n_bore);
+    for (int i = 0; i < n_bore; ++i) {
+        const double t = 2.0 * M_PI * double(i) / double(n_bore);
+        double rx = bore_r_mm * std::cos(t), ry = bore_r_mm * std::sin(t);
+        if (keyed && std::cos(t) > 0.80)                                  // rectangular keyway notch on +x
+            rx = (bore_r_mm + 0.9) * std::cos(t);
+        bore.emplace_back(Point(cx + coord_t(std::llround(rx * 1e6)), cy + coord_t(std::llround(ry * 1e6))));
+    }
+    Polygon oc(outer); oc.make_counter_clockwise();
+    Polygon bc(bore);  bc.make_clockwise();          // hole winding per ExPolygon convention
+    return ExPolygon(oc, bc);
+}
+
+TEST_CASE("Continuous shell keyed toothed annulus has no full-width surface->bore chord", "[ContinuousShell]") {
+    // Regression for the gear top-face bulge (cs-surface-quality). On a sharp-toothed annulus with
+    // an eccentric keyed bore the inward march PINCHES and splits: tooth tips pinch off as solid
+    // fragments and the wall fragments into an outer band + a separately-marched interior. Each
+    // annular fragment then holds only part of the wall, so its loop list has a radial GAP that the
+    // Fermat interleave used to chord straight across - two full-width surface->bore beads per layer
+    // that pile onto the seam and bulge the exposed top face. contour_spiral now merges a single-
+    // bore seed's annular fragments back into one contiguous chain, so NO single extruding segment
+    // spans most of the wall. Uses the real print path: force_solid=false, default infill (0).
+    const coord_t cx = 8000000, cy = 8000000;
+    const Point center(cx, cy);
+    Flow flow(0.42f, 0.2f, 0.4f);
+    PrintRegionConfig cfg;                            // default continuous_shell_infill_density = 0 (as the model)
+
+    auto max_wall_chord = [&](bool toothed, bool keyed, size_t &count_out, double &worst_span_out) {
+        ExPolygon gear = make_gear_annulus(8.0, 8.9, 22, 3.6, toothed, keyed, cx, cy);
+        const double root_r = 8.0e6, bore_r = 3.6e6, wall = root_r - bore_r;
+        Surfaces surfaces{ Surface(stInternal, gear) };
+        size_t count = 0; double worst = 0.0;
+        for (size_t layer = 3; layer < 7; ++layer) {   // a few layers (seam precesses); worst-case over them
+            ExtrusionEntityCollection e; std::string reason;
+            REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.2, &cfg, e, &reason,
+                                                                   (layer & 1) != 0, layer, /*force_solid=*/false));
+            std::vector<ExtrusionPath *> paths;
+            for (ExtrusionEntity *ent : e.entities)
+                ContinuousShellPathBuilder::collect_paths(ent, paths);
+            REQUIRE_FALSE(paths.empty());
+            for (const ExtrusionPath *p : paths)
+                for (size_t i = 1; i < p->polyline.points.size(); ++i) {
+                    const Point a(p->polyline.points[i-1].x(), p->polyline.points[i-1].y());
+                    const Point b(p->polyline.points[i].x(),   p->polyline.points[i].y());
+                    const double span = std::abs((a - center).cast<double>().norm() - (b - center).cast<double>().norm());
+                    if (span > worst) worst = span;
+                    if (span > 0.6 * wall) ++count;     // a single seg crossing >60% of the wall
+                }
+        }
+        count_out = count; worst_span_out = worst / 1e6;
+        return worst / wall;
+    };
+
+    size_t round_chords = 0, keyed_chords = 0; double round_span = 0, keyed_span = 0;
+    const double round_frac = max_wall_chord(false, false, round_chords, round_span);
+    const double keyed_frac = max_wall_chord(true,  true,  keyed_chords, keyed_span);
+    WARN("SMOOTH round annulus:    full-width chords=" << round_chords << " worst radial span=" << round_span << "mm (" << round_frac << " of wall)");
+    WARN("SHARP keyed-bore gear:   full-width chords=" << keyed_chords << " worst radial span=" << keyed_span << "mm (" << keyed_frac << " of wall)");
+
+    // The fix target: neither topology may lay a single segment that crosses most of the wall.
+    CHECK(round_chords == 0u);
+    REQUIRE(keyed_chords == 0u);
+}
+
+// Replay a REAL sliced herringbone-gear cross-section (baked from CS_DUMP_REGION, Sun.stl layer 23,
+// the layer whose inward march pinches/splits). The synthetic gears above cannot reproduce this
+// topology - only the real contour does - so this is the definitive guard. The gear prints with
+// continuous_shell_infill_density defaulting to 0, so force_solid never fires and every layer takes
+// the plain concentric path. Pre-fix this laid two ~6.5mm full-width surface->bore chords onto the
+// seam (the top-face bulge); the annular-fragment merge in contour_spiral removes them.
+TEST_CASE("Continuous shell replays a real gear slice with no full-width wall chord", "[ContinuousShell]") {
+    const ExPolygon gear = cs_test_gear_layer();
+    REQUIRE(gear.holes.size() == 1);
+    const Point center = gear.contour.bounding_box().center();
+    double rc_min = 1e18, rh_max = 0;
+    for (const Point &p : gear.contour.points) rc_min = std::min(rc_min, (p - center).cast<double>().norm());
+    for (const Point &p : gear.holes.front().points) rh_max = std::max(rh_max, (p - center).cast<double>().norm());
+    const double wall = rc_min - rh_max;              // root-to-bore radial thickness
+    REQUIRE(wall > 3e6);                              // a genuinely thick wall (several beads)
+
+    Flow flow(0.42f, 0.2f, 0.4f);
+    PrintRegionConfig cfg;                            // default continuous_shell_infill_density = 0 (as the model)
+    cfg.continuous_shell_seam_coast.value = 90;
+    cfg.continuous_shell_seam_step.value  = 1600;
+
+    Surfaces surfaces{ Surface(stInternal, gear) };
+    size_t count = 0; double worst = 0.0;
+    for (size_t layer = 20; layer < 26; ++layer) {    // the seam precesses - check a span of layers
+        ExtrusionEntityCollection e; std::string reason;
+        REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.2, &cfg, e, &reason,
+                                                               (layer & 1) != 0, layer, /*force_solid=*/false));
+        std::vector<ExtrusionPath *> paths;
+        for (ExtrusionEntity *ent : e.entities) ContinuousShellPathBuilder::collect_paths(ent, paths);
+        REQUIRE_FALSE(paths.empty());
+        for (const ExtrusionPath *p : paths)
+            for (size_t i = 1; i < p->polyline.points.size(); ++i) {
+                const Point a(p->polyline.points[i-1].x(), p->polyline.points[i-1].y());
+                const Point b(p->polyline.points[i].x(),   p->polyline.points[i].y());
+                const double span = std::abs((a - center).cast<double>().norm() - (b - center).cast<double>().norm());
+                if (span > worst) worst = span;
+                if (span > 0.6 * wall) ++count;        // a single seg crossing >60% of the wall
+            }
+    }
+    WARN("real gear layer: full-width chords=" << count << " worst radial span=" << worst / 1e6 << "mm (wall " << wall / 1e6 << "mm)");
+    REQUIRE(count == 0u);
+}
+
+TEST_CASE("Continuous shell woven sparsifies the real (fragmented) gear wall", "[ContinuousShell]") {
+    // The merge that removes the top-face chords ALSO makes the eccentric gear wall sparsifiable:
+    // once the split fragments are stitched into one contiguous annular chain, the woven pass thins
+    // its interior (task #8 - previously a ~1% no-op because the fragmented wall never formed a thick
+    // concentric chain to thin). Guards that unlock: density 20% must cut the gear-wall bead length
+    // substantially vs solid, while keeping the bore hollow. (This drives build_cross_section directly
+    // with force_solid=false; the top/bottom-shell gating is cs_air_within's job, tested via slices.)
+    const ExPolygon gear = cs_test_gear_layer();
+    const Point center = gear.contour.bounding_box().center();
+    Surfaces surfaces{ Surface(stInternal, gear) };
+    Flow flow(0.42f, 0.2f, 0.4f);
+    auto measure = [&](int density, double &len_mm, double &bore_min_mm) {
+        PrintRegionConfig cfg;
+        cfg.continuous_shell_infill_density.value       = density;
+        cfg.continuous_shell_infill_weave.value         = 100;
+        cfg.continuous_shell_infill_weave_shift.value   = 30;
+        double L = 0.0, rmin = 1e18;
+        for (size_t layer = 20; layer < 26; ++layer) {
+            ExtrusionEntityCollection e; std::string reason;
+            REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.2, &cfg, e, &reason, (layer & 1) != 0, layer, false));
+            std::vector<ExtrusionPath *> paths;
+            for (ExtrusionEntity *ent : e.entities) ContinuousShellPathBuilder::collect_paths(ent, paths);
+            for (const ExtrusionPath *p : paths)
+                for (size_t i = 0; i < p->polyline.points.size(); ++i) {
+                    const Point a(p->polyline.points[i].x(), p->polyline.points[i].y());
+                    rmin = std::min(rmin, (a - center).cast<double>().norm());
+                    if (i > 0) {
+                        const Point b(p->polyline.points[i-1].x(), p->polyline.points[i-1].y());
+                        L += (a - b).cast<double>().norm();
+                    }
+                }
+        }
+        len_mm = L / 1e6; bore_min_mm = rmin / 1e6;
+    };
+    double solid_len = 0, woven_len = 0, solid_bore = 0, woven_bore = 0;
+    measure(0,  solid_len, solid_bore);
+    measure(20, woven_len, woven_bore);
+    WARN("gear wall (6 layers): solid=" << solid_len << "mm woven20=" << woven_len
+         << "mm saved=" << (100.0 * (1.0 - woven_len / solid_len)) << "%  bore_min solid=" << solid_bore
+         << " woven=" << woven_bore << "mm");
+    REQUIRE(woven_len < 0.75 * solid_len);        // woven thins the interior by well over the previous ~1% no-op
+    REQUIRE(woven_bore > solid_bore - 0.25);      // the weave stays as clear of the (eccentric keyed) bore as the solid fill
 }

@@ -22,9 +22,14 @@ public:
         m_reader.z() = (float)m_config.z_offset;
         m_reader.apply_config(m_config);
         m_previous_layer = NULL;
-        // Continuous shell paths need the same XY transition smoothing as
-        // spiral vase mode so changing contours do not create layer seams.
-        m_smooth_spiral = config.spiral_mode_smooth || continuous_shell_mode;
+        // Continuous-shell layers must NOT be XY-smoothed: their layer joins are
+        // already engineered by the whole-object per-point Z ramp (consecutive
+        // layers meet by construction), and blending every point toward the
+        // previous layer's path silently DISTORTS the planned geometry - it
+        // drags beads sideways into concave gaps (compounding layer over layer)
+        // and blunts the radial weave amplitude by up to the smoothing radius.
+        // Continuous shell uses this post-processor for travel-stripping only.
+        m_smooth_spiral = config.spiral_mode_smooth && !continuous_shell_mode;
         m_continuous_shell_mode = continuous_shell_mode;
     };
 
