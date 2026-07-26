@@ -2206,3 +2206,69 @@ TEST_CASE("Continuous shell woven infill knits on a SQUARE (arc-length + normal 
          << "mm; a knit closes toward one bead ~" << spacing_mm << "mm)");
     REQUIRE(best_gap < 2.0 * spacing_mm);          // rings knit to within ~2 beads (pre-fix they stayed a full stride apart)
 }
+
+TEST_CASE("Continuous shell solid multibore layer leaves no see-through coverage gap", "[ContinuousShell]") {
+    // Regression for the bottom-face pinholes (die-5 centre pip, odd-bore print): the concentric
+    // multibore fill undertiles at ring pinches and bore crescents, leaving uncovered wedges you
+    // can see through into the infill. The coverage-repair pass rasterizes what the tour laid and
+    // patches interior gaps; assert its invariant from the EMITTED paths - no uncovered interior
+    // island big enough to read as a hole - and that the clipped patches never enter a bore.
+    const Point c(10000000, 10000000);
+    auto circle = [&](double cx_mm, double cy_mm, double r_mm, int n) {
+        Polygon p;
+        for (int i = 0; i < n; ++i) {
+            const double a = 2.0 * M_PI * i / n;
+            p.points.emplace_back(c.x() + coord_t(std::llround(scale_(cx_mm + r_mm * std::cos(a)))),
+                                  c.y() + coord_t(std::llround(scale_(cy_mm + r_mm * std::sin(a)))));
+        }
+        return p;
+    };
+    // Disc R10 with a centre bore and two side bores leaving ~1mm pinch lanes - the layout
+    // that produced the visible gaps around the die-5 centre pip.
+    Polygon outer = circle(0, 0, 10.0, 96);  outer.make_counter_clockwise();
+    Polygon b0    = circle(0, 0, 1.5, 48);   b0.make_clockwise();
+    Polygon b1    = circle(-4.5, 0, 2.0, 48); b1.make_clockwise();
+    Polygon b2    = circle( 4.5, 0, 2.0, 48); b2.make_clockwise();
+    ExPolygon region(outer);
+    region.holes = { b0, b1, b2 };
+    Surfaces surfaces{ Surface(stInternal, region) };
+    Flow flow(0.5f, 0.25f, 0.5f);
+    PrintRegionConfig cfg;
+    cfg.wall_loops.value = 2;
+    const float w = float(flow.scaled_width());
+    const struct { double x, y, r; } bores[] = { {0, 0, 1.5}, {-4.5, 0, 2.0}, {4.5, 0, 2.0} };
+
+    for (size_t layer = 0; layer < 3; ++layer) {
+        ExtrusionEntityCollection e; std::string reason;
+        REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.25, &cfg, e, &reason,
+                                                               (layer & 1) != 0, layer, /*force_solid=*/true));
+        std::vector<ExtrusionPath *> paths;
+        for (ExtrusionEntity *ent : e.entities) ContinuousShellPathBuilder::collect_paths(ent, paths);
+        REQUIRE_FALSE(paths.empty());
+        Polylines laid;
+        size_t in_bore = 0;
+        for (const ExtrusionPath *p : paths) {
+            Polyline pl;
+            for (const auto &q : p->polyline.points) pl.points.emplace_back(q.x(), q.y());
+            if (pl.points.size() >= 2) laid.push_back(std::move(pl));
+            for (size_t i = 1; i < p->polyline.points.size(); ++i) {
+                const Point a(p->polyline.points[i-1].x(), p->polyline.points[i-1].y());
+                const Point b(p->polyline.points[i].x(),   p->polyline.points[i].y());
+                for (const Point &probe : { Point((a + b) / 2), b })
+                    for (const auto &bo : bores) {
+                        const Vec2d d = probe.cast<double>() - Vec2d(c.x() + scale_(bo.x), c.y() + scale_(bo.y));
+                        if (d.norm() < scale_(bo.r - 0.3)) ++in_bore;
+                    }
+            }
+        }
+        // Same rasterization the repair pass uses: bead footprint, opened to kill hairlines.
+        const Polygons cov = offset(laid, 0.55f * w);
+        ExPolygons uncovered = offset2_ex(diff_ex(ExPolygons{ region }, union_ex(cov)), -0.35f * w, 0.35f * w);
+        double worst = 0.0;
+        for (const ExPolygon &gap : uncovered) worst = std::max(worst, std::abs(gap.contour.area()));
+        WARN("L" << layer << ": uncovered islands=" << uncovered.size()
+             << " worst=" << worst * SCALING_FACTOR * SCALING_FACTOR << "mm^2 in_bore=" << in_bore);
+        REQUIRE(worst < scale_(1.2) * scale_(1.2));   // nothing left big enough to read as a pinhole
+        REQUIRE(in_bore == 0);                        // patches are clipped to the region - bores stay sacred
+    }
+}

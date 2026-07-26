@@ -3178,21 +3178,15 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         }
     }
 
-    // Lay the bridge patches (appended AFTER the sanctity pass: they deliberately cross the
-    // reintroduced cap holes, which the pass would otherwise strip). Each patch is a solid
-    // serpentine over the island grown ~one bead, so the line ends anchor on the material
-    // ringing the opening; the approach rides the rails at connector half-flow.
-    for (const ExPolygon &isl : bridge_islands) {
-        ExPolygons grown = offset_ex(ExPolygons{ isl }, 1.2f * float(flow.scaled_spacing()));
-        if (grown.size() != 1)
-            continue;
+    // Lay a serpentine patch over `shape` and stitch it into the tour: rails-routed
+    // approach at connector half-flow, then the patch at full flow. Shared by the bridge
+    // caps and the coverage-repair pass below. Returns false when serpentine_fill refuses
+    // the shape (concavity gate) so callers can retry at another angle.
+    auto lay_patch_shape = [&](const ExPolygon &shape, const Point &centre, double angle) -> bool {
         bool jo = false;
-        // Alternate the scan direction per layer so a stacked patch (a bore cap's shell
-        // stack) cross-hatches like any solid shell instead of laying parallel courses.
-        const double patch_angle = (layer_index % 2 != 0) ? M_PI / 4.0 : -M_PI / 4.0;
-        Polyline bp = serpentine_fill(grown.front(), flow.scaled_spacing(), patch_angle, isl.contour.centroid(), &jo);
+        Polyline bp = serpentine_fill(shape, flow.scaled_spacing(), angle, centre, &jo);
         if (bp.points.size() < 2)
-            continue;
+            return false;
         const Point tail = spiral.points.back();
         const Polyline arc = route_connector(tail, bp.points.front());
         for (const Point &rp : arc.points) {
@@ -3203,6 +3197,86 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
             spiral.points.push_back(bp.points[bi2]);
             internal.push_back(1); interlock_z.push_back(0); wrap_fill.push_back(1.f);
             connector.push_back(bi2 == 0 ? char(1) : char(0));   // thin only the hop onto the patch
+        }
+        return true;
+    };
+
+    // Lay the bridge patches (appended AFTER the sanctity pass: they deliberately cross the
+    // reintroduced cap holes, which the pass would otherwise strip). Each patch is a solid
+    // serpentine over the island grown ~one bead, so the line ends anchor on the material
+    // ringing the opening. Alternate the scan direction per layer so a stacked patch (a
+    // bore cap's shell stack) cross-hatches like any solid shell.
+    for (const ExPolygon &isl : bridge_islands) {
+        ExPolygons grown = offset_ex(ExPolygons{ isl }, 1.2f * float(flow.scaled_spacing()));
+        if (grown.size() != 1)
+            continue;
+        lay_patch_shape(grown.front(), isl.contour.centroid(),
+                        (layer_index % 2 != 0) ? M_PI / 4.0 : -M_PI / 4.0);
+    }
+
+    // COVERAGE REPAIR (solid layers). The concentric multibore fill UNDERTILES: Voronoi
+    // seam lanes, ring-pinch corners and bore crescents come out as see-through pinholes
+    // on the bottom faces (die-5 and odd-bore prints). This is the sanctity pass's dual:
+    // rasterize what the tour actually covers, find the interior gaps and patch each with
+    // a serpentine laid along its own principal axis (a narrow wedge fills as a few long
+    // strokes; if the concavity gate still refuses, retry across the axis). Unlike bridge
+    // patches the grown patch is CLIPPED to the region so a gap hugging a bore never bleeds
+    // strokes into the hole the tour so carefully avoided.
+    if (force_solid && spiral.points.size() >= 2) {
+        const float w = float(flow.scaled_width());
+        Polygons cov = offset(spiral, 0.55f * w);
+        ExPolygons uncovered = offset2_ex(diff_ex(merged, union_ex(cov)), -0.35f * w, 0.35f * w);
+        const double min_gap   = scale_(1.1) * scale_(1.1);   // ~1.2 mm^2: below this it never reads as a hole
+        const double min_piece = scale_(0.6) * scale_(0.6);
+        // principal axis of a gap = the serpentine direction (a narrow wedge fills as a
+        // few long strokes instead of many split rows)
+        auto pca_angle = [](const Polygon &poly) {
+            Vec2d mean(0., 0.);
+            for (const Point &p : poly.points) mean += p.cast<double>();
+            mean /= double(poly.points.size());
+            double sxx = 0., sxy = 0., syy = 0.;
+            for (const Point &p : poly.points) {
+                const Vec2d d = p.cast<double>() - mean;
+                sxx += d.x() * d.x(); sxy += d.x() * d.y(); syy += d.y() * d.y();
+            }
+            return 0.5 * std::atan2(2.0 * sxy, sxx - syy);
+        };
+        std::vector<std::pair<ExPolygon, int>> work;   // gap piece, split depth
+        for (const ExPolygon &gap : uncovered) {
+            if (std::abs(gap.contour.area()) < min_gap)
+                continue;
+            for (const ExPolygon &piece : intersection_ex(offset_ex(ExPolygons{ gap }, 0.6f * w), merged))
+                work.emplace_back(piece, 0);
+        }
+        while (!work.empty()) {
+            const ExPolygon piece = std::move(work.back().first);
+            const int       depth = work.back().second;
+            work.pop_back();
+            if (std::abs(piece.contour.area()) < min_piece)
+                continue;
+            const double angle = pca_angle(piece.contour);
+            if (lay_patch_shape(piece, piece.contour.centroid(), angle) ||
+                lay_patch_shape(piece, piece.contour.centroid(), angle + M_PI / 2.0))
+                continue;
+            // Both scan angles hit the concavity gate: a CURVED crescent (a banana around
+            // a bore) splits every row across its bay. Bisect across the principal axis -
+            // two shallower arcs the boustrophedon can take - and retry the halves.
+            if (depth >= 3)
+                continue;
+            const Vec2d  ctr = piece.contour.centroid().cast<double>();
+            const Vec2d  ax(std::cos(angle), std::sin(angle)), nrm(-ax.y(), ax.x());
+            const double B = 1.0e9;
+            auto half_rect = [&](double a0, double a1) {
+                Polygon r;
+                for (const auto &uv : { Vec2d(a0, -B), Vec2d(a1, -B), Vec2d(a1, B), Vec2d(a0, B) })
+                    r.points.push_back(Point(coord_t(std::llround(ctr.x() + uv.x() * ax.x() + uv.y() * nrm.x())),
+                                             coord_t(std::llround(ctr.y() + uv.x() * ax.y() + uv.y() * nrm.y()))));
+                return r;
+            };
+            for (const double side : { -1.0, 1.0 })
+                for (const ExPolygon &half : intersection_ex(ExPolygons{ piece },
+                                                             Polygons{ half_rect(side < 0 ? -B : 0.0, side < 0 ? 0.0 : B) }))
+                    work.emplace_back(half, depth + 1);
         }
     }
 

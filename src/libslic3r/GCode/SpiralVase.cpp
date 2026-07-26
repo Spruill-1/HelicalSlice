@@ -174,7 +174,15 @@ std::string SpiralVase::process_layer(const std::string &gcode, bool last_layer)
     // For absolute extruder distances it will be switched off.
     // Tapering the absolute extruder distances requires to process every extrusion value after the first transition
     // layer.
-    bool  transition_in = !m_continuous_shell_mode && m_transition_layer && m_config.use_relative_e_distances.value;
+    // The transition-in taper applies to continuous shell too: its first ramped layer sits
+    // on a PLANAR base, so the deposition gap grows linearly with arc length (0 -> layer
+    // height over the tour) exactly like a spiral vase transition. Without the taper the
+    // full-flow tour start (which is on the SKIN - the seam recipe anchors there) extrudes
+    // several times the gap's volume and smears outward over the rim: the "sharper elephant's
+    // foot" lip on the bottom edge. The arc-fraction factor is immune to the weave's Z-dips.
+    // Transition-out stays vase-only: a CS top is either a lattice (delid) or a solid cap
+    // whose finishing pass would need its own evaluation.
+    bool  transition_in = m_transition_layer && m_config.use_relative_e_distances.value;
     bool  transition_out = !m_continuous_shell_mode && last_layer && m_config.use_relative_e_distances.value;
 
     float starting_flowrate  = float(m_config.spiral_starting_flow_ratio.value);
