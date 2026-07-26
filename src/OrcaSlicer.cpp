@@ -6518,9 +6518,9 @@ int CLI::run(int argc, char **argv)
                 colors_out[color_idx] = ColorRGBA(float(rgb_color[0]) / 255.f, float(rgb_color[1]) / 255.f, float(rgb_color[2]) / 255.f, float(rgb_color[3]) / 255.f);
             }
 
-            int gl_major, gl_minor, gl_verbos;
-            glfwGetVersion(&gl_major, &gl_minor, &gl_verbos);
-            BOOST_LOG_TRIVIAL(info) << boost::format("opengl version %1%.%2%.%3%")%gl_major %gl_minor %gl_verbos;
+            int glfw_major, glfw_minor, glfw_rev;
+            glfwGetVersion(&glfw_major, &glfw_minor, &glfw_rev);
+            BOOST_LOG_TRIVIAL(info) << boost::format("glfw version %1%.%2%.%3%")%glfw_major %glfw_minor %glfw_rev;
 
             bool thumbnail_opengl_ready = false;
             glfwSetErrorCallback(glfw_callback);
@@ -6532,8 +6532,14 @@ int CLI::run(int argc, char **argv)
             }
             else {
                 BOOST_LOG_TRIVIAL(info) << "glfwInit Success."<< std::endl;
-                glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, gl_major);
-                glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, gl_minor);
+                // Request OpenGL 3.2 (the profile hints below require >= 3.2; drivers hand
+                // back their highest compatible context). This used to pass the GLFW LIBRARY
+                // version from glfwGetVersion() as the GL version - a coincidence that held
+                // while GLFW was 3.3 ("OpenGL 3.3" exists) and broke at GLFW 3.4 ("OpenGL
+                // 3.4" does not): glfwCreateWindow rejected it and every CLI export silently
+                // lost its plate thumbnails, which Bambu Connect refuses to load.
+                glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+                glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
                 glfwWindowHint(GLFW_RED_BITS, 8);
                 glfwWindowHint(GLFW_GREEN_BITS, 8);
                 glfwWindowHint(GLFW_BLUE_BITS, 8);
