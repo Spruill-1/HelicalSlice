@@ -218,9 +218,26 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
             force_solid = (tsl > 0 && cs_air_within(this->layer(), +1, tsl, merged_slice, bead))
                        || (bsl > 0 && cs_air_within(this->layer(), -1, bsl, merged_slice, bead));
         }
+        // Interior islands over AIR (a blind bore's cap): the part of this layer with nothing
+        // below it, restricted to FULLY-INTERIOR islands - rim overhang slivers (a twisted
+        // prism's per-layer facet shift) hug the contour and are excluded by the erosion test.
+        // The builder rings these openings and spans them with a bridge patch.
+        ExPolygons bridge_over;
+        if (this->layer()->lower_layer != nullptr) {
+            const coord_t bead = this->flow(frExternalPerimeter).scaled_width();
+            ExPolygons air = diff_ex(merged_slice, this->layer()->lower_layer->lslices);
+            if (!air.empty()) {
+                const ExPolygons eroded = offset_ex(merged_slice, -2.f * float(bead));
+                for (ExPolygon &isl : air)
+                    if (std::abs(isl.contour.area()) >= double(scale_(1.)) * double(scale_(1.)) &&
+                        diff_ex(ExPolygons{ isl }, eroded).empty())
+                        bridge_over.push_back(std::move(isl));
+            }
+        }
         if (ContinuousShellPathBuilder::build_cross_section(
                 slices.surfaces, this->flow(frExternalPerimeter), this->layer()->height, &region_config,
-                continuous_entities, &reason, (this->layer()->id() & 1u) != 0, size_t(this->layer()->id()), force_solid)) {
+                continuous_entities, &reason, (this->layer()->id() & 1u) != 0, size_t(this->layer()->id()), force_solid,
+                bridge_over.empty() ? nullptr : &bridge_over)) {
             this->perimeters.no_sort = false;
             this->perimeters.clear();
             // Perimeter consumers require each top-level item to be an

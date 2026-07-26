@@ -17,7 +17,13 @@ class ContinuousShellPathBuilder
 public:
     static bool build_cross_section(const Surfaces &surfaces, const Flow &flow, double layer_height, const PrintRegionConfig *config,
                                     ExtrusionEntityCollection &entities, std::string *reason = nullptr,
-                                    bool reverse_path = false, size_t layer_index = 0, bool force_solid = false);
+                                    bool reverse_path = false, size_t layer_index = 0, bool force_solid = false,
+                                    // Interior islands of this layer that sit over AIR (a blind bore's
+                                    // cap): reintroduced as holes for the ring march (the rings wrap
+                                    // them like the bore below) and spanned by a serpentine BRIDGE
+                                    // patch appended to the tour, so the next layer's rings close
+                                    // over taut lines instead of sagging into the opening.
+                                    const ExPolygons *bridge_over = nullptr);
 
     // Collect the leaf ExtrusionPaths of a continuous-shell entity tree in traversal
     // order. Used by the whole-object Z planner (PrintObject::continuous_shell_z) at

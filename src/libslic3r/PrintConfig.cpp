@@ -6125,6 +6125,112 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionPercent(30));
 
+    def = this->add("continuous_shell_cell_split", coBool);
+    def->label = L("Continuous shell concave cell split");
+    def->category = L("Strength");
+    def->tooltip = L("Pre-split deeply concave cross-sections into near-convex cells (cut at the deepest "
+                     "concavity, recursively) before filling. Each cell is filled as its own set of "
+                     "concentric rings joined into the one continuous bead, so the woven/bubble infill "
+                     "works on arbitrary outlines and concave shapes no longer pinch into stranded islands "
+                     "mid-fill. Shallow concavities (gear teeth, keyways) are never split. Can be "
+                     "overridden per object.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("continuous_shell_cell_size", coFloat);
+    def->label = L("Continuous shell cell size");
+    def->category = L("Strength");
+    def->tooltip = L("Target size (mm) of the virtual-site cells that multi-bore sections are partitioned "
+                     "into: material farther than this from every site gets its own compact cell. Larger "
+                     "values make fewer, bigger cells (more of them host the full sparse stride - lighter), "
+                     "smaller values make a finer, denser mosaic. 0 = automatic (4 sparse strides). Can be "
+                     "overridden per object.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    def = this->add("continuous_shell_adaptive_stride", coBool);
+    def->label = L("Continuous shell adaptive stride");
+    def->category = L("Strength");
+    def->tooltip = L("Let cells too small to host the configured sparse stride step down to the largest "
+                     "stride they can host (a tighter lattice, density between the configured value and "
+                     "100%) instead of printing fully solid. Disable to print such cells solid. Can be "
+                     "overridden per object.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(true));
+
+    def = this->add("continuous_shell_bubble", coBool);
+    def->label = L("Continuous shell bubble lattice");
+    def->category = L("Strength");
+    def->tooltip = L("Weave the sparse infill into a 3D bubble lattice: the ring waves are phase-locked "
+                     "layer to layer and slowly breathe with height, so the crest welds stack into "
+                     "vertical columns that alternate every half period - a checkerboard of ellipsoidal "
+                     "open cells. The print-proven continuous-shell recipe. Off = the flat per-layer "
+                     "kiss weave. Can be overridden per object.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("continuous_shell_bubble_height", coFloat);
+    def->label = L("Continuous shell bubble height");
+    def->category = L("Strength");
+    def->tooltip = L("Vertical size (mm) of one bubble cell (half the breathing period). 0 = automatic: "
+                     "sized from the sparse stride so cells come out near-round, keeping the crest "
+                     "migration under 3/4 of a bead per layer. Can be overridden per object.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->max = 50;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    def = this->add("continuous_shell_bubble_period", coInt);
+    def->label = L("Continuous shell bubble period");
+    def->category = L("Strength");
+    def->tooltip = L("Breathing period of the bubble lattice in LAYERS (overridden by bubble height when "
+                     "that is set). Values under 4 mean automatic. Can be overridden per object.");
+    def->sidetext = L("layers");
+    def->min = 0;
+    def->max = 999;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
+    def = this->add("continuous_shell_bubble_pitch", coFloat);
+    def->label = L("Continuous shell bubble cell pitch");
+    def->category = L("Strength");
+    def->tooltip = L("Target in-plane bubble cell size (mm) used by the dyadic hierarchy to pick each "
+                     "ring's lobe count. 0 = automatic (three sparse strides). Can be overridden per "
+                     "object.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->max = 50;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    def = this->add("continuous_shell_bore_obstacles", coBool);
+    def->label = L("Continuous shell bore obstacles");
+    def->category = L("Strength");
+    def->tooltip = L("Treat small bores as obstacles the sparse lattice swoops around instead of "
+                     "partitioning the section into per-bore cells: the infill is generated as if the "
+                     "part were solid - one uniform lattice with unbroken rings - and rerouted around "
+                     "each bore, which keeps a dedicated shell wall. Applies only when every bore is "
+                     "small (under about eight sparse strides across), clear of the outer walls, and "
+                     "the outline has no deep concavities; anything else uses the cell partition as "
+                     "before. Can be overridden per object.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("continuous_shell_infill_dyadic", coBool);
+    def->label = L("Continuous shell dyadic infill cells");
+    def->category = L("Strength");
+    def->tooltip = L("Scale the woven/bubble infill's cell count with each ring's perimeter (doubling in a "
+                     "power-of-2 hierarchy) so cells stay a near-constant size across the part instead of "
+                     "stretching with the outer rings. Outer rings' extra cells bond only within their own "
+                     "band; at each doubling boundary every inner-ring cell still welds to the ring outside "
+                     "it. Only applies when the weave is on. Can be overridden per object.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("spiral_starting_flow_ratio", coFloat);
     def->label = L("Spiral starting flow ratio");
     // xgettext:no-c-format, no-boost-format

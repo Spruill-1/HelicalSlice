@@ -710,8 +710,15 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
                     "continuous_shell_internal_overextrusion", "continuous_shell_interlock",
                     "continuous_shell_connector_spread", "continuous_shell_seam_coast",
                     "continuous_shell_infill_density", "continuous_shell_infill_weave",
-                    "continuous_shell_infill_weave_shift"})
+                    "continuous_shell_infill_weave_shift", "continuous_shell_bubble",
+                    "continuous_shell_cell_split", "continuous_shell_cell_size",
+                    "continuous_shell_adaptive_stride", "continuous_shell_bore_obstacles"})
         toggle_line(el, has_continuous_shell);
+    // The bubble sub-knobs only act in bubble mode (dyadic is a bubble-only hierarchy).
+    bool has_cs_bubble = has_continuous_shell && config->opt_bool("continuous_shell_bubble");
+    for (auto el : {"continuous_shell_bubble_height", "continuous_shell_bubble_period",
+                    "continuous_shell_bubble_pitch", "continuous_shell_infill_dyadic"})
+        toggle_line(el, has_cs_bubble);
     bool has_top_shell    = config->opt_int("top_shell_layers") > 0 || (has_spiral_vase && config->opt_int("bottom_shell_layers") > 1);
     bool has_bottom_shell = config->opt_int("bottom_shell_layers") > 0;
     bool has_solid_infill = has_top_shell || has_bottom_shell;

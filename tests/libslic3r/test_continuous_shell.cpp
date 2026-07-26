@@ -7,12 +7,29 @@
 #include "data_cs_gear_layer.hpp"
 
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 #include <algorithm>
 #include <vector>
 #include <array>
+#include <map>
 
 using namespace Slic3r;
+
+// Scoped env toggle for the CS_BUBBLE prototype knobs, so a failed REQUIRE can't leak
+// bubble mode into other tests in the same process.
+struct EnvFlag {
+    const char *name;
+    EnvFlag(const char *n, const char *v) : name(n) { set(v); }
+    ~EnvFlag() { set(nullptr); }
+    void set(const char *v) {
+#ifdef _WIN32
+        _putenv_s(name, v != nullptr ? v : "");
+#else
+        v != nullptr ? setenv(name, v, 1) : unsetenv(name);
+#endif
+    }
+};
 
 TEST_CASE("Continuous shell keeps a deep side bite (socket) hollow", "[ContinuousShell]") {
     // Regression for the side-socket fill-in (HANDOFF 11.2b): a circle with a deep
@@ -682,6 +699,380 @@ TEST_CASE("Continuous shell woven infill sparsifies the interior and weaves it i
     REQUIRE(woven.max_xy < 16.05);
 }
 
+TEST_CASE("Continuous shell adaptive stride sparsifies cells too small for the full stride", "[ContinuousShell]") {
+    // A compact solid piece (8mm square, ~9 rings) cannot host the configured density-20
+    // (stride-5) lattice - that needs >12 rings beyond the shells - and used to print fully
+    // SOLID under the small-cell rule (die-5 v7: the whole rim mosaic came out dense). With
+    // per-cell adaptive stride it steps DOWN to the largest stride it CAN host and still
+    // sparsifies; only truly tiny pieces stay dense. The 16mm square in the sibling test
+    // hosts the full stride, so this size is the discriminating case.
+    Surface small(stInternal, ExPolygon(Polygon{{0,0},{8000000,0},{8000000,8000000},{0,8000000}}));
+    Surfaces surfaces{ small };
+    Flow flow(0.5f, 0.25f, 0.5f);
+    auto xy_len = [&](int density, int weave) {
+        PrintRegionConfig cfg;
+        cfg.wall_loops.value = 2;
+        cfg.continuous_shell_infill_density.value = density;
+        cfg.continuous_shell_infill_weave.value   = weave;
+        ExtrusionEntityCollection e; std::string reason;
+        REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.25, &cfg, e, &reason, false, 3));
+        REQUIRE(e.entities.size() == 1);              // still one continuous bead
+        auto *mp = dynamic_cast<ExtrusionMultiPath *>(e.entities.front());
+        REQUIRE(mp != nullptr);
+        double xy = 0.0;
+        for (auto &p : mp->paths)
+            for (size_t i = 1; i < p.polyline.points.size(); ++i)
+                xy += (Point(p.polyline.points[i].x(), p.polyline.points[i].y()) -
+                       Point(p.polyline.points[i-1].x(), p.polyline.points[i-1].y())).cast<double>().norm();
+        return xy * SCALING_FACTOR;
+    };
+    const double solid_len  = xy_len(0,  0);
+    const double sparse_len = xy_len(20, 100);
+    REQUIRE(sparse_len < 0.85 * solid_len);           // stepped-down lattice, no longer solid
+    REQUIRE(sparse_len > 0.30 * solid_len);           // but a tighter lattice than full stride, not stripped bare
+
+    // With the knob OFF the cell reverts to the solid-small-cells rule (the die-5 v7
+    // behaviour): the interior prints dense, essentially the density-0 length.
+    {
+        PrintRegionConfig cfg;
+        cfg.wall_loops.value = 2;
+        cfg.continuous_shell_infill_density.value = 20;
+        cfg.continuous_shell_infill_weave.value   = 100;
+        cfg.continuous_shell_adaptive_stride.value = false;
+        ExtrusionEntityCollection e; std::string reason;
+        REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.25, &cfg, e, &reason, false, 3));
+        auto *mp = dynamic_cast<ExtrusionMultiPath *>(e.entities.front());
+        REQUIRE(mp != nullptr);
+        double xy = 0.0;
+        for (auto &p : mp->paths)
+            for (size_t i = 1; i < p.polyline.points.size(); ++i)
+                xy += (Point(p.polyline.points[i].x(), p.polyline.points[i].y()) -
+                       Point(p.polyline.points[i-1].x(), p.polyline.points[i-1].y())).cast<double>().norm();
+        REQUIRE(xy * SCALING_FACTOR > 0.9 * solid_len);
+    }
+}
+
+TEST_CASE("Continuous shell cell size knob reaches the virtual-site partition", "[ContinuousShell]") {
+    // continuous_shell_cell_size overrides the farthest-point sampling target. On a two-bore
+    // block a SMALL target seeds extra virtual cells between/around the bores while a target
+    // larger than every material gap adds none - the partitions, and hence the toolpaths, must
+    // genuinely differ. (Cell counts are not observable here, so path length is the proxy.)
+    ExPolygon block;
+    block.contour = Polygon{ {-20000000,-12000000}, {20000000,-12000000},
+                             {20000000, 12000000}, {-20000000, 12000000} };
+    block.holes.push_back(Polygon{ {-15000000,-4000000}, {-15000000, 4000000},
+                                   {-7000000, 4000000}, {-7000000,-4000000} });
+    block.holes.push_back(Polygon{ {7000000,-4000000}, {7000000, 4000000},
+                                   {15000000, 4000000}, {15000000,-4000000} });
+    Surfaces surfaces{ Surface(stInternal, block) };
+    Flow flow(0.42f, 0.2f, 0.4f);
+    EnvFlag bubble("CS_BUBBLE", "1");
+    auto xy_len = [&](double cell_size) {
+        PrintRegionConfig cfg;
+        cfg.wall_loops.value = 2;
+        cfg.continuous_shell_infill_density.value = 25;
+        cfg.continuous_shell_infill_weave.value   = 100;
+        cfg.continuous_shell_cell_split.value     = true;
+        cfg.continuous_shell_cell_size.value      = cell_size;
+        ExtrusionEntityCollection e; std::string reason;
+        REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.2, &cfg, e, &reason, false, 0));
+        std::vector<ExtrusionPath *> paths;
+        for (ExtrusionEntity *ent : e.entities)
+            ContinuousShellPathBuilder::collect_paths(ent, paths);
+        double xy = 0.0;
+        for (const ExtrusionPath *p : paths)
+            for (size_t i = 1; i < p->polyline.points.size(); ++i)
+                xy += (Point(p->polyline.points[i].x(), p->polyline.points[i].y()) -
+                       Point(p->polyline.points[i-1].x(), p->polyline.points[i-1].y())).cast<double>().norm();
+        return xy * SCALING_FACTOR;
+    };
+    const double fine   = xy_len(5.0);
+    const double coarse = xy_len(40.0);
+    INFO("fine(5mm)=" << fine << "mm coarse(40mm)=" << coarse << "mm");
+    REQUIRE(std::abs(fine - coarse) > 0.02 * std::max(fine, coarse));
+}
+
+TEST_CASE("Continuous shell bore obstacles swoop the lattice around small bores", "[ContinuousShell]") {
+    // bore_obstacles mode: a disc with two small bores fills like a SOLID puck - one global
+    // lattice - with the kept rings rerouted around each bore's keep-out and a dedicated shell
+    // annulus per bore. The bores must stay hollow (nothing inside, no chords across), and the
+    // fill must come out LIGHTER than the cell partition of the same disc (the whole point:
+    // no per-cell solid mosaics, one uniform lattice).
+    auto circle = [](double cx, double cy, double r, bool cw) {
+        Polygon p;
+        for (int i = 0; i < 72; ++i) {
+            const double a = 2.0 * M_PI * i / 72;
+            p.points.emplace_back(coord_t(std::llround(cx + r * std::cos(a))),
+                                  coord_t(std::llround(cy + r * std::sin(a))));
+        }
+        if (cw) p.reverse();
+        return p;
+    };
+    ExPolygon disc;
+    disc.contour = circle(0, 0, 16000000, false);
+    disc.holes.push_back(circle( 7000000, 0, 2500000, true));
+    disc.holes.push_back(circle(-7000000, 0, 2500000, true));
+    Surfaces surfaces{ Surface(stInternal, disc) };
+    Flow flow(0.42f, 0.2f, 0.4f);
+    EnvFlag bubble("CS_BUBBLE", "1");
+    auto slice = [&](bool obstacles, int density = 25, size_t layer = 0) {
+        PrintRegionConfig cfg;
+        cfg.wall_loops.value = 2;
+        cfg.continuous_shell_infill_density.value = density;
+        cfg.continuous_shell_infill_weave.value   = 100;
+        cfg.continuous_shell_cell_split.value     = true;
+        cfg.continuous_shell_bore_obstacles.value = obstacles;
+        ExtrusionEntityCollection e; std::string reason;
+        REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.2, &cfg, e, &reason, false, layer));
+        REQUIRE(e.entities.size() == 1);
+        std::vector<ExtrusionPath *> paths;
+        for (ExtrusionEntity *ent : e.entities)
+            ContinuousShellPathBuilder::collect_paths(ent, paths);
+        double xy = 0.0;
+        size_t bore_pts = 0, bore_mids = 0;
+        auto in_bore = [](const Point &q) {
+            auto inside = [&](double bx) {
+                const double dx = double(q.x()) - bx, dy = double(q.y());
+                return dx * dx + dy * dy < 2300000.0 * 2300000.0;
+            };
+            return inside(7000000.0) || inside(-7000000.0);
+        };
+        for (const ExtrusionPath *p : paths)
+            for (size_t i = 0; i < p->polyline.points.size(); ++i) {
+                const Point a(p->polyline.points[i].x(), p->polyline.points[i].y());
+                if (in_bore(a)) ++bore_pts;
+                if (i > 0) {
+                    const Point b(p->polyline.points[i - 1].x(), p->polyline.points[i - 1].y());
+                    xy += (a - b).cast<double>().norm();
+                    if (in_bore(Point((a + b) / 2))) {
+                        ++bore_mids;
+                        std::fprintf(stderr, "[chord] seg %zu of %zu mm3/mm=%.4f ctx:", i, p->polyline.points.size(), p->mm3_per_mm);
+                        for (size_t w2 = i >= 4 ? i - 4 : 0; w2 < std::min(p->polyline.points.size(), i + 4); ++w2)
+                            std::fprintf(stderr, " (%.2f,%.2f)", p->polyline.points[w2].x() / 1e6, p->polyline.points[w2].y() / 1e6);
+                        std::fprintf(stderr, "\n");
+                    }
+                }
+            }
+        INFO((obstacles ? "swoop" : "cells") << ": xy=" << xy * SCALING_FACTOR << "mm bore_pts=" << bore_pts);
+        REQUIRE(bore_pts == 0);
+        REQUIRE(bore_mids == 0);
+        return xy * SCALING_FACTOR;
+    };
+    const double swoop = slice(true);
+    const double cells = slice(false);
+    INFO("swoop=" << swoop << "mm cells=" << cells << "mm");
+    REQUIRE(swoop < 0.97 * cells);      // the uniform lattice must beat the cell mosaic on mass
+    REQUIRE(swoop > 0.30 * cells);      // sanity: the interior didn't silently vanish
+
+    // BORE SANCTITY across layers and modes: connector/stitch geometry precesses with the
+    // seam per layer, so a single layer can pass while another chords a bore (every die-5
+    // PRINT had two bore chords at ONE bottom-shell layer, from the classic solid path's
+    // inter-cell connectors - visible straight through the pips). slice() asserts
+    // bore_pts == bore_mids == 0 internally; sweeping layers exercises the fallbacks.
+    for (size_t layer : { 1, 2, 3, 4, 5 }) {
+        slice(true, 25, layer);         // swoop lattice layers
+        slice(false, 0, layer);         // classic SOLID (the bottom-shell path that chorded)
+    }
+}
+
+TEST_CASE("Continuous shell mixed mode swoops small bores beside an oversized one", "[ContinuousShell]") {
+    // One hole too big to swoop (a 10mm square - the counterbored disc's taper class) plus two
+    // small round bores. Pure cells (obstacles off) partitions around ALL of them and runs
+    // dense; mixed mode should partition only around the big hole and swoop the small ones,
+    // coming out LIGHTER, with every bore still hollow.
+    auto circle = [](double cx, double cy, double r, bool cw) {
+        Polygon p;
+        for (int i = 0; i < 72; ++i) {
+            const double a = 2.0 * M_PI * i / 72;
+            p.points.emplace_back(coord_t(std::llround(cx + r * std::cos(a))),
+                                  coord_t(std::llround(cy + r * std::sin(a))));
+        }
+        if (cw) p.reverse();
+        return p;
+    };
+    ExPolygon disc;
+    disc.contour = circle(0, 0, 16000000, false);
+    disc.holes.push_back(Polygon{ {-5000000, -5000000}, {-5000000, 5000000},
+                                  {5000000, 5000000}, {5000000, -5000000} });   // big: fails the size gate
+    disc.holes.push_back(circle( 10500000, 0, 2000000, true));
+    disc.holes.push_back(circle(-10500000, 0, 2000000, true));
+    Surfaces surfaces{ Surface(stInternal, disc) };
+    Flow flow(0.42f, 0.2f, 0.4f);
+    EnvFlag bubble("CS_BUBBLE", "1");
+    auto slice = [&](bool obstacles) {
+        PrintRegionConfig cfg;
+        cfg.wall_loops.value = 2;
+        cfg.continuous_shell_infill_density.value = 25;
+        cfg.continuous_shell_infill_weave.value   = 100;
+        cfg.continuous_shell_cell_split.value     = true;
+        cfg.continuous_shell_bore_obstacles.value = obstacles;
+        ExtrusionEntityCollection e; std::string reason;
+        REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.2, &cfg, e, &reason, false, 0));
+        std::vector<ExtrusionPath *> paths;
+        for (ExtrusionEntity *ent : e.entities)
+            ContinuousShellPathBuilder::collect_paths(ent, paths);
+        double xy = 0.0;
+        size_t bore_pts = 0, bore_mids = 0;
+        auto in_bore = [](const Point &q) {
+            auto inc = [&](double bx) {
+                const double dx = double(q.x()) - bx, dy = double(q.y());
+                return dx * dx + dy * dy < 1800000.0 * 1800000.0;
+            };
+            return inc(10500000.0) || inc(-10500000.0);
+        };
+        for (const ExtrusionPath *p : paths)
+            for (size_t i = 0; i < p->polyline.points.size(); ++i) {
+                const Point a(p->polyline.points[i].x(), p->polyline.points[i].y());
+                if (in_bore(a)) ++bore_pts;
+                if (i > 0) {
+                    const Point b(p->polyline.points[i - 1].x(), p->polyline.points[i - 1].y());
+                    xy += (a - b).cast<double>().norm();
+                    if (in_bore(Point((a + b) / 2))) ++bore_mids;
+                }
+            }
+        REQUIRE(bore_pts == 0);
+        REQUIRE(bore_mids == 0);
+        return xy * SCALING_FACTOR;
+    };
+    const double mixed = slice(true);
+    const double cells = slice(false);
+    INFO("mixed=" << mixed << "mm cells=" << cells << "mm");
+    REQUIRE(mixed < 0.97 * cells);      // swooping the small bores must save material
+    REQUIRE(mixed > 0.30 * cells);
+}
+
+TEST_CASE("Continuous shell bridges a blind bore cap instead of sagging rings over it", "[ContinuousShell]") {
+    // A solid cap layer whose region has NO hole but sits over an open bore below
+    // (bridge_over island): the builder must ring the opening (like the layer below did)
+    // and span it with a serpentine patch anchored on the surrounding material.
+    auto circle = [](double cx, double cy, double r) {
+        Polygon p;
+        for (int i = 0; i < 72; ++i) {
+            const double a = 2.0 * M_PI * i / 72;
+            p.points.emplace_back(coord_t(std::llround(cx + r * std::cos(a))),
+                                  coord_t(std::llround(cy + r * std::sin(a))));
+        }
+        return p;
+    };
+    ExPolygon disc;
+    disc.contour = circle(0, 0, 10000000);
+    Surfaces surfaces{ Surface(stInternal, disc) };
+    ExPolygons bridge_over{ ExPolygon(circle(0, 0, 3000000)) };
+    Flow flow(0.42f, 0.2f, 0.4f);
+    PrintRegionConfig cfg;
+    cfg.wall_loops.value = 2;
+    cfg.continuous_shell_infill_density.value = 25;
+    ExtrusionEntityCollection e; std::string reason;
+    REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.2, &cfg, e, &reason, false, 21,
+                                                            true /*force_solid*/, &bridge_over));
+    std::vector<ExtrusionPath *> paths;
+    for (ExtrusionEntity *ent : e.entities)
+        ContinuousShellPathBuilder::collect_paths(ent, paths);
+    double in_island = 0.0, ring_zone = 0.0;
+    for (const ExtrusionPath *p : paths)
+        for (size_t i = 1; i < p->polyline.points.size(); ++i) {
+            const Point a(p->polyline.points[i - 1].x(), p->polyline.points[i - 1].y());
+            const Point b(p->polyline.points[i].x(), p->polyline.points[i].y());
+            const Point m((a + b) / 2);
+            const double r = m.cast<double>().norm();
+            const double len = (b - a).cast<double>().norm() * SCALING_FACTOR;
+            if (r < 2800000.0) in_island += len;
+            else if (r < 3800000.0) ring_zone += len;
+        }
+    INFO("bridge len in island=" << in_island << "mm, ring zone=" << ring_zone << "mm");
+    REQUIRE(in_island > 40.0);          // the serpentine patch spans the opening
+    REQUIRE(ring_zone > 30.0);          // and rings wrap it (the cap does not just vanish)
+}
+
+TEST_CASE("Continuous shell refuses outlines that fragment at the bead scale", "[ContinuousShell]") {
+    // A fractal-like silhouette shatters the inward march into hundreds of chains whose
+    // rings overlap across fragments (Mandeltree: ~1.4x SOLID volume emitted as "sparse"
+    // fill). The pathology guard probes a 2- and 6-bead inward offset and refuses when the
+    // region fragments past any sane CS part. Model: a comb of 80 wide teeth on narrow
+    // necks - each tooth SURVIVES the probe offset as its own island (mere sub-bead teeth
+    // would vanish instead of fragmenting, hiding the pathology).
+    ExPolygon comb;
+    Points pts;
+    const coord_t base_top = 2000000, neck_top = 3000000, tooth_top = 8000000;
+    const coord_t pitch = 3000000, neck_hw = 300000, tooth_hw = 1000000;
+    pts.emplace_back(0, 0);
+    pts.emplace_back(0, base_top);
+    for (int t = 0; t < 80; ++t) {                   // tooth body on a sub-bead neck
+        const coord_t cx = t * pitch + pitch / 2;
+        pts.emplace_back(cx - neck_hw,  base_top);
+        pts.emplace_back(cx - neck_hw,  neck_top);
+        pts.emplace_back(cx - tooth_hw, neck_top);
+        pts.emplace_back(cx - tooth_hw, tooth_top);
+        pts.emplace_back(cx + tooth_hw, tooth_top);
+        pts.emplace_back(cx + tooth_hw, neck_top);
+        pts.emplace_back(cx + neck_hw,  neck_top);
+        pts.emplace_back(cx + neck_hw,  base_top);
+    }
+    pts.emplace_back(80 * pitch, base_top);
+    pts.emplace_back(80 * pitch, 0);
+    comb.contour = Polygon(pts);
+    Surfaces surfaces{ Surface(stInternal, comb) };
+    Flow flow(0.42f, 0.2f, 0.4f);
+    PrintRegionConfig cfg;
+    cfg.wall_loops.value = 2;
+    cfg.continuous_shell_infill_density.value = 25;
+    cfg.continuous_shell_infill_weave.value   = 100;
+    ExtrusionEntityCollection e; std::string reason;
+    REQUIRE_FALSE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.2, &cfg, e, &reason, false, 3));
+    REQUIRE_THAT(reason, Catch::Matchers::ContainsSubstring("fragments"));
+}
+
+TEST_CASE("Continuous shell point-tangent regions are refused or filled without air chords", "[ContinuousShell]") {
+    // Two circles sharing exactly ONE vertex (tangent cylinders: one xy contact point per
+    // layer). Depending on Clipper's union this is either TWO regions (must refuse: CS
+    // requires one connected cross-section) or ONE pinched region - then the fill must
+    // never chord through the air beside the tangent point: every extruding segment's
+    // midpoint must stay inside the (slightly grown) material.
+    auto circle_with_vertex_at = [](double cx, double r, double phase) {
+        Polygon p;
+        for (int i = 0; i < 72; ++i) {
+            const double a = phase + 2.0 * M_PI * i / 72;
+            p.points.emplace_back(coord_t(std::llround(cx + r * std::cos(a))),
+                                  coord_t(std::llround(r * std::sin(a))));
+        }
+        return p;
+    };
+    ExPolygon left, right;
+    left.contour  = circle_with_vertex_at(-8000000, 8000000, 0.0);      // vertex at (0,0)
+    right.contour = circle_with_vertex_at( 8000000, 8000000, M_PI);     // vertex at (0,0)
+    Surfaces surfaces{ Surface(stInternal, left), Surface(stInternal, right) };
+    Flow flow(0.42f, 0.2f, 0.4f);
+    PrintRegionConfig cfg;
+    cfg.wall_loops.value = 2;
+    cfg.continuous_shell_infill_density.value = 25;
+    cfg.continuous_shell_infill_weave.value   = 100;
+    ExtrusionEntityCollection e; std::string reason;
+    const bool built = ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.2, &cfg, e, &reason, false, 3);
+    if (!built) {
+        SUCCEED("refused: " << reason);
+        return;
+    }
+    // Built: no segment may cross the air outside the pinched region.
+    ExPolygons grown = offset_ex(union_ex(Polygons{ left.contour, right.contour }), float(scale_(0.15)));
+    std::vector<ExtrusionPath *> paths;
+    for (ExtrusionEntity *ent : e.entities)
+        ContinuousShellPathBuilder::collect_paths(ent, paths);
+    size_t air = 0, total = 0;
+    for (const ExtrusionPath *p : paths)
+        for (size_t i = 1; i < p->polyline.points.size(); ++i) {
+            const Point a(p->polyline.points[i - 1].x(), p->polyline.points[i - 1].y());
+            const Point b(p->polyline.points[i].x(), p->polyline.points[i].y());
+            ++total;
+            const Point mid((a + b) / 2);
+            bool inside = false;
+            for (const ExPolygon &g : grown)
+                if (g.contains(mid)) { inside = true; break; }
+            if (!inside) ++air;
+        }
+    INFO("built with " << total << " segments, " << air << " with midpoints in air");
+    REQUIRE(air == 0);
+}
+
 TEST_CASE("Continuous shell woven infill sparsifies a THICK annular wall and keeps the bore hollow", "[ContinuousShell]") {
     // A thick tube wall (large OD, small ID) must NOT print 100% solid just because it has a bore:
     // keep a solid skin on BOTH the outer and bore faces and thin the deep middle, all one bead,
@@ -896,6 +1287,519 @@ TEST_CASE("Continuous shell infill weave frequency sets the lobe count, amplitud
     REQUIRE(fine * 3 > base * 4);              // a higher frequency = more lobes = more radial reversals (>1.33x)
 }
 
+TEST_CASE("Continuous shell bubble weave stacks crests vertically (Z-coherent lattice)", "[ContinuousShell]") {
+    // The bubble lattice (CS_BUBBLE) needs crest welds that STACK across layers. Kiss mode rotates the
+    // lobes by dphase per layer (weave_shift) - measured at exactly +90deg/layer of m=6 phase in sliced
+    // g-code - so a crest never sits on the crest below and no vertical cell wall can form (the print
+    // reads as a decoherent web). Bubble mode must (a) pin the lattice phase across layers regardless of
+    // the configured shift, and (b) supply the vertical structure via a slow cosine carrier on the
+    // amplitude instead (period ~21 layers at K=4). Guard both, with kiss mode as the drift control.
+    const Point center(10000000, 10000000);
+    Polygon circ;
+    for (int i = 0; i < 96; ++i) {
+        const double a = 2.0 * M_PI * i / 96.0;
+        circ.points.emplace_back(center.x() + coord_t(8000000 * std::cos(a)), center.y() + coord_t(8000000 * std::sin(a)));
+    }
+    Surfaces surfaces{ Surface(stInternal, ExPolygon(circ)) };
+    Flow flow(0.5f, 0.25f, 0.5f);
+    // Interior-band toolpath points + band length for one layer (the shells at r~7.3/7.8 are excluded,
+    // so this samples only the woven infill rings).
+    auto band = [&](size_t layer) {
+        PrintRegionConfig cfg;
+        cfg.wall_loops.value = 2;
+        cfg.continuous_shell_infill_density.value     = 25;   // K=4
+        cfg.continuous_shell_infill_weave.value       = 100;  // 6 lobes
+        cfg.continuous_shell_infill_weave_shift.value = 50;   // pi/2 per layer in kiss mode; bubble must ignore it
+        ExtrusionEntityCollection e; std::string reason;
+        REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.2, &cfg, e, &reason, (layer & 1) != 0, layer, false));
+        auto *mp = dynamic_cast<ExtrusionMultiPath *>(e.entities.front());
+        REQUIRE(mp != nullptr);
+        std::pair<std::vector<Vec2d>, double> out{ {}, 0.0 };
+        for (auto &p : mp->paths) {
+            const Vec2d *prev = nullptr; Vec2d prev_store;
+            for (auto &q : p.polyline.points) {
+                const Vec2d v = (Point(q.x(), q.y()) - center).cast<double>() * SCALING_FACTOR;
+                const double r = v.norm();
+                if (r >= 2.2 && r <= 6.9) {
+                    if (prev != nullptr) out.second += (v - *prev).norm();
+                    out.first.push_back(v);
+                    prev_store = v; prev = &prev_store;
+                } else
+                    prev = nullptr;
+            }
+        }
+        return out;
+    };
+    // Median nearest-neighbour distance from one layer's band to the previous layer's: registered
+    // lattices score near zero, a quarter-wave-rotated lattice scores a large fraction of its amplitude.
+    auto median_nn = [](const std::vector<Vec2d> &a, const std::vector<Vec2d> &b) {
+        std::vector<double> d; d.reserve(a.size());
+        for (const Vec2d &p : a) {
+            double best = std::numeric_limits<double>::max();
+            for (const Vec2d &q : b) best = std::min(best, (p - q).squaredNorm());
+            d.push_back(std::sqrt(best));
+        }
+        std::nth_element(d.begin(), d.begin() + d.size() / 2, d.end());
+        return d[d.size() / 2];
+    };
+    double lock = 0, len_peak = 0, len_zero = 0;
+    {
+        EnvFlag bubble("CS_BUBBLE", "1");
+        const auto b10 = band(10), b11 = band(11);        // carrier ~-0.99 on both: registered, near-full amplitude
+        lock     = median_nn(b11.first, b10.first);
+        len_peak = band(0).second;                        // carrier +1: full lobes
+        len_zero = band(5).second;                        // carrier ~0.07: rings relax toward plain concentric
+    }
+    const auto k10 = band(10), k11 = band(11);            // kiss mode control: same layers, rotating lattice
+    const double drift = median_nn(k11.first, k10.first);
+    WARN("bubble adjacent-layer registration=" << lock << "mm vs kiss drift=" << drift
+         << "mm; band length carrier-peak=" << len_peak << "mm carrier-zero=" << len_zero << "mm");
+    REQUIRE(lock < 0.2);                       // bubble: consecutive layers register (crests stack)
+    REQUIRE(drift > 2.0 * lock);               // kiss control: the same measurement sees the rotation
+    REQUIRE(drift > 0.25);
+    REQUIRE(len_peak > 1.1 * len_zero);        // carrier: lobes at the peak, near-plain rings at the zero
+}
+
+TEST_CASE("Continuous shell bubble weld flats stay off the shell (no wall bumps)", "[ContinuousShell]") {
+    // The wall-adjacent infill ring sits one bead inside the shell but carries a fusion-sized
+    // amplitude, so the old poke-through clamp parked its crests exactly ON the innermost shell
+    // ring's path - a second bead deposited along the wall, whose displaced melt telegraphed
+    // through the 2-bead shell as alternating surface bumps tracking the internal weld pads.
+    // The clamp now keeps ~0.85 bead of centreline clearance: crests flatten BESIDE the shell
+    // (~15% edge overlap - a normal lateral weld). Guard: the toolpath length in the shell's
+    // radial zone must match a plain sparse fill (no crest material on the wall), while the
+    // flattened crests still park just inside the clearance line.
+    const Point center(10000000, 10000000);
+    Polygon circ;
+    for (int i = 0; i < 96; ++i) {
+        const double a = 2.0 * M_PI * i / 96.0;
+        circ.points.emplace_back(center.x() + coord_t(8000000 * std::cos(a)), center.y() + coord_t(8000000 * std::sin(a)));
+    }
+    Surfaces surfaces{ Surface(stInternal, ExPolygon(circ)) };
+    Flow flow(0.5f, 0.25f, 0.5f);
+    // Path length whose segment midpoints fall in a radial band, at carrier-peak layer 0.
+    auto band_len = [&](int weave, double lo, double hi) {
+        PrintRegionConfig cfg;
+        cfg.wall_loops.value = 2;
+        cfg.continuous_shell_infill_density.value = 25;   // K=4
+        cfg.continuous_shell_infill_weave.value   = weave;
+        ExtrusionEntityCollection e; std::string reason;
+        REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.2, &cfg, e, &reason, false, 0));
+        auto *mp = dynamic_cast<ExtrusionMultiPath *>(e.entities.front());
+        REQUIRE(mp != nullptr);
+        double len = 0;
+        for (auto &p : mp->paths)
+            for (size_t k = 1; k < p.polyline.points.size(); ++k) {
+                const auto &a = p.polyline.points[k - 1];
+                const auto &b = p.polyline.points[k];
+                const Vec2d va = (Point(a.x(), a.y()) - center).cast<double>() * SCALING_FACTOR;
+                const Vec2d vb = (Point(b.x(), b.y()) - center).cast<double>() * SCALING_FACTOR;
+                const double rm = 0.5 * (va.norm() + vb.norm());
+                if (rm >= lo && rm <= hi) len += (vb - va).norm();
+            }
+        return len;
+    };
+    const double spacing_mm = unscale<double>(flow.scaled_spacing());
+    const double shell_in   = 8.0 - 0.5 * 0.5 - spacing_mm;      // innermost shell ring centreline
+    const double clear_line = shell_in - 0.85 * spacing_mm;      // the new clamp line
+    double bub_zone = 0, plain_zone = 0, bub_flat = 0, plain_flat = 0;
+    {
+        EnvFlag bubble("CS_BUBBLE", "1");
+        bub_zone = band_len(100, clear_line + 0.10, shell_in + 0.15);    // shell zone above the clamp line
+        bub_flat = band_len(100, clear_line - 0.035, clear_line + 0.05); // where flats should now park
+    }
+    plain_zone = band_len(0, clear_line + 0.10, shell_in + 0.15);
+    plain_flat = band_len(0, clear_line - 0.035, clear_line + 0.05);     // plain's first ring sits below this band
+    WARN("shell-zone len: bubble=" << bub_zone << "mm plain=" << plain_zone
+         << "mm; clamp-line flats: bubble=" << bub_flat << "mm plain=" << plain_flat << "mm");
+    REQUIRE(bub_zone < 1.08 * plain_zone);     // no crest material parked on/along the shell any more
+    REQUIRE(bub_flat > plain_flat + 3.0);      // the flattened crests exist, parked at the clearance line
+}
+
+TEST_CASE("Continuous shell dyadic bubble lobes scale with ring perimeter", "[ContinuousShell]") {
+    // CS_BUBBLE_DYADIC gives each ring the lobes*2^m nearest perimeter/CS_BUBBLE_W, so outer
+    // rings carry more, narrower cells instead of stretching with perimeter (hierarchical
+    // half-bonded boundaries between bands). Guard via radial-reversal counting (2 per lobe per
+    // ring): on a r=15mm disc the outer two kept rings should pick 2x the base count while the
+    // core stays at base - so the outer band out-reverses the equally-sized inner band only in
+    // dyadic mode.
+    const Point center(20000000, 20000000);
+    Polygon circ;
+    for (int i = 0; i < 144; ++i) {
+        const double a = 2.0 * M_PI * i / 144.0;
+        circ.points.emplace_back(center.x() + coord_t(15000000 * std::cos(a)), center.y() + coord_t(15000000 * std::sin(a)));
+    }
+    Surfaces surfaces{ Surface(stInternal, ExPolygon(circ)) };
+    Flow flow(0.5f, 0.25f, 0.5f);
+    auto reversals = [&](double lo, double hi, bool dyadic) {
+        PrintRegionConfig cfg;
+        cfg.wall_loops.value = 2;
+        cfg.continuous_shell_infill_density.value = 25;   // K=4
+        cfg.continuous_shell_infill_weave.value   = 100;  // base 6 lobes
+        cfg.continuous_shell_infill_dyadic.value  = dyadic;   // the real (per-object) config knob
+        ExtrusionEntityCollection e; std::string reason;
+        REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.2, &cfg, e, &reason, false, 0));
+        auto *mp = dynamic_cast<ExtrusionMultiPath *>(e.entities.front());
+        REQUIRE(mp != nullptr);
+        std::vector<double> rad;
+        for (auto &p : mp->paths) for (auto &q : p.polyline.points) {
+            const double r = (Point(q.x(), q.y()) - center).cast<double>().norm() * SCALING_FACTOR;
+            if (r >= lo && r <= hi) rad.push_back(r);
+        }
+        // Hysteresis direction-change counter: the clamped crest FLATS are constant-radius arcs
+        // whose resample jitter would otherwise register as dozens of phantom reversals.
+        int rev = 0, dir = 0; double ref = rad.empty() ? 0.0 : rad[0];
+        for (const double r : rad) {
+            if (std::abs(r - ref) < 0.05) continue;
+            const int d = (r > ref) ? 1 : -1;
+            if (dir != 0 && d != dir) ++rev;
+            dir = d; ref = r;
+        }
+        return rev;
+    };
+    int dy_outer = 0, dy_inner = 0, cl_outer = 0, cl_inner = 0;
+    {
+        EnvFlag bubble("CS_BUBBLE", "1");
+        dy_outer = reversals(11.0, 14.1, true);    // outermost two kept rings (expect base*2)
+        dy_inner = reversals(2.0, 6.0, true);      // two core rings (expect base)
+        cl_outer = reversals(11.0, 14.1, false);   // classic bubble: same global count everywhere
+        cl_inner = reversals(2.0, 6.0, false);
+    }
+    WARN("reversals dyadic outer=" << dy_outer << " inner=" << dy_inner
+         << "; classic outer=" << cl_outer << " inner=" << cl_inner);
+    REQUIRE(dy_outer > dy_inner * 3 / 2);       // dyadic: outer band carries ~2x the lobes
+    REQUIRE(cl_outer < cl_inner * 3 / 2);       // classic control: no such gradient
+    REQUIRE(dy_outer > cl_outer * 3 / 2);       // and it is the dyadic switch that adds them
+}
+
+TEST_CASE("Continuous shell cell split fills a woven dogbone as near-star cells", "[ContinuousShell]") {
+    // continuous_shell_cell_split pre-cuts deeply concave sections at their deepest notches so
+    // every piece is near-star-shaped and the bubble weave is valid per cell. On the dogbone the
+    // cuts are the vertical lines x=+-5 through the notch-floor corners (lobe | neck | lobe).
+    // Discriminator: inside thin vertical bands around the cut lines, a SPLIT fill runs its cell
+    // shell beads ALONG the cut (vertical travel dominates), while the unsplit fill's rings CROSS
+    // it (horizontal dominates). Also: the bead must stay inside the region and out of the notch
+    // air in both modes, on every layer parity/carrier phase.
+    Polygon dog{ {-15000000, -8000000}, {-5000000, -8000000}, {-5000000, -2000000},
+                 {5000000, -2000000}, {5000000, -8000000}, {15000000, -8000000},
+                 {15000000, 8000000}, {5000000, 8000000}, {5000000, 2000000},
+                 {-5000000, 2000000}, {-5000000, 8000000}, {-15000000, 8000000} };
+    Surfaces surfaces{ Surface(stInternal, ExPolygon(dog)) };
+    Flow flow(0.42f, 0.2f, 0.4f);
+    const ExPolygons grown = offset_ex(ExPolygons{ ExPolygon(dog) }, scale_(0.1f));
+    auto in_notch = [](const Point &p) {
+        const bool x_in = p.x() > -4000000 && p.x() < 4000000;
+        const bool top  = p.y() >  3000000 && p.y() < 7000000;
+        const bool bot  = p.y() < -3000000 && p.y() > -7000000;
+        return x_in && (top || bot);
+    };
+    auto in_cut_band = [](const Point &p) {
+        const bool x_in = (p.x() > 4600000 && p.x() < 5400000) || (p.x() > -5400000 && p.x() < -4600000);
+        return x_in && p.y() > -2000000 && p.y() < 2000000;   // the neck span of the cut lines
+    };
+    // Returns (vertical fraction of travel in the cut bands, notch-crossing count, outside count).
+    std::string diag;
+    auto measure = [&](bool split, size_t layer, double &vfrac, size_t &notch, size_t &outside) {
+        PrintRegionConfig cfg;
+        cfg.wall_loops.value = 2;
+        cfg.continuous_shell_infill_density.value = 25;
+        cfg.continuous_shell_infill_weave.value   = 100;
+        cfg.continuous_shell_cell_split.value     = split;
+        ExtrusionEntityCollection e; std::string reason;
+        REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.2, &cfg, e, &reason, (layer & 1) != 0, layer, false));
+        std::vector<ExtrusionPath *> paths;
+        for (ExtrusionEntity *ent : e.entities)
+            ContinuousShellPathBuilder::collect_paths(ent, paths);
+        double dx = 0, dy = 0;
+        notch = 0; outside = 0;
+        for (const ExtrusionPath *p : paths)
+            for (size_t i = 1; i < p->polyline.points.size(); ++i) {
+                const Point a(p->polyline.points[i - 1].x(), p->polyline.points[i - 1].y());
+                const Point b(p->polyline.points[i].x(), p->polyline.points[i].y());
+                const Point mid((a + b) / 2);
+                if (in_notch(mid)) ++notch;
+                bool inside = false;
+                for (const ExPolygon &g : grown) if (g.contains(mid)) { inside = true; break; }
+                if (!inside) {
+                    ++outside;
+                    diag += " (" + std::to_string(unscale<double>(mid.x())) + "," +
+                            std::to_string(unscale<double>(mid.y())) + ")len" +
+                            std::to_string(unscale<double>((b - a).cast<double>().norm()));
+                }
+                if (in_cut_band(mid)) { dx += std::abs(double(b.x() - a.x())); dy += std::abs(double(b.y() - a.y())); }
+            }
+        vfrac = (dx + dy > 0.0) ? dy / (dx + dy) : 0.0;
+    };
+    EnvFlag bubble("CS_BUBBLE", "1");
+    double v_split_min = 1.0, v_plain_max = 0.0;
+    size_t plain_bad = 0;
+    for (size_t layer = 3; layer < 27; layer += 4) {   // spans a full carrier period
+        double v; size_t notch, outside;
+        measure(true, layer, v, notch, outside);
+        INFO("split layer " << layer << " vfrac=" << v << " notch=" << notch << " outside=" << outside << diag);
+        REQUIRE(notch == 0);
+        REQUIRE(outside == 0);
+        v_split_min = std::min(v_split_min, v);
+        // The UNSPLIT control is allowed to transgress: a deep notch makes r(theta) about the
+        // global centroid multivalued, so the radial poke-through clamp cannot represent the
+        // boundary there and weave crests overshoot into notch air - which is precisely the
+        // failure cell_split exists to fix. Only the travel-direction metric is asserted on it.
+        measure(false, layer, v, notch, outside);
+        INFO("plain layer " << layer << " vfrac=" << v << " notch=" << notch << " outside=" << outside);
+        plain_bad += notch + outside;
+        v_plain_max = std::max(v_plain_max, v);
+    }
+    WARN("cut-band vertical travel fraction: split(min)=" << v_split_min << " unsplit(max)=" << v_plain_max
+         << "; unsplit notch/outside transgressions across layers: " << plain_bad);
+    REQUIRE(v_split_min > 0.15);               // split: boundary structure runs ALONG the cuts
+    REQUIRE(v_plain_max < 0.7 * v_split_min);  // unsplit control: rings cross them instead (measured ~0.04-0.12)
+}
+
+TEST_CASE("Continuous shell cell-split interface weaves (recessed anti-phase walls)", "[ContinuousShell]") {
+    // The interface between split cells must behave like intra-cell neighbours, not a dead wall:
+    // (a) each cell is RECESSED half a bead from the cut, so the facing rings sit ~one bead apart
+    //     instead of double-extruding the cut line at 200% flow, and
+    // (b) the anti-phase interface field waves the two wall stacks oppositely, so the facing gap
+    //     OSCILLATES along the cut - welded shut at crests, open lens voids between.
+    // Measured on the dogbone's x=+3 cut at a carrier-peak layer.
+    Polygon dog{ {-15000000, -8000000}, {-5000000, -8000000}, {-5000000, -2000000},
+                 {5000000, -2000000}, {5000000, -8000000}, {15000000, -8000000},
+                 {15000000, 8000000}, {5000000, 8000000}, {5000000, 2000000},
+                 {-5000000, 2000000}, {-5000000, 8000000}, {-15000000, 8000000} };
+    Surfaces surfaces{ Surface(stInternal, ExPolygon(dog)) };
+    Flow flow(0.42f, 0.2f, 0.4f);
+    PrintRegionConfig cfg;
+    cfg.wall_loops.value = 2;
+    cfg.continuous_shell_infill_density.value = 25;
+    cfg.continuous_shell_infill_weave.value   = 100;
+    cfg.continuous_shell_cell_split.value     = true;
+    EnvFlag bubble("CS_BUBBLE", "1");
+    ExtrusionEntityCollection e; std::string reason;
+    REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.2, &cfg, e, &reason, false, 0));
+    std::vector<ExtrusionPath *> paths;
+    for (ExtrusionEntity *ent : e.entities)
+        ContinuousShellPathBuilder::collect_paths(ent, paths);
+    // Facing-wall gap per 1mm slab along the cut (x = +5mm cut of the original test dogbone is at
+    // x=+5? the notch corners sit at x=+-5 -> cuts at x=+-5): sample the +5 cut, neck span y<2.
+    const double CUT_X = 5.0;
+    std::array<double, 4> lsum{}, lcnt{}, rsum{}, rcnt{};
+    for (const ExtrusionPath *p : paths)
+        for (size_t i = 1; i < p->polyline.points.size(); ++i) {
+            const Vec2d a = Point(p->polyline.points[i-1].x(), p->polyline.points[i-1].y()).cast<double>() * SCALING_FACTOR;
+            const Vec2d b = Point(p->polyline.points[i].x(),   p->polyline.points[i].y()).cast<double>() * SCALING_FACTOR;
+            const Vec2d m = 0.5 * (a + b);
+            if (std::abs(m.x() - CUT_X) > 1.6) continue;          // lattice interfaces breathe wider than walls
+            if (m.y() < -2.0 || m.y() >= 2.0) continue;
+            const size_t slab = size_t((m.y() + 2.0));            // 1mm slabs over the neck span
+            if (slab >= 4) continue;
+            if (m.x() < CUT_X) { lsum[slab] += m.x(); lcnt[slab] += 1; }
+            else               { rsum[slab] += m.x(); rcnt[slab] += 1; }
+        }
+    double gmin = 1e9, gmax = -1e9, gsum = 0; int gn = 0;
+    for (size_t k = 0; k < 4; ++k) {
+        if (lcnt[k] < 5 || rcnt[k] < 5) continue;
+        const double gap = rsum[k] / rcnt[k] - lsum[k] / lcnt[k];
+        gmin = std::min(gmin, gap); gmax = std::max(gmax, gap); gsum += gap; ++gn;
+    }
+    REQUIRE(gn >= 3);
+    WARN("interface gap over " << gn << " slabs: mean=" << gsum / gn << "mm swing=" << gmax - gmin << "mm");
+    REQUIRE(gsum / gn > 0.25);                 // recessed: facing material centres are separated, not coincident
+    REQUIRE(gsum / gn < 2.2);                  // (lattice interfaces average wider than walls: valleys retreat)
+    REQUIRE(gmax - gmin > 0.12);               // and the gap breathes along the cut (anti-phase field)
+}
+
+TEST_CASE("Continuous shell cell split peels a contiguous skin", "[ContinuousShell]") {
+    // The object's exterior must never be stitched from per-cell arcs: with cell_split the seed's
+    // outer contour is PEELED into its own single-loop chain at the tour boundary, so the visible
+    // perimeter prints as one contiguous bead and the cut mouths terminate on its inner face.
+    // Guard: walking the tour in order, runs of points on the skin band alternate with interior
+    // runs only a handful of times (one skin loop + the layer handoff), and the skin band is
+    // essentially fully covered.
+    Polygon dog{ {-15000000, -8000000}, {-5000000, -8000000}, {-5000000, -2000000},
+                 {5000000, -2000000}, {5000000, -8000000}, {15000000, -8000000},
+                 {15000000, 8000000}, {5000000, 8000000}, {5000000, 2000000},
+                 {-5000000, 2000000}, {-5000000, 8000000}, {-15000000, 8000000} };
+    Surfaces surfaces{ Surface(stInternal, ExPolygon(dog)) };
+    Flow flow(0.42f, 0.2f, 0.4f);
+    PrintRegionConfig cfg;
+    cfg.wall_loops.value = 2;
+    cfg.continuous_shell_infill_density.value = 25;
+    cfg.continuous_shell_infill_weave.value   = 100;
+    cfg.continuous_shell_cell_split.value     = true;
+    EnvFlag bubble("CS_BUBBLE", "1");
+    ExtrusionEntityCollection e; std::string reason;
+    REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.2, &cfg, e, &reason, false, 5));
+    std::vector<ExtrusionPath *> paths;
+    for (ExtrusionEntity *ent : e.entities)
+        ContinuousShellPathBuilder::collect_paths(ent, paths);
+    // distance from a point to the dogbone outline
+    auto dist_to_boundary = [&](const Vec2d &p) {
+        double best = std::numeric_limits<double>::max();
+        const size_t m = dog.points.size();
+        for (size_t i = 0; i < m; ++i) {
+            const Vec2d a  = dog.points[i].cast<double>() * SCALING_FACTOR;
+            const Vec2d ab = dog.points[(i + 1) % m].cast<double>() * SCALING_FACTOR - a;
+            const double t = std::clamp((p - a).dot(ab) / std::max(1e-9, ab.squaredNorm()), 0.0, 1.0);
+            best = std::min(best, (p - (a + t * ab)).norm());
+        }
+        return best;
+    };
+    // Walk the tour accumulating arc length; record the tour position of every on-skin sample.
+    // With the peel the skin is ONE contiguous stretch of the tour (small gaps where the ring
+    // chords across sharp corners - a pre-existing ring artifact); stitched per-cell skin arcs
+    // would put a cell's whole interior (100+mm of tour) between skin stretches.
+    const double half_w = 0.21;                       // ext perimeter centreline depth
+    // Contiguity metric: the smallest TOUR WINDOW containing 95% of the skin-band length.
+    // The ext-perimeter pass spans ~one loop; stray band grazes elsewhere (e.g. wall #2's
+    // corner chords dipping toward the boundary) fall in the 5% allowance. Stitched per-cell
+    // skin arcs would spread the skin across the whole tour and blow the window wide open.
+    double skin_len = 0, tour_arc = 0;
+    std::vector<std::pair<double, double>> samples;   // (tour position, seg length)
+    for (const ExtrusionPath *p : paths)
+        for (size_t i = 1; i < p->polyline.points.size(); ++i) {
+            const Vec2d a = Point(p->polyline.points[i-1].x(), p->polyline.points[i-1].y()).cast<double>() * SCALING_FACTOR;
+            const Vec2d b = Point(p->polyline.points[i].x(),   p->polyline.points[i].y()).cast<double>() * SCALING_FACTOR;
+            const double seg = (b - a).norm();
+            tour_arc += seg;
+            if (std::abs(dist_to_boundary(0.5 * (a + b)) - half_w) < 0.12) {
+                skin_len += seg;
+                samples.emplace_back(tour_arc, seg);
+            }
+        }
+    double window = tour_arc;
+    for (size_t lo = 0; lo < samples.size(); ++lo) {           // min window covering >= 95%
+        double cover = 0;
+        for (size_t h2 = lo; h2 < samples.size(); ++h2) {
+            cover += samples[h2].second;
+            if (cover >= 0.95 * skin_len) {
+                window = std::min(window, samples[h2].first - samples[lo].first + samples[lo].second);
+                break;
+            }
+        }
+    }
+    WARN("skin len=" << skin_len << "mm of ~104mm loop; min tour window for 95% of it=" << window << "mm");
+    REQUIRE(skin_len > 85.0);                  // the skin band is actually covered
+    REQUIRE(window < 130.0);                   // and ~all of it lives in ONE loop-sized tour stretch
+}
+
+TEST_CASE("Continuous shell tapers flow in sub-2-bead walls (no cusp over-stuffing)", "[ContinuousShell]") {
+    // Where the part is locally thinner than two beads, opposing wall passes share the space;
+    // at constant flow that approaches 200% material at a cusp (the teardrop tail's dots).
+    // The thin-wall taper scales each non-buried point's flow by local thickness. Wedge:
+    // 30mm long, 8mm tall at the root, cusp at the tip - the last ~3mm is sub-2-bead.
+    Polygon wedge{ {0, -4000000}, {30000000, 0}, {0, 4000000} };
+    Surfaces surfaces{ Surface(stInternal, ExPolygon(wedge)) };
+    Flow flow(0.42f, 0.2f, 0.4f);
+    ExtrusionEntityCollection e; std::string reason;
+    REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.2, nullptr, e, &reason, false, 3));
+    std::vector<ExtrusionPath *> paths;
+    for (ExtrusionEntity *ent : e.entities)
+        ContinuousShellPathBuilder::collect_paths(ent, paths);
+    const double nominal = flow.mm3_per_mm();
+    double thick_sum = 0, thick_n = 0, thin_sum = 0, thin_n = 0, thin_min = 10.0;
+    for (const ExtrusionPath *p : paths)
+        for (size_t i = 1; i < p->polyline.points.size(); ++i) {
+            const double mx = 0.5 * (p->polyline.points[i-1].x() + p->polyline.points[i].x()) * SCALING_FACTOR;
+            const double r  = p->mm3_per_mm / nominal;
+            if (mx > 2.0 && mx < 10.0)  { thick_sum += r; thick_n += 1; }
+            if (mx > 26.5)              { thin_sum += r; thin_n += 1; thin_min = std::min(thin_min, r); }
+        }
+    REQUIRE(thick_n > 10);
+    REQUIRE(thin_n >= 3);
+    WARN("flow ratio: thick mean=" << thick_sum / thick_n << " thin mean=" << thin_sum / thin_n
+         << " thin min=" << thin_min);
+    REQUIRE(thick_sum / thick_n > 0.9);        // full flow where the wall is healthy
+    REQUIRE(thin_sum / thin_n < 0.92);         // the tip zone carries tapered segments
+    REQUIRE(thin_min < 0.8);                   // deepest sampled point is meaningfully tapered
+                                               // (the march clips the last ~0.7mm of a cusp, so the
+                                               // theoretical 0.4 floor is unreachable on this wedge)
+}
+
+TEST_CASE("Continuous shell drops degenerate core rings (no centre nub, task #9)", "[ContinuousShell]") {
+    // The inward march converges at a solid cell's core into degenerate rings - on an
+    // elongated cell a flat medial SLIVER traversed down-and-back at effectively double
+    // flow, which the weave scribbles into the centre-nub knot. Degenerate trailing rings
+    // (effective bead width < 1 bead or perimeter < 8 beads) are now dropped. Signature of
+    // the sliver: pairs of ANTIPARALLEL segments closer than half a bead (down-and-back);
+    // kiss contacts of healthy rings are parallel-same-direction and do not count.
+    Polygon rect{ {-15000000, -7500000}, {15000000, -7500000}, {15000000, 7500000}, {-15000000, 7500000} };
+    Surfaces surfaces{ Surface(stInternal, ExPolygon(rect)) };
+    Flow flow(0.42f, 0.2f, 0.4f);
+    PrintRegionConfig cfg;
+    cfg.wall_loops.value = 2;
+    cfg.continuous_shell_infill_density.value = 25;
+    cfg.continuous_shell_infill_weave.value   = 100;
+    ExtrusionEntityCollection e; std::string reason;
+    REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.2, &cfg, e, &reason, false, 4));
+    std::vector<ExtrusionPath *> paths;
+    for (ExtrusionEntity *ent : e.entities)
+        ContinuousShellPathBuilder::collect_paths(ent, paths);
+    // central strip segments only (the sliver zone)
+    struct Seg { Vec2d m, d; size_t idx; };
+    std::vector<Seg> strip;
+    const double nominal = flow.mm3_per_mm();
+    size_t gidx = 0;
+    for (const ExtrusionPath *p : paths) {
+        const bool rider = p->mm3_per_mm < 0.7 * nominal;   // half-flow connectors retrace beads by design
+        for (size_t i = 1; i < p->polyline.points.size(); ++i, ++gidx) {
+            if (rider) continue;
+            const Vec2d a = Point(p->polyline.points[i-1].x(), p->polyline.points[i-1].y()).cast<double>() * SCALING_FACTOR;
+            const Vec2d b = Point(p->polyline.points[i].x(),   p->polyline.points[i].y()).cast<double>() * SCALING_FACTOR;
+            const Vec2d m = 0.5 * (a + b);
+            if (std::abs(m.y()) < 1.0 && std::abs(m.x()) < 10.0) {
+                const Vec2d d = b - a;
+                if (d.norm() > 0.05)
+                    strip.push_back({ m, d / d.norm(), gidx });
+            }
+        }
+    }
+    // Count only pairs FAR APART along the path: a legitimate U-turn's flanks are antiparallel
+    // and close but path-adjacent; the sliver's down-and-back pairs half the loop apart.
+    int antiparallel_close = 0;
+    for (size_t i = 0; i < strip.size(); ++i)
+        for (size_t j = i + 1; j < strip.size(); ++j) {
+            if (strip[j].idx - strip[i].idx <= 20) continue;
+            if ((strip[i].m - strip[j].m).norm() < 0.21 && strip[i].d.dot(strip[j].d) < -0.7)
+                ++antiparallel_close;
+        }
+    WARN("central-strip segments=" << strip.size() << " antiparallel close pairs=" << antiparallel_close);
+    REQUIRE(antiparallel_close < 5);           // the down-and-back sliver is gone
+}
+
+TEST_CASE("Continuous shell cell split is a no-op on a convex section", "[ContinuousShell]") {
+    // Self-gating guard: a convex outline has ~zero hull deviation, so cell_split must leave the
+    // toolpath byte-identical - existing convex prints cannot regress when the option is on.
+    const Point center(10000000, 10000000);
+    Polygon circ;
+    for (int i = 0; i < 96; ++i) {
+        const double a = 2.0 * M_PI * i / 96.0;
+        circ.points.emplace_back(center.x() + coord_t(8000000 * std::cos(a)), center.y() + coord_t(8000000 * std::sin(a)));
+    }
+    Surfaces surfaces{ Surface(stInternal, ExPolygon(circ)) };
+    Flow flow(0.5f, 0.25f, 0.5f);
+    auto points = [&](bool split) {
+        PrintRegionConfig cfg;
+        cfg.wall_loops.value = 2;
+        cfg.continuous_shell_infill_density.value = 25;
+        cfg.continuous_shell_infill_weave.value   = 100;
+        cfg.continuous_shell_cell_split.value     = split;
+        ExtrusionEntityCollection e; std::string reason;
+        REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.2, &cfg, e, &reason, false, 7));
+        std::vector<ExtrusionPath *> paths;
+        for (ExtrusionEntity *ent : e.entities)
+            ContinuousShellPathBuilder::collect_paths(ent, paths);
+        Points out;
+        for (const ExtrusionPath *p : paths)
+            for (auto &q : p->polyline.points)
+                out.emplace_back(q.x(), q.y());
+        return out;
+    };
+    const Points on = points(true), off = points(false);
+    REQUIRE(on.size() == off.size());
+    for (size_t i = 0; i < on.size(); ++i)
+        REQUIRE(on[i] == off[i]);
+}
+
 TEST_CASE("Continuous shell keeps TWO bores hollow via Voronoi partition (multi-bore)", "[ContinuousShell]") {
     // Task #4: a cross-section with >1 hole must not smear fill across the bores. march_bands models a
     // single-hole annular wall, so a two-bore section is split into single-bore Voronoi cells (one per
@@ -946,6 +1850,96 @@ TEST_CASE("Continuous shell keeps TWO bores hollow via Voronoi partition (multi-
     CHECK(total > 200);
     REQUIRE(bore_pts == 0);     // no fill deposited inside either bore
     REQUIRE(bore_mids == 0);    // no chord crosses either bore
+}
+
+TEST_CASE("Continuous shell bore bisectors get the modern interface (task #7)", "[ContinuousShell]") {
+    // With cell_split on, bore-bisector cuts go through the same pipeline as concave cuts:
+    // recorded as CutLines, cells RECESSED half a bead each side (no coincident 200%-flow wall
+    // line), fielded by the interface weave (the facing bore-cell walls kiss/fuse/breathe), and
+    // the seed's skin PEELED into one contiguous loop (no per-cell skin arcs with mouths on the
+    // rim). Two-bore block: the single bisector is x=0.
+    ExPolygon block;
+    block.contour = Polygon{ {-20000000,-12000000}, {20000000,-12000000},
+                             {20000000, 12000000}, {-20000000, 12000000} };
+    block.holes.push_back(Polygon{ {-15000000,-4000000}, {-15000000, 4000000},
+                                   {-7000000, 4000000}, {-7000000,-4000000} });
+    block.holes.push_back(Polygon{ {7000000,-4000000}, {7000000, 4000000},
+                                   {15000000, 4000000}, {15000000,-4000000} });
+    Surfaces surfaces{ Surface(stInternal, block) };
+    Flow flow(0.42f, 0.2f, 0.4f);
+    PrintRegionConfig cfg;
+    cfg.wall_loops.value = 2;
+    cfg.continuous_shell_infill_density.value = 25;
+    cfg.continuous_shell_infill_weave.value   = 100;
+    cfg.continuous_shell_cell_split.value     = true;
+    EnvFlag bubble("CS_BUBBLE", "1");
+    ExtrusionEntityCollection e; std::string reason;
+    REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.2, &cfg, e, &reason, false, 0));
+    std::vector<ExtrusionPath *> paths;
+    for (ExtrusionEntity *ent : e.entities)
+        ContinuousShellPathBuilder::collect_paths(ent, paths);
+    // (a) bores stay hollow through the modern pipeline
+    auto in_bore = [](const Vec2d &p) {
+        auto inrect = [&](double x0, double x1, double y0, double y1) {
+            return p.x() > x0 && p.x() < x1 && p.y() > y0 && p.y() < y1; };
+        return inrect(-14, -8, -3, 3) || inrect(8, 14, -3, 3);
+    };
+    // (b) bisector gap breathes: per-slab facing-material separation across x=0
+    std::array<double, 5> lsum{}, lcnt{}, rsum{}, rcnt{};
+    size_t bore_hits = 0;
+    for (const ExtrusionPath *p : paths)
+        for (size_t i = 1; i < p->polyline.points.size(); ++i) {
+            const Vec2d a = Point(p->polyline.points[i-1].x(), p->polyline.points[i-1].y()).cast<double>() * SCALING_FACTOR;
+            const Vec2d b = Point(p->polyline.points[i].x(),   p->polyline.points[i].y()).cast<double>() * SCALING_FACTOR;
+            const Vec2d m = 0.5 * (a + b);
+            if (in_bore(m)) ++bore_hits;
+            if (std::abs(m.x()) > 1.2) continue;
+            if (m.y() < -7.5 || m.y() >= 7.5) continue;
+            const size_t slab = size_t((m.y() + 7.5) / 3.0);
+            if (slab >= 5) continue;
+            if (m.x() < 0) { lsum[slab] += m.x(); lcnt[slab] += 1; }
+            else           { rsum[slab] += m.x(); rcnt[slab] += 1; }
+        }
+    REQUIRE(bore_hits == 0);
+    // NOTE: with virtual-site placement the two bore cells may no longer share the x=0
+    // bisector (a compact centre cell can sit between them), so the slab-gap numbers are
+    // observational only - the recess/field machinery itself is shared with concave cuts
+    // and hard-asserted by the dogbone interface test.
+    double gmin = 1e9, gmax = -1e9, gsum = 0; int gn = 0;
+    for (size_t k = 0; k < 5; ++k) {
+        if (lcnt[k] < 5 || rcnt[k] < 5) continue;
+        const double gap = rsum[k] / rcnt[k] - lsum[k] / lcnt[k];
+        gmin = std::min(gmin, gap); gmax = std::max(gmax, gap); gsum += gap; ++gn;
+    }
+    // (c) the skin peels into ONE contiguous tour stretch
+    auto dist_to_boundary = [&](const Vec2d &p) {
+        double best = std::numeric_limits<double>::max();
+        const Polygon &c = block.contour;
+        for (size_t i = 0; i < c.points.size(); ++i) {
+            const Vec2d a  = c.points[i].cast<double>() * SCALING_FACTOR;
+            const Vec2d ab = c.points[(i + 1) % c.points.size()].cast<double>() * SCALING_FACTOR - a;
+            const double t = std::clamp((p - a).dot(ab) / std::max(1e-9, ab.squaredNorm()), 0.0, 1.0);
+            best = std::min(best, (p - (a + t * ab)).norm());
+        }
+        return best;
+    };
+    double skin_len = 0, tour_arc = 0, max_gap = 0, last_skin = -1.0;
+    for (const ExtrusionPath *p : paths)
+        for (size_t i = 1; i < p->polyline.points.size(); ++i) {
+            const Vec2d a = Point(p->polyline.points[i-1].x(), p->polyline.points[i-1].y()).cast<double>() * SCALING_FACTOR;
+            const Vec2d b = Point(p->polyline.points[i].x(),   p->polyline.points[i].y()).cast<double>() * SCALING_FACTOR;
+            const double seg = (b - a).norm();
+            tour_arc += seg;
+            if (std::abs(dist_to_boundary(0.5 * (a + b)) - 0.21) < 0.12) {
+                skin_len += seg;
+                if (last_skin >= 0.0) max_gap = std::max(max_gap, tour_arc - last_skin);
+                last_skin = tour_arc;
+            }
+        }
+    WARN("x=0 slabs (observational): n=" << gn << (gn > 0 ? " mean=" + std::to_string(gsum / std::max(gn, 1)) : std::string())
+         << "; skin len=" << skin_len << "mm max tour gap=" << max_gap << "mm");
+    REQUIRE(skin_len > 100.0);                 // ~124mm rect perimeter, mostly covered
+    REQUIRE(max_gap < 15.0);                   // as ONE contiguous stretch (peel active with bores)
 }
 
 // Build a gear-like annulus centred at (cx, cy): a SHARP-toothed (deep, flat-crested teeth) or
@@ -1117,4 +2111,47 @@ TEST_CASE("Continuous shell woven sparsifies the real (fragmented) gear wall", "
          << " woven=" << woven_bore << "mm");
     REQUIRE(woven_len < 0.75 * solid_len);        // woven thins the interior by well over the previous ~1% no-op
     REQUIRE(woven_bore > solid_bore - 0.25);      // the weave stays as clear of the (eccentric keyed) bore as the solid fill
+}
+
+TEST_CASE("Continuous shell woven infill knits on a SQUARE (arc-length + normal weave)", "[ContinuousShell]") {
+    // The woven perturbation must INTERLOCK adjacent infill rings on a faceted cross-section, not
+    // only a circle. A raw sin(lobes*theta) radial push bunches the lobes at a square's corners and
+    // shoves them diagonally, so anti-phase neighbours stay a full stride apart (no knit, ~2.9mm).
+    // Arc-length + normal perturbation spaces the lobes evenly along the perimeter and perpendicular
+    // to the wall, so neighbours close to ~one bead at the lobe peaks. Assert that knit.
+    const coord_t C = 15000000, HW = 15000000;    // 30mm square centred at (15,15)mm
+    ExPolygon sq(Polygon{ {C-HW,C-HW},{C+HW,C-HW},{C+HW,C+HW},{C-HW,C+HW} });
+    Surfaces surfaces{ Surface(stInternal, sq) };
+    Flow flow(0.42f, 0.2f, 0.4f);
+    PrintRegionConfig cfg;
+    cfg.continuous_shell_infill_density.value     = 15;
+    cfg.continuous_shell_infill_weave.value       = 100;
+    cfg.continuous_shell_infill_weave_shift.value = 50;
+    const Point  center(C, C);
+    const double spacing_mm = double(flow.scaled_spacing()) / 1e6;
+    double best_gap = 1e18;                        // min adjacent-ring radial gap over angle bins & layers
+    for (size_t layer = 20; layer < 26; ++layer) {
+        ExtrusionEntityCollection e; std::string reason;
+        REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.2, &cfg, e, &reason, (layer & 1) != 0, layer, false));
+        std::vector<ExtrusionPath *> paths;
+        for (ExtrusionEntity *ent : e.entities) ContinuousShellPathBuilder::collect_paths(ent, paths);
+        std::map<int, std::vector<double>> bins;   // 5-degree angle bins -> infill-bead radii (mm)
+        for (const ExtrusionPath *p : paths)
+            for (const auto &q : p->polyline.points) {
+                const Vec2d d = Point(q.x(), q.y()).cast<double>() - center.cast<double>();
+                const double r = d.norm() / 1e6;
+                if (r < 2.0 || r > 12.5) continue;                    // skip the centre core and the outer walls
+                bins[int(std::floor(std::atan2(d.y(), d.x()) / M_PI * 36.0))].push_back(r);
+            }
+        for (auto &kv : bins) {
+            std::sort(kv.second.begin(), kv.second.end());
+            for (size_t i = 1; i < kv.second.size(); ++i) {
+                const double g = kv.second[i] - kv.second[i - 1];
+                if (g > 0.2 && g < 4.0) best_gap = std::min(best_gap, g);   // ignore duplicates and the seam jump
+            }
+        }
+    }
+    WARN("square woven min adjacent-ring gap=" << best_gap << "mm (full stride ~" << 7 * spacing_mm
+         << "mm; a knit closes toward one bead ~" << spacing_mm << "mm)");
+    REQUIRE(best_gap < 2.0 * spacing_mm);          // rings knit to within ~2 beads (pre-fix they stayed a full stride apart)
 }

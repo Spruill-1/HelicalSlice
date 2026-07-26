@@ -2745,6 +2745,15 @@ void TabPrint::build()
         optgroup->append_single_option_line("continuous_shell_infill_density", "strength_settings_walls#continuous-shell-mode");
         optgroup->append_single_option_line("continuous_shell_infill_weave", "strength_settings_walls#continuous-shell-mode");
         optgroup->append_single_option_line("continuous_shell_infill_weave_shift", "strength_settings_walls#continuous-shell-mode");
+        optgroup->append_single_option_line("continuous_shell_bubble", "strength_settings_walls#continuous-shell-mode");
+        optgroup->append_single_option_line("continuous_shell_bubble_height", "strength_settings_walls#continuous-shell-mode");
+        optgroup->append_single_option_line("continuous_shell_bubble_period", "strength_settings_walls#continuous-shell-mode");
+        optgroup->append_single_option_line("continuous_shell_bubble_pitch", "strength_settings_walls#continuous-shell-mode");
+        optgroup->append_single_option_line("continuous_shell_infill_dyadic", "strength_settings_walls#continuous-shell-mode");
+        optgroup->append_single_option_line("continuous_shell_cell_split", "strength_settings_walls#continuous-shell-mode");
+        optgroup->append_single_option_line("continuous_shell_cell_size", "strength_settings_walls#continuous-shell-mode");
+        optgroup->append_single_option_line("continuous_shell_adaptive_stride", "strength_settings_walls#continuous-shell-mode");
+        optgroup->append_single_option_line("continuous_shell_bore_obstacles", "strength_settings_walls#continuous-shell-mode");
 
         optgroup = page->new_optgroup(L("Top/bottom shells"), L"param_shell");
 
