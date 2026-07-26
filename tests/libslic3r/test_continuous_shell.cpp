@@ -984,6 +984,57 @@ TEST_CASE("Continuous shell bridges a blind bore cap instead of sagging rings ov
     REQUIRE(ring_zone > 30.0);          // and rings wrap it (the cap does not just vanish)
 }
 
+TEST_CASE("Continuous shell localized shell patch keeps the rest of the layer sparse", "[ContinuousShell]") {
+    // The cap/floor shell stack over a bore must be a LOCAL solid patch in an otherwise
+    // sparse lattice layer - not a whole-layer solid fill (a 6mm cap used to force the
+    // entire 40mm disc solid for shell-count layers).
+    auto circle = [](double cx, double cy, double r) {
+        Polygon p;
+        for (int i = 0; i < 72; ++i) {
+            const double a = 2.0 * M_PI * i / 72;
+            p.points.emplace_back(coord_t(std::llround(cx + r * std::cos(a))),
+                                  coord_t(std::llround(cy + r * std::sin(a))));
+        }
+        return p;
+    };
+    ExPolygon disc;
+    disc.contour = circle(0, 0, 14000000);
+    Surfaces surfaces{ Surface(stInternal, disc) };
+    ExPolygons patch{ ExPolygon(circle(0, 0, 3600000)) };   // bore + growth margin
+    Flow flow(0.42f, 0.2f, 0.4f);
+    EnvFlag bubble("CS_BUBBLE", "1");
+    auto xy_of = [&](bool force_solid, const ExPolygons *islands) {
+        PrintRegionConfig cfg;
+        cfg.wall_loops.value = 2;
+        cfg.continuous_shell_infill_density.value = 25;
+        cfg.continuous_shell_infill_weave.value   = 100;
+        cfg.continuous_shell_bore_obstacles.value = true;
+        ExtrusionEntityCollection e; std::string reason;
+        REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.2, &cfg, e, &reason, false, 21,
+                                                                force_solid, islands));
+        std::vector<ExtrusionPath *> paths;
+        for (ExtrusionEntity *ent : e.entities)
+            ContinuousShellPathBuilder::collect_paths(ent, paths);
+        double in_isl = 0.0, outside = 0.0;
+        for (const ExtrusionPath *p : paths)
+            for (size_t i = 1; i < p->polyline.points.size(); ++i) {
+                const Point a(p->polyline.points[i - 1].x(), p->polyline.points[i - 1].y());
+                const Point b(p->polyline.points[i].x(), p->polyline.points[i].y());
+                const double len = (b - a).cast<double>().norm() * SCALING_FACTOR;
+                if (Point((a + b) / 2).cast<double>().norm() < 3200000.0) in_isl += len;
+                else outside += len;
+            }
+        return std::make_pair(in_isl, outside);
+    };
+    const auto [patch_in, patch_out]  = xy_of(false, &patch);   // sparse layer + local patch
+    const auto [solid_in, solid_out]  = xy_of(true, nullptr);   // old behaviour: whole-layer solid
+    INFO("patch: in=" << patch_in << " out=" << patch_out << " | solid: in=" << solid_in << " out=" << solid_out);
+    REQUIRE(patch_in  > 55.0);                    // solid serpentine fills the island
+    // The rest of the layer stays LATTICE. (Not lower: the patch brings its own bore
+    // machinery - ring walls and fan lanes - which is real, intended material.)
+    REQUIRE(patch_out < 0.75 * solid_out);
+}
+
 TEST_CASE("Continuous shell refuses outlines that fragment at the bead scale", "[ContinuousShell]") {
     // A fractal-like silhouette shatters the inward march into hundreds of chains whose
     // rings overlap across fragments (Mandeltree: ~1.4x SOLID volume emitted as "sparse"

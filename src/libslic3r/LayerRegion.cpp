@@ -210,20 +210,68 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         // solid: the part's bottom/top shell layers and internal top/bottom surfaces (a bore floor,
         // a blind-bore cap). Detect those and fill the whole cross-section solid there, so the bead
         // still runs continuously but lays a dense Fermat base/cap instead of open infill.
+        // LOCALIZED SHELLS. cs_air_within stays the TRIGGER (its half-bead erosion is what
+        // keeps a twisted prism's per-layer facet slivers from forcing solid). When it fires,
+        // collect the actual air footprint across the shell distance in the firing direction:
+        // if every island is FULLY INTERIOR (a bore cap/floor), the layer stays SPARSE and the
+        // islands become solid PATCHES (rings wrap them, a cross-hatched serpentine spans them
+        // - the bridge-patch mechanism); only full-face exposure (part top/bottom, rim-touching
+        // air) keeps the whole-layer solid fill. Previously a 6mm bore cap forced the entire
+        // 40mm cross-section solid for shell-count layers (the counterbored disc printed with
+        // four full-disc solid bands).
         bool force_solid = false;
+        ExPolygons bridge_over;   // interior islands: bridge/patch footprints for the builder
         if (region_config.continuous_shell_infill_density.value > 0) {
             const int tsl = region_config.top_shell_layers.value;
             const int bsl = region_config.bottom_shell_layers.value;
             const coord_t bead = this->flow(frExternalPerimeter).scaled_width();
-            force_solid = (tsl > 0 && cs_air_within(this->layer(), +1, tsl, merged_slice, bead))
-                       || (bsl > 0 && cs_air_within(this->layer(), -1, bsl, merged_slice, bead));
-        }
-        // Interior islands over AIR (a blind bore's cap): the part of this layer with nothing
-        // below it, restricted to FULLY-INTERIOR islands - rim overhang slivers (a twisted
-        // prism's per-layer facet shift) hug the contour and are excluded by the erosion test.
-        // The builder rings these openings and spans them with a bridge patch.
-        ExPolygons bridge_over;
-        if (this->layer()->lower_layer != nullptr) {
+            const bool air_up   = tsl > 0 && cs_air_within(this->layer(), +1, tsl, merged_slice, bead);
+            const bool air_down = bsl > 0 && cs_air_within(this->layer(), -1, bsl, merged_slice, bead);
+            if (air_up || air_down) {
+                bool full_face = false;
+                ExPolygons acc;
+                for (int dir : { +1, -1 }) {
+                    if ((dir > 0 && !air_up) || (dir < 0 && !air_down))
+                        continue;
+                    const Layer *l = this->layer();
+                    const int    n = dir > 0 ? tsl : bsl;
+                    for (int k = 0; k < n && !full_face; ++k) {
+                        const Layer *nb = dir > 0 ? l->upper_layer : l->lower_layer;
+                        if (nb == nullptr) { full_face = true; break; }   // ran off the part
+                        append(acc, diff_ex(merged_slice, nb->lslices));
+                        l = nb;
+                    }
+                }
+                if (!full_face) {
+                    // Morphological OPENING on the air footprint (mirrors cs_air_within's
+                    // erosion): a tapering bore leaves a hair-thin growth ring in the raw
+                    // diff each layer, hugging its own hole - without the opening that ring
+                    // fails the interior test and falsely demotes the layer to full-face
+                    // solid (the counterbored disc's floor layers stayed whole-disc solid).
+                    ExPolygons opened = offset_ex(offset_ex(union_ex(acc), -0.6f * float(bead)),
+                                                  0.6f * float(bead));
+                    const ExPolygons eroded = offset_ex(merged_slice, -2.f * float(bead));
+                    for (ExPolygon &isl : opened) {
+                        if (std::abs(isl.contour.area()) < double(scale_(1.)) * double(scale_(1.)))
+                            continue;                                     // slicing dust
+                        if (!diff_ex(ExPolygons{ isl }, eroded).empty()) {
+                            full_face = true;                             // touches the rim zone
+                            break;
+                        }
+                        // grow the patch so its serpentine anchors past the opening, but keep
+                        // it clear of the outer walls
+                        ExPolygons grown = intersection_ex(offset_ex(ExPolygons{ isl }, 2.f * float(bead)),
+                                                           offset_ex(merged_slice, -1.5f * float(bead)));
+                        append(bridge_over, std::move(grown));
+                    }
+                }
+                if (full_face || bridge_over.empty()) {
+                    force_solid = true;
+                    bridge_over.clear();
+                }
+            }
+        } else if (this->layer()->lower_layer != nullptr) {
+            // Fully solid config: still bridge a blind bore's first cap layer.
             const coord_t bead = this->flow(frExternalPerimeter).scaled_width();
             ExPolygons air = diff_ex(merged_slice, this->layer()->lower_layer->lslices);
             if (!air.empty()) {

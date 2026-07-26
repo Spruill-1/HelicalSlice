@@ -3187,7 +3187,10 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         if (grown.size() != 1)
             continue;
         bool jo = false;
-        Polyline bp = serpentine_fill(grown.front(), flow.scaled_spacing(), 0.0, isl.contour.centroid(), &jo);
+        // Alternate the scan direction per layer so a stacked patch (a bore cap's shell
+        // stack) cross-hatches like any solid shell instead of laying parallel courses.
+        const double patch_angle = (layer_index % 2 != 0) ? M_PI / 4.0 : -M_PI / 4.0;
+        Polyline bp = serpentine_fill(grown.front(), flow.scaled_spacing(), patch_angle, isl.contour.centroid(), &jo);
         if (bp.points.size() < 2)
             continue;
         const Point tail = spiral.points.back();
