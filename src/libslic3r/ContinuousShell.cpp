@@ -1217,6 +1217,10 @@ struct ContourChain {
     bool     from_solid   = false;   // marched piece had NO real holes: any band holes are the
                                      // convergence core, not a bore (degenerate rings droppable)
     bool     peel_band    = false;   // the global peeled-skin chain (never sliver-filtered)
+    bool     bore_skin    = false;   // a per-bore skin annulus (swoop/mixed mode). Its seam is PINNED
+                                     // to a fixed angle (no per-layer precession) so the bore interior
+                                     // gets one clean vertical seam instead of a helical scar smeared
+                                     // up the whole wall - the outer skin still precesses to spread.
     Polygons obstacles;              // bore keep-out outlines (CCW) the lattice must swoop around
                                      // (bore-obstacle mode; polygons, not circles, so non-round
                                      // bores work unchanged). Empty on every other chain.
@@ -1272,6 +1276,8 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
     std::vector<char> chain_thin;                  // parallel to `chains`: peel depth behind the cell (0/1/2)
     std::vector<char> chain_solid;                 // parallel to `chains`: chain came from hole-less material
     std::vector<char> chain_band;                  // parallel to `chains`: 1 = the global peeled-skin chain
+    std::vector<size_t> bore_skin_ci;              // indices into `chains` that are per-bore skin annuli
+                                                   // (seam pinned in the tour assembly, see ContourChain::bore_skin)
     auto march_and_merge = [&](const ExPolygon &piece, bool single_bore, char thin) -> bool {
         std::vector<std::vector<ExPolygon>> frags;
         if (!march_bands(piece, spacing, !piece.holes.empty(), frags, point_count)) {
@@ -1346,13 +1352,14 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
         std::vector<ExPolygon> seed_annuli;
         const size_t seed_ci0 = chains.size();
         auto finish_mixed = [&]() {
-            if (seed_keepouts.empty())
-                return;
-            chain_obs.resize(chains.size());
-            for (size_t ci2 = seed_ci0; ci2 < chains.size(); ++ci2)
-                chain_obs[ci2] = seed_keepouts;
+            if (!seed_keepouts.empty()) {
+                chain_obs.resize(chains.size());
+                for (size_t ci2 = seed_ci0; ci2 < chains.size(); ++ci2)
+                    chain_obs[ci2] = seed_keepouts;
+            }
             for (const ExPolygon &ann : seed_annuli) {
                 chains.push_back({ ann });
+                bore_skin_ci.push_back(chains.size() - 1);
                 chain_thin.push_back(char(0));
                 chain_band.push_back(char(true));  // essential bore skin: never sliver-filtered
                 chain_solid.push_back(char(false));
@@ -1363,8 +1370,8 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
             Polygons keepouts;
             std::vector<ExPolygon> annuli;
             Polygons big_holes;
+            std::vector<ExPolygon> big_annuli;   // oversized-but-clean bores that still get a pinned wall
             for (const Polygon &h : seed.holes) {
-                bool ok = true;
                 Polygon hc = h;
                 hc.reverse();                                     // holes are CW; offsets want CCW
                 // Wall = slb BEADS: the hole curve is already the innermost bead centreline
@@ -1374,46 +1381,64 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
                 const size_t wall_off = std::max<size_t>(1, slb - 1);
                 Polygons shell_out = offset(hc, float(double(wall_off) * double(spacing)));
                 Polygons keep      = offset(hc, float(double(wall_off + 1) * double(spacing)));
-                if (shell_out.size() != 1 || keep.size() != 1)
-                    ok = false;
-                if (ok) {
+                const bool shell_valid = shell_out.size() == 1 && keep.size() == 1;
+                bool size_ok = false, skin_ok = false, hole_ok = false;
+                if (shell_valid) {
                     const BoundingBox kb = keep.front().bounding_box();
                     const double extent = std::max(double(kb.max.x() - kb.min.x()), double(kb.max.y() - kb.min.y()));
-                    if (extent > 8.0 * double(woven.stride) * double(spacing))
-                        ok = false;
-                }
-                if (ok) {
+                    size_ok = extent <= 8.0 * double(woven.stride) * double(spacing);
                     // Skin clearance: the keep-out plus the full fan allowance must stay inside
                     // the contour - a bore that close to the skin breaks the wall.
                     Polygons margin = offset(keep.front(), float(6.0 * double(spacing)));
-                    if (margin.size() != 1)
-                        ok = false;
-                    else
+                    skin_ok = margin.size() == 1;
+                    if (skin_ok)
                         for (const Point &mp : margin.front().points)
-                            if (!seed.contour.contains(mp)) { ok = false; break; }
-                }
-                if (ok) {
+                            if (!seed.contour.contains(mp)) { skin_ok = false; break; }
                     // Hole clearance is TIGHTER (keep-out + one bead): the only real hazard is
                     // this bore's keep-out reaching another hole's opening. The full fan margin
                     // here was over-strict - it demoted the cb_disc's slant bore to the cell
                     // set merely for sharing the upper layers with the fat taper, so mixed
                     // mode never engaged there.
                     Polygons hm = offset(keep.front(), float(1.0 * double(spacing)));
-                    if (hm.size() != 1)
-                        ok = false;
-                    else
+                    hole_ok = hm.size() == 1;
+                    if (hole_ok)
                         for (const Point &mp : hm.front().points) {
                             for (const Polygon &h2 : seed.holes)
-                                if (&h2 != &h && h2.contains(mp)) { ok = false; break; }
-                            if (!ok) break;
+                                if (&h2 != &h && h2.contains(mp)) { hole_ok = false; break; }
+                            if (!hole_ok) break;
                         }
                 }
-                if (ok) {
+                // Only a NEAR-CIRCULAR bore earns a celled annulus below; a large non-round cutout
+                // (a spoke wheel's sector) must stay a plain partition hole, or wrapping each one in
+                // a dedicated shell over-solidifies the part (wheel measured 87% -> 110%). Circularity
+                // = 4*pi*area/perim^2 is ~0.998 for a circle but only ~0.78 for BOTH a square and a
+                // 51-deg annular sector, so the threshold must sit high (>0.9) to isolate real bores.
+                const double h_area  = std::abs(h.area());
+                const double h_perim = h.length();
+                const double circularity = h_perim > 0.0 ? 4.0 * M_PI * h_area / (h_perim * h_perim) : 0.0;
+                if (shell_valid && size_ok && skin_ok && hole_ok) {
+                    // Swoopable: the lattice detours around the keep-out; the bore keeps a skin annulus.
                     ExPolygon ann;
                     ann.contour = shell_out.front();
                     ann.holes.push_back(h);
                     annuli.push_back(std::move(ann));
                     keepouts.push_back(keep.front());
+                } else if (shell_valid && !size_ok && skin_ok && hole_ok && circularity > 0.9) {
+                    // TOO BIG for the lattice to swoop, but a round bore whose wall is otherwise clean
+                    // skin and other holes) - so still give the bore a dedicated CLEAN pinned skin
+                    // annulus and hand the cell partition the GROWN hole (the annulus outer edge), so
+                    // the cells recess behind the annulus rather than stitching the wall themselves.
+                    // This keeps the bore INTERIOR a consistent pinned shell top-to-bottom instead of
+                    // switching to a cell-built wall whose seam precesses where the bore crosses the
+                    // size gate (the counterbored disc's taper: the lower swooped wall was pinned, the
+                    // upper celled wall precessed - the residual mode-switch scar up the funnel).
+                    ExPolygon ann;
+                    ann.contour = shell_out.front();
+                    ann.holes.push_back(h);
+                    big_annuli.push_back(std::move(ann));
+                    Polygon grown = shell_out.front();
+                    grown.reverse();                              // eff.holes are CW
+                    big_holes.push_back(std::move(grown));
                 } else {
                     big_holes.push_back(h);
                 }
@@ -1439,27 +1464,35 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
                 // The assembly loop's medial gap fill still covers any mid-wall gap.
                 for (const ExPolygon &ann : annuli) {
                     chains.push_back({ ann });
+                    bore_skin_ci.push_back(chains.size() - 1);
                     chain_thin.push_back(char(0));
                     chain_band.push_back(char(true));             // essential skin: never sliver-filtered
                     chain_solid.push_back(char(false));
                 }
                 continue;
             }
-            if (!keepouts.empty()) {
-                // MIXED: strip the swoopable holes from the partition seed. The cell/classic
-                // paths below run on the REDUCED seed (oversized holes only - or none, for a
-                // concave outline whose bores all qualify) and finish_mixed() attaches the
-                // keep-outs to every chain they produce plus the bore-skin annuli.
+            if (!keepouts.empty() || !big_annuli.empty()) {
+                // MIXED: strip the swoopable holes from the partition seed and hand oversized-but-
+                // clean bores to the partition as their GROWN (recessed) holes. The cell/classic
+                // paths below run on the REDUCED seed; finish_mixed() attaches the keep-outs to
+                // every chain they produce plus ALL bore-skin annuli (swooped and celled-clean).
                 eff.holes     = big_holes;
                 seed_keepouts = std::move(keepouts);
                 seed_annuli   = std::move(annuli);
+                for (ExPolygon &ann : big_annuli)
+                    seed_annuli.push_back(std::move(ann));
             }
-            // no swoopable holes at all: fall through with the seed unchanged
+            // nothing swoopable and no celled-clean annulus: fall through with the seed unchanged
         }
         if (woven.cell_split) {
             // TRIAL pass: would ANY modern cut split this seed - a bore-bisector (multi-hole
             // section) or a concave notch? The trial's geometry is discarded; it only decides
             // whether to peel. A seed with neither marches exactly like the classic path.
+            // NOTE (2026-07-27): a thin-strut "widen the cell target to sparsify" experiment lived
+            // here and was REVERTED after it broke the spoke_wheel print - a ~4mm structural strut
+            // CANNOT be sparsified (its cell hosts only disconnected rings/strands above the solid
+            // bottom layer, so the spokes fell apart). Effective coverage is a material metric, not
+            // a structural one: thin structural features must stay solid. The wheel's ~86% is correct.
             const double cell_target = woven.cell_size > 0.1
                                      ? scale_(woven.cell_size)
                                      : (woven.stride > 1 ? 4.0 * double(woven.stride) : 16.0) * double(spacing);
@@ -1609,6 +1642,7 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
         cc.peel_depth = ci < chain_thin.size() ? int(chain_thin[ci]) : 0;
         cc.from_solid = ci < chain_solid.size() && chain_solid[ci] != 0;
         cc.peel_band  = ci < chain_band.size() && chain_band[ci] != 0;
+        cc.bore_skin  = std::find(bore_skin_ci.begin(), bore_skin_ci.end(), ci) != bore_skin_ci.end();
         if (ci < chain_obs.size())
             cc.obstacles = chain_obs[ci];
         cc.loops.reserve(chain.size() * 2 + 1);
@@ -2833,7 +2867,12 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         std::vector<char> flags;
         std::vector<coord_t> zoff;
         std::vector<float> fill;
-        Polyline sub = spiralize_rings(chain.loops, reverse_chains, seam_step_rad, seam_jitter_rad,
+        // A per-bore skin annulus pins its seam (no precession/jitter): the bore interior then
+        // shows one clean vertical seam instead of a helix smeared up the wall. The outer skin
+        // and interior chains keep the precessing anchor that spreads their seam.
+        const double chain_seam_step   = chain.bore_skin ? 0.0 : seam_step_rad;
+        const double chain_seam_jitter = chain.bore_skin ? 0.0 : seam_jitter_rad;
+        Polyline sub = spiralize_rings(chain.loops, reverse_chains, chain_seam_step, chain_seam_jitter,
                                        ring_spacing, layer_index, chain.has_bore, &flags, interlock_amp, &zoff,
                                        connector_spread, chain.woven_infill ? woven.shell_loops : 0,
                                        &merged.front(), &fill, deep_concave, !chain.obstacles.empty(),
@@ -3148,6 +3187,19 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
             const HoleRail *gap_hole = nullptr;   // a run of in-hole points was DROPPED
             for (size_t i = 0; i < n0; ++i) {
                 const Point &b = spiral.points[i];
+                // OUTER-CONTOUR SANCTITY (the hole-drop's dual): nothing may extrude OUTSIDE the
+                // part. On an odd multibore SOLID layer the greedy tour-stitcher reverses a chain
+                // and its inter-chain connector arcs past the contour (the counterbored disc: an
+                // interior ring fingered to r+0.9mm at ~165deg on the FIRST RAMPED layer -> that
+                // over-radius bead overhangs open air, gets flagged a bridge, and droops into a
+                // frilly bottom-edge flap). Drop the outside run; the finger's base points on
+                // either side reconnect inside the wall, so no bead lands past the part edge.
+                if (!merged.front().contour.contains(b)) {
+                    if (cs_env_on("CS_DBG_CELLS"))
+                        fprintf(stderr, "[sanctity-out] L%zu drop i=%zu/%zu (%.2f,%.2f)\n", layer_index, i, n0,
+                                unscale<double>(b.x()), unscale<double>(b.y()));
+                    continue;
+                }
                 if (const HoleRail *hr = in_hole(b)) {
                     if (cs_env_on("CS_DBG_CELLS"))
                         fprintf(stderr, "[sanctity] L%zu drop i=%zu/%zu (%.2f,%.2f) internal=%d connector=%d wrap=%.2f\n",

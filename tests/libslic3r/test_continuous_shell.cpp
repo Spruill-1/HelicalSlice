@@ -941,6 +941,153 @@ TEST_CASE("Continuous shell mixed mode swoops small bores beside an oversized on
     REQUIRE(mixed > 0.30 * cells);
 }
 
+TEST_CASE("Continuous shell wraps an oversized ROUND bore, not a non-round cutout", "[ContinuousShell]") {
+    // Bore #2: a bore too big to swoop but still ROUND (a counterbore/taper) gets a dedicated clean
+    // skin annulus so its wall is a consistent pinned shell top-to-bottom instead of a cell-built
+    // wall whose seam precesses. But that annulus must be gated on circularity: a large NON-round
+    // cutout (a spoke wheel's sector, circularity ~0.78 like a square) must NOT get one, or each is
+    // wrapped in a shell and the part over-solidifies (regression: wheel 87% -> 110%).
+    auto arc = [](double r, double a0, double a1, int n, Points &out) {
+        for (int i = 0; i < n; ++i) {
+            const double a = a0 + (a1 - a0) * i / double(n - 1);
+            out.emplace_back(coord_t(std::llround(r * std::cos(a))), coord_t(std::llround(r * std::sin(a))));
+        }
+    };
+    auto circle = [](double cx, double r, bool cw) {
+        Polygon p;
+        for (int i = 0; i < 64; ++i) {
+            const double a = 2.0 * M_PI * i / 64;
+            p.points.emplace_back(coord_t(std::llround(cx + r * std::cos(a))), coord_t(std::llround(r * std::sin(a))));
+        }
+        if (cw) p.reverse();
+        return p;
+    };
+    auto extrude_len = [](ExtrusionEntityCollection &e) {
+        std::vector<ExtrusionPath *> paths;
+        for (ExtrusionEntity *ent : e.entities)
+            ContinuousShellPathBuilder::collect_paths(ent, paths);
+        double xy = 0.0;
+        for (const ExtrusionPath *p : paths)
+            for (size_t i = 1; i < p->polyline.points.size(); ++i) {
+                const Point a(p->polyline.points[i].x(), p->polyline.points[i].y());
+                const Point b(p->polyline.points[i - 1].x(), p->polyline.points[i - 1].y());
+                xy += (a - b).cast<double>().norm();
+            }
+        return xy;
+    };
+    Flow flow(0.42f, 0.2f, 0.4f);
+    EnvFlag bubble("CS_BUBBLE", "1");
+    auto slice_len = [&](bool obstacles, const ExPolygon &region) {
+        Surfaces surfaces{ Surface(stInternal, region) };
+        PrintRegionConfig cfg;
+        cfg.wall_loops.value = 2;
+        cfg.continuous_shell_infill_density.value = 25;
+        cfg.continuous_shell_infill_weave.value   = 100;
+        cfg.continuous_shell_cell_split.value     = true;
+        cfg.continuous_shell_bore_obstacles.value = obstacles;
+        ExtrusionEntityCollection e; std::string reason;
+        REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.2, &cfg, e, &reason, false, 0));
+        return extrude_len(e);
+    };
+
+    SECTION("non-round sector cutouts are not wrapped in annuli") {
+        // A spoke wheel: disc with 4 annular-sector cutouts (circularity ~0.78) + a small center bore.
+        ExPolygon wheel;
+        wheel.contour = circle(0, 18000000, false);
+        const double s_half = 12.0 * M_PI / 180.0;
+        for (int s = 0; s < 4; ++s) {
+            const double a_mid = 2.0 * M_PI * s / 4.0;
+            Polygon sector;
+            arc(14000000, a_mid + s_half, a_mid + M_PI / 2.0 - s_half, 12, sector.points);
+            arc( 7000000, a_mid + M_PI / 2.0 - s_half, a_mid + s_half, 12, sector.points);
+            sector.reverse();
+            wheel.holes.push_back(std::move(sector));
+        }
+        wheel.holes.push_back(circle(0, 2500000, true));
+        const double on  = slice_len(true, wheel);
+        const double off = slice_len(false, wheel);
+        INFO("bore_obstacles on=" << on * SCALING_FACTOR << " off=" << off * SCALING_FACTOR);
+        // Wrapping the sectors in shell annuli inflated the wheel ~25%; the gate must keep them plain.
+        REQUIRE(on < 1.10 * off);
+    }
+
+    SECTION("an oversized round bore stays hollow with its clean wall") {
+        // A single big central round bore (a taper/counterbore) - too big to swoop but round, so it
+        // earns a celled skin annulus; the bore must stay HOLLOW (the annulus is the wall, not fill).
+        ExPolygon disc;
+        disc.contour = circle(0, 16000000, false);
+        disc.holes.push_back(circle(0, 6000000, true));   // r6 bore: fails the swoop size gate, round
+        Surfaces surfaces{ Surface(stInternal, disc) };
+        PrintRegionConfig cfg;
+        cfg.wall_loops.value = 2;
+        cfg.continuous_shell_infill_density.value = 25;
+        cfg.continuous_shell_infill_weave.value   = 100;
+        cfg.continuous_shell_cell_split.value     = true;
+        cfg.continuous_shell_bore_obstacles.value = true;
+        ExtrusionEntityCollection e; std::string reason;
+        REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.2, &cfg, e, &reason, false, 0));
+        std::vector<ExtrusionPath *> paths;
+        for (ExtrusionEntity *ent : e.entities)
+            ContinuousShellPathBuilder::collect_paths(ent, paths);
+        size_t in_bore = 0;
+        for (const ExtrusionPath *p : paths)
+            for (const auto &pt : p->polyline.points)
+                if (double(pt.x()) * pt.x() + double(pt.y()) * pt.y() < 5300000.0 * 5300000.0)
+                    ++in_bore;                            // inside r5.3 (bore r6 minus ~1.5 bead)
+        REQUIRE(in_bore == 0);
+    }
+}
+
+TEST_CASE("Continuous shell keeps a solid multibore layer inside the part contour", "[ContinuousShell]") {
+    // Reproduces the counterbored disc's bottom-edge flap: a 3-bore solid (force_solid) layer
+    // (taper at centre, blind bore at (-10,0), slant at (0,-10)) had an interior ring poke OUT
+    // to r=21.3 past the R20 contour at ~165deg on the first ramped layer -> that bead overhangs
+    // open air (a bridge) and droops into a frilly flap. No fill may extrude outside the contour.
+    auto circle = [](double cx, double cy, double r, bool cw) {
+        Polygon p;
+        for (int i = 0; i < 64; ++i) {
+            const double a = 2.0 * M_PI * i / 64;
+            p.points.emplace_back(coord_t(std::llround(cx + r * std::cos(a))), coord_t(std::llround(cy + r * std::sin(a))));
+        }
+        if (cw) p.reverse();
+        return p;
+    };
+    ExPolygon disc;
+    disc.contour = circle(0, 0, 20000000, false);
+    disc.holes.push_back(circle(0, 0, 2000000, true));          // taper (narrow end)
+    disc.holes.push_back(circle(-10000000, 0, 3000000, true));  // blind-from-bottom
+    disc.holes.push_back(circle(0, -10000000, 2500000, true));  // slant (bottom end)
+    Surfaces surfaces{ Surface(stInternal, disc) };
+    Flow flow(0.42f, 0.2f, 0.4f);
+    EnvFlag bubble("CS_BUBBLE", "1");
+    for (size_t layer = 0; layer <= 4; ++layer) {
+        PrintRegionConfig cfg;
+        cfg.wall_loops.value = 2;
+        cfg.continuous_shell_infill_density.value = 25;
+        cfg.continuous_shell_infill_weave.value   = 100;
+        cfg.continuous_shell_cell_split.value     = true;
+        cfg.continuous_shell_bore_obstacles.value = true;
+        cfg.continuous_shell_infill_dyadic.value  = true;
+        cfg.continuous_shell_seam_coast.value     = 90;
+        cfg.continuous_shell_seam_step.value      = 1600;
+        ExtrusionEntityCollection e; std::string reason;
+        // Mirror the real call (LayerRegion.cpp): reverse_path = layer parity, then layer_index,
+        // then force_solid (the bottom 3 shells). The flap is on layer_id 1 (odd -> reverse_path).
+        const bool reverse     = (layer & 1u) != 0;
+        const bool force_solid = layer < 3;
+        REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.2, &cfg, e, &reason, reverse, layer, force_solid));
+        std::vector<ExtrusionPath *> paths;
+        for (ExtrusionEntity *ent : e.entities)
+            ContinuousShellPathBuilder::collect_paths(ent, paths);
+        double rmax = 0.0;
+        for (const ExtrusionPath *p : paths)
+            for (const auto &pt : p->polyline.points)
+                rmax = std::max(rmax, std::hypot(double(pt.x()), double(pt.y())));
+        INFO("layer_index=" << layer << " rmax=" << rmax * SCALING_FACTOR << "mm");
+        REQUIRE(rmax < 20100000.0);   // nothing past the R20 contour (pre-fix this hit 20.9 at layer 1)
+    }
+}
+
 TEST_CASE("Continuous shell bridges a blind bore cap instead of sagging rings over it", "[ContinuousShell]") {
     // A solid cap layer whose region has NO hole but sits over an open bore below
     // (bridge_over island): the builder must ring the opening (like the layer below did)
