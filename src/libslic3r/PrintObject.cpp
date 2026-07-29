@@ -469,6 +469,62 @@ void PrintObject::make_perimeters()
     // No-ops (and leaves m_cs_support empty) unless the feature is enabled.
     this->continuous_shell_supports();
 
+    // Continuous shell cannot spiral a cross-section narrower than a single bead, and a part
+    // that starts at a POINT has exactly that at its base - a cube balanced on one vertex, a
+    // cone or pyramid tip, a teardrop. Those layers used to abort the whole slice with
+    // "could not construct a contour spiral".
+    //
+    // Find the first layer that can actually host a ring. Layers below it stay planar, which
+    // is the SAME mechanism the mode already uses for its bed-adhesion base layers - the
+    // ramped region above remains one unbroken bead, so continuity is preserved exactly. The
+    // alternative (falling back per layer wherever the spiral fails) would drop planar layers
+    // into the MIDDLE of the bead on any part that pinches at mid-height, breaking the single
+    // continuous bead this mode exists to produce.
+    m_cs_first_ramped = 0;
+    m_cs_last_ramped  = std::numeric_limits<size_t>::max();
+    if (this->has_continuous_shell() && !m_layers.empty()) {
+        const coord_t bead = scale_(m_print->config().nozzle_diameter.empty()
+                                        ? 0.4 : m_print->config().nozzle_diameter.get_at(0));
+        // A section is unspiralable when it cannot host a bead ring AND is tiny overall.
+        // BOTH clauses are load-bearing:
+        //  * the erosion clause is what actually asks "can a ring fit" (an area test alone is
+        //    shape-blind: a slender triangle and a compact square of equal area differ);
+        //  * the area clause protects a SINGLE-BEAD WALL, which erodes to nothing yet spirals
+        //    perfectly well - it is the mode's canonical use case, and an erosion-only test
+        //    would silently turn every thin-walled vase planar.
+        // 2mm^2 sits far below any real cross-section (a Ø3 single-bead tube is already 3.4mm^2)
+        // and far above a point tip (a 0.5mm triangle is 0.1mm^2).
+        const double tiny_area = 2.0 * double(scale_(1.)) * double(scale_(1.));
+        auto unspiralable = [&](const Layer *l) {
+            double area = 0.0;
+            for (const ExPolygon &p : l->lslices)
+                area += p.area();
+            return area < tiny_area && offset_ex(l->lslices, -0.5f * float(bead)).empty();
+        };
+        const size_t n = m_layers.size();
+        size_t first = 0;
+        while (first < n && unspiralable(m_layers[first]))
+            ++first;
+        // Nothing spiralable anywhere: leave both boundaries alone and let the existing
+        // per-layer error report it clearly rather than silently printing nothing.
+        if (first < n) {
+            size_t last = n - 1;
+            while (last > first && unspiralable(m_layers[last]))
+                --last;
+            m_cs_first_ramped = first;
+            m_cs_last_ramped  = last;
+            if (std::getenv("CS_DBG_SUPPORT") != nullptr)
+                fprintf(stderr, "[cs-tips] layers=%zu spiralable=[%zu..%zu]  planar_base=%zu dropped_apex=%zu\n",
+                        n, first, last, first, n - 1 - last);
+            if (first > 0)
+                BOOST_LOG_TRIVIAL(info) << "Continuous shell: first " << first
+                                        << " layer(s) start at a point - printed planar.";
+            if (last + 1 < n)
+                BOOST_LOG_TRIVIAL(info) << "Continuous shell: last " << (n - 1 - last)
+                                        << " layer(s) converge to a point - dropped.";
+        }
+    }
+
     // Revert the typed slices into untyped slices.
     if (m_typed_slices) {
         for (Layer *layer : m_layers) {

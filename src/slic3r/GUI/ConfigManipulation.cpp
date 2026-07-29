@@ -719,6 +719,13 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
     for (auto el : {"continuous_shell_bubble_height", "continuous_shell_bubble_period",
                     "continuous_shell_bubble_pitch", "continuous_shell_infill_dyadic"})
         toggle_line(el, has_cs_bubble);
+    // Scaffold supports are a continuous-shell mechanism, so the whole group only appears
+    // with the mode on; its parameters then follow the scaffold toggle itself.
+    toggle_line("continuous_shell_support", has_continuous_shell);
+    bool has_cs_support = has_continuous_shell && config->opt_bool("continuous_shell_support");
+    for (auto el : {"continuous_shell_support_threshold", "continuous_shell_support_gap",
+                    "continuous_shell_support_density", "continuous_shell_support_base_height"})
+        toggle_line(el, has_cs_support);
     bool has_top_shell    = config->opt_int("top_shell_layers") > 0 || (has_spiral_vase && config->opt_int("bottom_shell_layers") > 1);
     bool has_bottom_shell = config->opt_int("bottom_shell_layers") > 0;
     bool has_solid_infill = has_top_shell || has_bottom_shell;

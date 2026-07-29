@@ -474,6 +474,15 @@ public:
         return (layer_idx < m_cs_support.size() && !m_cs_support[layer_idx].empty())
                    ? &m_cs_support[layer_idx] : nullptr;
     }
+    // First layer of THIS object wide enough to spiral. Layers below start at a point (a
+    // corner-down cube, a cone tip) and cannot host a ring; they print planar like the
+    // existing base layers. 0 when the object spirals from its first layer.
+    size_t continuous_shell_first_ramped_layer() const { return m_cs_first_ramped; }
+    // Last layer worth spiralizing. Layers above CONVERGE TO A POINT (a corner-down cube's
+    // apex, a cone tip) and hold less than a bead of material, so they are dropped outright
+    // rather than printed - the bead simply ends one layer earlier. size_t max when the
+    // object spirals all the way to its top layer.
+    size_t continuous_shell_last_ramped_layer() const { return m_cs_last_ramped; }
 
   private:
     // to be called from Print only.
@@ -582,6 +591,9 @@ private:
     // Continuous-shell scaffold footprint per layer (index-aligned with m_layers).
     // Left empty when scaffold supports are off, which is what keeps the feature inert.
     std::vector<ExPolygons>                 m_cs_support;
+    // Spiralable layer range (see continuous_shell_{first,last}_ramped_layer).
+    size_t                                  m_cs_first_ramped = 0;
+    size_t                                  m_cs_last_ramped  = std::numeric_limits<size_t>::max();
 
     std::pair<FillAdaptive::OctreePtr, FillAdaptive::OctreePtr> m_adaptive_fill_octrees;
     FillLightning::GeneratorPtr m_lightning_generator;
@@ -952,7 +964,16 @@ public:
     // beads get exported with travels and retractions intact.
     size_t              continuous_shell_first_layer() const {
         const int skirt_layers = m_config.skirt_loops.value > 0 ? m_config.skirt_height.value : 0;
-        return std::max<size_t>(1, size_t(std::max(0, skirt_layers)));
+        size_t first = std::max<size_t>(1, size_t(std::max(0, skirt_layers)));
+        // Parts that start at a POINT (a corner-down cube, a cone tip) have base layers too
+        // narrow to host a single bead ring. Those layers print planar, exactly like the
+        // bed-adhesion base layers above - which keeps the ramped region ONE unbroken bead
+        // instead of splicing planar layers into the middle of it. Taking the max across
+        // objects keeps this a single print-wide boundary, which both PrintObject::
+        // continuous_shell_z and GCode::process_layer depend on agreeing.
+        for (const PrintObject *o : m_objects)
+            first = std::max(first, o->continuous_shell_first_ramped_layer());
+        return first;
     }
     //BBS
     bool                has_auto_brim() const    {

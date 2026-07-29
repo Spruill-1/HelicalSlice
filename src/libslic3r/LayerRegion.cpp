@@ -172,7 +172,33 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
     g.overhang_flow         = this->bridging_flow(frPerimeter, object_config.thick_bridges);
     g.solid_infill_flow     = this->flow(frSolidInfill);
 
-    const bool use_continuous_shell = this->layer()->object()->print()->config().continuous_shell_mode.value;
+    // Layers below continuous_shell_first_ramped_layer() have a cross-section too narrow to
+    // host a single bead ring - a part that starts at a POINT (a corner-down cube, a cone or
+    // pyramid tip). Spiralizing them is impossible, so they print as ordinary walls, exactly
+    // like the mode's other planar base layers. That boundary is folded into
+    // Print::continuous_shell_first_layer(), so the bead that DOES get spiralized is also
+    // precisely the bead that gets Z-ramped and travel-stripped - the continuous region stays
+    // one unbroken bead, with no planar layer ever spliced into its middle.
+    // For every ordinary part this is 0 and nothing changes.
+    const bool use_continuous_shell = this->layer()->object()->print()->config().continuous_shell_mode.value &&
+        size_t(this->layer()->id()) >= this->layer()->object()->continuous_shell_first_ramped_layer();
+
+    // Layers above the spiralable range CONVERGE TO A POINT - a corner-down cube's apex, a cone
+    // tip - and hold less than a bead of material. There is nothing worth printing there, so the
+    // bead simply ends one layer earlier instead of trying (and failing) to spiral a dot. Only
+    // trailing layers are dropped, so the bead still ends cleanly at its top; nothing is removed
+    // from the middle of the print.
+    if (use_continuous_shell &&
+        size_t(this->layer()->id()) > this->layer()->object()->continuous_shell_last_ramped_layer()) {
+        this->perimeters.clear();
+        this->fills.clear();
+        this->thin_fills.clear();
+        if (fill_surfaces != nullptr)
+            fill_surfaces->clear();
+        if (fill_no_overlap != nullptr)
+            fill_no_overlap->clear();
+        return;
+    }
 
     // Print::validate rejects any continuous-shell setup with more than one printing
     // region per object, so a merged multi-region layer here means a configuration
@@ -346,8 +372,34 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
             if (fill_no_overlap != nullptr)
                 fill_no_overlap->clear();
         } else {
-            // Falling back to normal walls for a single layer would reintroduce the
-            // very seams/breaks this mode removes, so fail loudly instead.
+            // A cross-section too small to spiral is a POINT - the tip of a corner-down cube, a
+            // cone apex. No geometric proxy predicts this reliably (area is shape-blind; an
+            // erosion test rejects legitimate single-bead walls), so the authority on whether a
+            // section can be spiralized is the builder itself: if it declines AND the section
+            // holds less than a couple of mm2, the layer is a tip and is dropped. Nothing of
+            // structural value is lost - it is a sub-bead dot.
+            //
+            // The area guard is what keeps this safe: it can only ever drop a near-degenerate
+            // section, never quietly planarise or delete a real layer. A section that small in
+            // the MIDDLE of a part means the part is pinched to a point there and is severed
+            // anyway, so there is no continuous bead to preserve across it.
+            double sect_area = 0.0;
+            for (const ExPolygon &ep : union_ex(slices.surfaces))
+                sect_area += ep.area();
+            const double tiny_area = 2.0 * double(scale_(1.)) * double(scale_(1.));
+            if (sect_area < tiny_area) {
+                this->perimeters.clear();
+                this->fills.clear();
+                this->thin_fills.clear();
+                if (fill_surfaces != nullptr)
+                    fill_surfaces->clear();
+                if (fill_no_overlap != nullptr)
+                    fill_no_overlap->clear();
+                return;
+            }
+            // A real cross-section that cannot be spiralized is a genuine defect. Falling back
+            // to normal walls here would reintroduce the very seams/breaks this mode removes,
+            // so fail loudly instead.
             throw Slic3r::RuntimeError(
                 (boost::format("Continuous shell mode could not generate a continuous path at layer %1%: %2%")
                  % this->layer()->id() % reason).str());

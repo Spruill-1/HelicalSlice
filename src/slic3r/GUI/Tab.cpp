@@ -2890,6 +2890,17 @@ void TabPrint::build()
         optgroup->append_single_option_line("extrusion_rate_smoothing_external_perimeter_only", "speed_settings_advanced");
 
     page = add_options_page(L("Support"), "custom-gcode_support"); // ORCA: icon only visible on placeholders
+        // Continuous-shell scaffolds are a separate mechanism from the normal support
+        // generator (they ride the object's own single bead rather than being their own
+        // extrusions), so they get their own group. Hidden entirely unless continuous shell
+        // mode is on - see ConfigManipulation::toggle_print_fff_options.
+        optgroup = page->new_optgroup(L("Continuous shell supports"), L"param_support");
+        optgroup->append_single_option_line("continuous_shell_support", "strength_settings_walls#continuous-shell-mode");
+        optgroup->append_single_option_line("continuous_shell_support_threshold", "strength_settings_walls#continuous-shell-mode");
+        optgroup->append_single_option_line("continuous_shell_support_gap", "strength_settings_walls#continuous-shell-mode");
+        optgroup->append_single_option_line("continuous_shell_support_density", "strength_settings_walls#continuous-shell-mode");
+        optgroup->append_single_option_line("continuous_shell_support_base_height", "strength_settings_walls#continuous-shell-mode");
+
         optgroup = page->new_optgroup(L("Support"), L"param_support");
         optgroup->append_single_option_line("enable_support", "support_settings_support");
         optgroup->append_single_option_line("support_type", "support_settings_support#type");
