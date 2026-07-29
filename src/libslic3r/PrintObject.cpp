@@ -842,11 +842,21 @@ void PrintObject::continuous_shell_supports()
     }
 
     if (std::getenv("CS_DBG_SUPPORT") != nullptr) {
-        size_t nl = 0; double a = 0.0;
+        size_t nl = 0, noh = 0; double a = 0.0;
+        for (const ExPolygons &e : overhang) if (!e.empty()) ++noh;
         for (const ExPolygons &e : m_cs_support)
             if (!e.empty()) { ++nl; for (const ExPolygon &p : e) a += p.area(); }
-        BOOST_LOG_TRIVIAL(error) << "[cs-support] layers with scaffold: " << nl << "/" << n
-                                 << "  total area " << (a * SCALING_FACTOR * SCALING_FACTOR) << " mm^2";
+        fprintf(stderr, "[cs-prepass] layers=%zu  with_overhang=%zu  with_scaffold=%zu  area=%.1fmm2\n",
+                n, noh, nl, a * SCALING_FACTOR * SCALING_FACTOR);
+        for (size_t k = 0; k < n && k < 14; ++k) {
+            double ao = 0.0, as = 0.0;
+            for (const ExPolygon &p : overhang[k])     ao += p.area();
+            for (const ExPolygon &p : m_cs_support[k]) as += p.area();
+            fprintf(stderr, "   L%-3zu model=%.2fmm2 overhang=%.3fmm2 scaffold=%.3fmm2\n", k,
+                    [&]{ double m = 0; for (const ExPolygon &p : m_layers[k]->lslices) m += p.area();
+                         return m * SCALING_FACTOR * SCALING_FACTOR; }(),
+                    ao * SCALING_FACTOR * SCALING_FACTOR, as * SCALING_FACTOR * SCALING_FACTOR);
+        }
     }
 }
 

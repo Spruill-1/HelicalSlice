@@ -195,6 +195,19 @@ void Layer::make_perimeters()
  			(*layerm)->perimeters.clear();
  			(*layerm)->fills.clear();
  			(*layerm)->thin_fills.clear();
+            // CONTINUOUS-SHELL SCAFFOLD-ONLY LAYER. An object can have components disconnected
+            // in Z (a body floating above its own base), leaving heights with no model slice at
+            // all. Those layers are normally skipped outright - but the scaffold column that
+            // carries the component above still has to print here, or the object has empty
+            // layers and GCode refuses it. LayerRegion::make_perimeters knows how to emit a
+            // scaffold-only bead; it just has to be reached, so route empty regions into it
+            // when (and only when) this layer has a scaffold footprint.
+            if (m_object->continuous_shell_support_region(size_t(this->id())) != nullptr) {
+                (*layerm)->fill_surfaces.surfaces.clear();
+                (*layerm)->make_perimeters((*layerm)->slices, {*layerm}, &(*layerm)->fill_surfaces,
+                                           &(*layerm)->fill_no_overlap_expolygons);
+                (*layerm)->fill_expolygons = to_expolygons((*layerm)->fill_surfaces.surfaces);
+            }
     	} else {
 	        size_t region_id = layerm - m_regions.begin();
 	        if (done[region_id])

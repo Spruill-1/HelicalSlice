@@ -204,6 +204,22 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
                                "connected at every height.")
                  % this->layer()->id() % merged_slice.size()).str());
 
+        // SCAFFOLD-ONLY LAYERS. A single object can have components disconnected in Z (a body
+        // floating above its own base), leaving heights with no model cross-section at all.
+        // Those layers still need the scaffold column that carries the component above, but
+        // there is no model bead for it to ride - so the scaffold becomes the layer's bead in
+        // its own right. It is emitted as ordinary perimeter geometry, NOT as support role:
+        // the zero-rise rule exists to stop a scaffold stealing the MODEL's climb, and with no
+        // model here there is nothing to protect. The scaffold must take the rise itself, or
+        // the layer would never ramp and the bead would break.
+        const ExPolygons *scaffold_only = nullptr;
+        if (slices.surfaces.empty()) {
+            scaffold_only = this->layer()->object()->continuous_shell_support_region(
+                                size_t(this->layer()->id()));
+            if (scaffold_only == nullptr)
+                return;                        // genuinely nothing to print at this height
+        }
+
         ExtrusionEntityCollection continuous_entities;
         std::string reason;
         // Woven infill would sparsify every solid cross-section, including surfaces that must stay
@@ -221,7 +237,9 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         // four full-disc solid bands).
         bool force_solid = false;
         ExPolygons bridge_over;   // interior islands: bridge/patch footprints for the builder
-        if (region_config.continuous_shell_infill_density.value > 0) {
+        // (skipped on scaffold-only layers: shell/bridge analysis is about the MODEL's top and
+        // bottom surfaces, and there is no model at this height to reason about)
+        if (scaffold_only == nullptr && region_config.continuous_shell_infill_density.value > 0) {
             const int tsl = region_config.top_shell_layers.value;
             const int bsl = region_config.bottom_shell_layers.value;
             const coord_t bead = this->flow(frExternalPerimeter).scaled_width();
@@ -297,8 +315,19 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
             const double t       = base_h > EPSILON ? std::min(1.0, this->layer()->print_z / base_h) : 1.0;
             support_mult = 1.0 + (sparse - 1.0) * t;
         }
+        // On a scaffold-only layer the footprint IS the geometry to fill, so it is handed in as
+        // the layer's surfaces (and not additionally as a support region, which would try to
+        // build a second scaffold inside the first).
+        Surfaces scaffold_surfaces;
+        if (scaffold_only != nullptr) {
+            for (const ExPolygon &ep : *scaffold_only)
+                scaffold_surfaces.emplace_back(Surface(stInternal, ep));
+            support_reg = nullptr;
+        }
+        const Surfaces &cs_surfaces = scaffold_only != nullptr ? scaffold_surfaces : slices.surfaces;
+
         if (ContinuousShellPathBuilder::build_cross_section(
-                slices.surfaces, this->flow(frExternalPerimeter), this->layer()->height, &region_config,
+                cs_surfaces, this->flow(frExternalPerimeter), this->layer()->height, &region_config,
                 continuous_entities, &reason, (this->layer()->id() & 1u) != 0, size_t(this->layer()->id()), force_solid,
                 bridge_over.empty() ? nullptr : &bridge_over, support_reg, support_mult)) {
             this->perimeters.no_sort = false;
