@@ -113,9 +113,10 @@ WovenInfill woven_infill_params(const PrintRegionConfig *config)
     return w;
 }
 
-ExtrusionPath make_path(const Polyline3 &polyline, const Flow &flow, double layer_height)
+ExtrusionPath make_path(const Polyline3 &polyline, const Flow &flow, double layer_height,
+                        ExtrusionRole role = erExternalPerimeter)
 {
-    ExtrusionPath path(erExternalPerimeter);
+    ExtrusionPath path(role);
     path.polyline = polyline;
     path.mm3_per_mm = flow.mm3_per_mm();
     path.width = flow.width();
@@ -1217,6 +1218,10 @@ struct ContourChain {
     bool     from_solid   = false;   // marched piece had NO real holes: any band holes are the
                                      // convergence core, not a bore (degenerate rings droppable)
     bool     peel_band    = false;   // the global peeled-skin chain (never sliver-filtered)
+    bool     is_support   = false;   // scaffold support, not model: filled by the same Fermat spiral
+                                     // and carried on the same continuous bead, but PINNED TO ZERO
+                                     // Z RISE by apply_continuous_z so it cannot steal the model
+                                     // contour's per-layer climb (see the note there).
     bool     bore_skin    = false;   // a per-bore skin annulus (swoop/mixed mode). Its seam is PINNED
                                      // to a fixed angle (no per-layer precession) so the bore interior
                                      // gets one clean vertical seam instead of a helical scar smeared
@@ -2777,7 +2782,7 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     } else {
         woven = woven_infill_params(config);
     }
-    const std::vector<ContourChain> chains = contour_spiral(merged.front(), flow, layer_index, woven);
+    std::vector<ContourChain> chains = contour_spiral(merged.front(), flow, layer_index, woven);
     if (chains.empty()) {
         if (reason != nullptr)
             *reason = "Continuous shell mode could not construct a contour spiral.";
@@ -2849,7 +2854,8 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     // running tail - so a split cross-section's pieces are joined by the shortest hop
     // (along the wall) instead of long chords across the bore. A simple cross-section has
     // exactly one chain, so this is identical to a single spiral there.
-    struct Sub { Polyline pl; std::vector<char> flags; std::vector<coord_t> zoff; std::vector<float> fill; };
+    struct Sub { Polyline pl; std::vector<char> flags; std::vector<coord_t> zoff; std::vector<float> fill;
+                 bool sup = false; };
     std::vector<Sub> subs;
     // Per-layer reversal exists to give SINGLE-chain solid layers short inter-layer
     // joins (core end meets core start). A stitched MULTI-chain tour instead closes
@@ -2861,8 +2867,57 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     // closure below): reversal makes odd layers start at the buried core, where the
     // arc-anchor gap-skipping cannot protect the inter-layer join (observed as slit
     // hops on the clamp-collar shape).
+    // NOTE: computed from the MODEL chains only - the scaffold is appended below, after these,
+    // precisely so its presence cannot flip the model's reversal/closure strategy (a scaffold
+    // must be inert on the model bead, and chains.size() > 1 would otherwise silently change it).
     const bool closed_tour     = chains.size() > 1 || deep_concave;
     const bool reverse_chains  = closed_tour ? false : reverse_path;
+
+    // ---- experimental scaffold support (PROTOTYPE gate: CS_SUPPORT=<width_mm>) -----------
+    // Continuous-shell mode has no second extrusion to hand a support, so a scaffold has to
+    // ride the SAME continuous bead. It therefore becomes just one more chain: the existing
+    // connected-Fermat filler already emits a region with BOTH ENDS ON FREE SURFACES, which
+    // is exactly the property that lets a region be chained into the tour, and the existing
+    // greedy stitcher then joins it by the shortest hop like any other chain.
+    //
+    // Its points are pinned to ZERO Z RISE in apply_continuous_z. That is the load-bearing
+    // part of the design: the ramp distributes one layer_height by ARC FRACTION over the
+    // whole tour, so scaffold arc would otherwise steal climb from the model contour and
+    // dump the remainder as a step at the rail junction.
+    //
+    // Density ramps with height - dense at the plate (a scaffold's small footprint is all
+    // that holds it down) thinning as it rises (less material, and a weaker column snaps
+    // rather than tearing the wall on removal).
+    if (const char *sw = std::getenv("CS_SUPPORT"); sw != nullptr && std::atof(sw) > 0.0) {
+        auto envd = [](const char *n, double dflt) {
+            const char *v = std::getenv(n);
+            return (v != nullptr && *v != '\0' && std::atof(v) > 0.0) ? std::atof(v) : dflt;
+        };
+        const double width_mm = std::atof(sw);
+        const double gap_mm   = envd("CS_SUPPORT_GAP", 0.6);      // XY clearance to the model
+        const double sparse   = std::max(1.0, envd("CS_SUPPORT_SPARSE", 3.0));
+        const double ramp_mm  = envd("CS_SUPPORT_RAMP", 30.0);
+        const double z_mm     = double(layer_index) * layer_height;
+        const double mult     = 1.0 + (sparse - 1.0) * std::min(1.0, z_mm / ramp_mm);
+        const coord_t step    = std::max<coord_t>(coord_t(ring_spacing * mult), 1);
+
+        ContourChain sup;
+        sup.is_support = true;
+        sup.has_bore   = true;   // an annulus: the Fermat U-turn puts both ends on free surface
+        for (coord_t r = coord_t(scale_(gap_mm + width_mm)); r >= coord_t(scale_(gap_mm)); r -= step) {
+            Polygons ring = offset(merged.front().contour, float(r));
+            for (Polygon &g : ring)
+                sup.loops.emplace_back(std::move(g));
+        }
+        if (cs_env_on("CS_DBG_SUPPORT"))
+            fprintf(stderr, "[cs-support] L%zu width=%.2f gap=%.2f step=%lld r0=%lld r1=%lld loops=%zu chains=%zu\n",
+                    layer_index, width_mm, gap_mm, (long long) step,
+                    (long long) coord_t(scale_(gap_mm + width_mm)), (long long) coord_t(scale_(gap_mm)),
+                    sup.loops.size(), chains.size());
+        if (sup.loops.size() >= 2)
+            chains.push_back(std::move(sup));
+    }
+
     for (const ContourChain &chain : chains) {
         std::vector<char> flags;
         std::vector<coord_t> zoff;
@@ -2873,13 +2928,20 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         const double chain_seam_step   = chain.bore_skin ? 0.0 : seam_step_rad;
         const double chain_seam_jitter = chain.bore_skin ? 0.0 : seam_jitter_rad;
         Polyline sub = spiralize_rings(chain.loops, reverse_chains, chain_seam_step, chain_seam_jitter,
-                                       ring_spacing, layer_index, chain.has_bore, &flags, interlock_amp, &zoff,
+                                       // a sacrificial scaffold gets no brick-interlock Z wave: it
+                                       // needs no inter-layer keying, and the wave would otherwise
+                                       // ride on top of its (deliberately flat) frozen Z.
+                                       ring_spacing, layer_index, chain.has_bore, &flags,
+                                       chain.is_support ? coord_t(0) : interlock_amp, &zoff,
                                        connector_spread, chain.woven_infill ? woven.shell_loops : 0,
-                                       &merged.front(), &fill, deep_concave, !chain.obstacles.empty(),
+                                       // the model region drives seam-valley fill compensation; a
+                                       // scaffold sits OUTSIDE it, so it gets no region (flat flow).
+                                       chain.is_support ? nullptr : &merged.front(),
+                                       &fill, deep_concave, !chain.obstacles.empty(),
                                        chain.ride_rails.empty() ? nullptr : &chain.ride_rails);
         if (sub.points.size() >= 2 && sub.points.size() == flags.size() && sub.points.size() == zoff.size() &&
             sub.points.size() == fill.size())
-            subs.push_back({ std::move(sub), std::move(flags), std::move(zoff), std::move(fill) });
+            subs.push_back({ std::move(sub), std::move(flags), std::move(zoff), std::move(fill), chain.is_support });
         else if (cs_env_on("CS_DBG_CELLS"))
             fprintf(stderr, "[spiral-drop] L%zu loops=%zu pts=%zu flags=%zu zoff=%zu fill=%zu bore=%d woven=%d peel=%d\n",
                     layer_index, chain.loops.size(), sub.points.size(), flags.size(), zoff.size(), fill.size(),
@@ -2894,6 +2956,7 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     Polyline spiral;
     std::vector<char> internal;
     std::vector<char> connector;        // 1 on inter-chain connector points (thinned flow)
+    std::vector<char> support;          // 1 on scaffold points (emitted as erSupportMaterial, no Z rise)
     std::vector<coord_t> interlock_z;   // per-point Z offset (brick interlock), parallel to spiral.points
     std::vector<float> wrap_fill;       // seam-valley compensation multiplier per point
     auto append_sub = [&](Sub &s, bool rev) {
@@ -2908,6 +2971,7 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         interlock_z.insert(interlock_z.end(), s.zoff.begin(), s.zoff.end());
         wrap_fill.insert(wrap_fill.end(), s.fill.begin(), s.fill.end());
         connector.insert(connector.end(), s.pl.points.size(), char(0));
+        support.insert(support.end(), s.pl.points.size(), char(s.sup ? 1 : 0));
     };
 
     // Inter-chain connector routing. A split cross-section's sub-chains can END deep
@@ -3072,6 +3136,7 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
             interlock_z.push_back(0);
             wrap_fill.push_back(1.f);
             connector.push_back(1);
+            support.push_back(0);           // the rail itself is model bead: it carries rise
         }
         const size_t head_idx = spiral.points.size();
         if (cs_env_on("CS_DBG_CELLS"))
@@ -3099,12 +3164,14 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
             interlock_z.push_back(0);
             wrap_fill.push_back(1.f);
             connector.push_back(1);
+            support.push_back(0);
         }
         spiral.points.push_back(head);
         internal.push_back(1);
         interlock_z.push_back(0);
         wrap_fill.push_back(1.f);
         connector.push_back(1);
+        support.push_back(0);
     }
     if (spiral.points.size() < 2) {
         if (reason != nullptr)
@@ -3179,11 +3246,16 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
                     for (size_t k = ia; ; k = (k + rn - 1) % rn) { emit(rp[k]); if (k == ib) break; }
             };
             Points            np;
-            std::vector<char> ni, nc;
+            std::vector<char> ni, nc, ns;
             std::vector<coord_t> nz;
             std::vector<float>   nf;
             const size_t n0 = spiral.points.size();
             np.reserve(n0 + 64); ni.reserve(n0 + 64); nc.reserve(n0 + 64); nz.reserve(n0 + 64); nf.reserve(n0 + 64);
+            ns.reserve(n0 + 64);
+            // A scaffold support legitimately lives OUTSIDE the part contour, so it must be
+            // exempt from the outer-contour drop below (which would otherwise delete it whole).
+            const bool sup_ok = support.size() == n0;
+            auto sup_i = [&](size_t i) { return sup_ok ? support[i] : char(0); };
             const HoleRail *gap_hole = nullptr;   // a run of in-hole points was DROPPED
             for (size_t i = 0; i < n0; ++i) {
                 const Point &b = spiral.points[i];
@@ -3194,7 +3266,8 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
                 // over-radius bead overhangs open air, gets flagged a bridge, and droops into a
                 // frilly bottom-edge flap). Drop the outside run; the finger's base points on
                 // either side reconnect inside the wall, so no bead lands past the part edge.
-                if (!merged.front().contour.contains(b)) {
+                // ...EXCEPT a scaffold support, which is outside the part by design.
+                if (!sup_i(i) && !merged.front().contour.contains(b)) {
                     if (cs_env_on("CS_DBG_CELLS"))
                         fprintf(stderr, "[sanctity-out] L%zu drop i=%zu/%zu (%.2f,%.2f)\n", layer_index, i, n0,
                                 unscale<double>(b.x()), unscale<double>(b.y()));
@@ -3213,12 +3286,14 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
                     if (cross == nullptr)
                         for (const HoleRail &hr : hrails)
                             if (seg_crosses(np.back(), b, hr)) { cross = &hr; break; }
-                    if (cross != nullptr)
+                    if (cross != nullptr) {
                         detour(np.back(), b, *cross, np, ni, nc, nz, nf);
+                        ns.resize(np.size(), 0);   // detour points are model rails, never scaffold
+                    }
                 }
                 gap_hole = nullptr;
                 np.push_back(b); ni.push_back(internal[i]); nc.push_back(connector[i]);
-                nz.push_back(interlock_z[i]); nf.push_back(wrap_fill[i]);
+                nz.push_back(interlock_z[i]); nf.push_back(wrap_fill[i]); ns.push_back(sup_i(i));
             }
             if (np.size() >= 2) {
                 spiral.points = std::move(np);
@@ -3226,6 +3301,7 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
                 connector     = std::move(nc);
                 interlock_z   = std::move(nz);
                 wrap_fill     = std::move(nf);
+                support       = std::move(ns);
             }
         }
     }
@@ -3244,11 +3320,13 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         for (const Point &rp : arc.points) {
             spiral.points.push_back(rp);
             internal.push_back(1); interlock_z.push_back(0); wrap_fill.push_back(1.f); connector.push_back(1);
+            support.push_back(0);
         }
         for (size_t bi2 = 0; bi2 < bp.points.size(); ++bi2) {
             spiral.points.push_back(bp.points[bi2]);
             internal.push_back(1); interlock_z.push_back(0); wrap_fill.push_back(1.f);
             connector.push_back(bi2 == 0 ? char(1) : char(0));   // thin only the hop onto the patch
+            support.push_back(0);
         }
         return true;
     };
@@ -3498,12 +3576,25 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
 
     // Emit maximal runs of equal flow multiplier as sub-paths (keyed on the segment's
     // second point, matching the original over-extrusion convention), carrying interlock Z.
+    // Scaffold runs are emitted under erSupportMaterial: that role is what apply_continuous_z
+    // keys on to exclude them from the layer's Z-rise budget, so a run must never straddle
+    // the model/scaffold boundary.
+    const bool have_support = support.size() == spiral.points.size();
+    auto sup_at = [&](size_t i) { return have_support ? support[i] : char(0); };
+    if (cs_env_on("CS_DBG_SUPPORT")) {
+        size_t nsup = 0;
+        for (size_t i = 0; i < support.size(); ++i) nsup += (support[i] != 0);
+        fprintf(stderr, "[cs-emit] L%zu have_support=%d support.size=%zu spiral=%zu sup_pts=%zu\n",
+                layer_index, int(have_support), support.size(), spiral.points.size(), nsup);
+    }
+
     ExtrusionMultiPath path;
     size_t start = 0;
     while (start + 1 < spiral.points.size()) {
         const double cur = fmul[start + 1];
+        const char   cur_sup = sup_at(start + 1);
         size_t end = start + 1;
-        while (end + 1 < spiral.points.size() && fmul[end + 1] == cur)
+        while (end + 1 < spiral.points.size() && fmul[end + 1] == cur && sup_at(end + 1) == cur_sup)
             ++end;
         Polyline sub;
         sub.points.assign(spiral.points.begin() + start, spiral.points.begin() + end + 1);
@@ -3511,7 +3602,8 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         if (have_interlock)
             for (size_t i = 0; i < p3.points.size(); ++i)
                 p3.points[i].z() = interlock_z[start + i];
-        ExtrusionPath ep = make_path(p3, flow, layer_height);
+        ExtrusionPath ep = make_path(p3, flow, layer_height,
+                                     cur_sup ? erSupportMaterial : erExternalPerimeter);
         ep.mm3_per_mm *= cur;
         path.paths.emplace_back(std::move(ep));
         start = end;
@@ -3570,20 +3662,38 @@ void ContinuousShellPathBuilder::apply_continuous_z(ExtrusionEntity *entity, dou
     if (paths.empty() || layer_height <= 0.)
         return;
 
-    // Total XY arc length across the concatenated bead (paths share endpoints where
-    // build_cross_section split them for over-extrusion, which contributes zero length).
+    // Total XY arc length across the MODEL portion of the concatenated bead (paths share
+    // endpoints where build_cross_section split them for over-extrusion, which contributes
+    // zero length).
+    //
+    // Scaffold-support arc is EXCLUDED from the rise budget. The ramp below spreads exactly
+    // one layer_height over the tour by arc FRACTION, so arc spent on a scaffold would steal
+    // climb from the model contour: the model's own loop would rise only
+    // (arc_model / arc_total) of a layer and the remainder would land as a Z step where the
+    // tour leaves for (and returns from) the scaffold - a surface scar of the same family as
+    // the seam/flap artifacts. Excluding it keeps the model helix bit-identical to a
+    // support-free slice and leaves the scaffold as a flat spiral at its departure Z, which
+    // is what a sacrificial structure wants anyway.
+    auto is_support = [](const ExtrusionPath *p) { return p->role() == erSupportMaterial; };
     auto xy = [](const Point3 &p) { return Vec2d(double(p.x()), double(p.y())); };
     double total = 0.;
     const Point3 *prev = nullptr;
     for (const ExtrusionPath *p : paths) {
+        const bool sup = is_support(p);
         for (const Point3 &pt : p->polyline.points) {
-            if (prev != nullptr)
+            if (prev != nullptr && !sup)
                 total += (xy(pt) - xy(*prev)).norm();
             prev = &pt;
         }
     }
     if (total <= 0.)
         return;
+    if (std::getenv("CS_DBG_SUPPORT") != nullptr) {
+        size_t nsup = 0, npt = 0;
+        for (const ExtrusionPath *p : paths) { if (is_support(p)) ++nsup; npt += p->polyline.points.size(); }
+        fprintf(stderr, "[cs-z] paths=%zu support_paths=%zu pts=%zu model_arc=%.2f\n",
+                paths.size(), nsup, npt, total);
+    }
 
     // Walk again, assigning each point a Z offset from the layer's nominal Z. The bead
     // rises one layer_height across its whole XY arc, so it starts a layer below nominal
@@ -3599,9 +3709,12 @@ void ContinuousShellPathBuilder::apply_continuous_z(ExtrusionEntity *entity, dou
     // a woven Z-wave could otherwise dive under a thin first layer).
     const coord_t min_z_scaled = coord_t(std::llround(scale_(min_z_rel)));
     for (ExtrusionPath *p : paths) {
+        const bool sup = is_support(p);
         for (Point3 &pt : p->polyline.points) {
-            if (prev != nullptr)
+            if (prev != nullptr && !sup)
                 acc += (xy(pt) - xy(*prev)).norm();
+            // Scaffold points freeze the fraction (acc does not advance across them), so the
+            // whole scaffold sits flat at the Z the tour departed from.
             const double factor = acc / total;
             const double z_diff = -(1.0 - factor) * layer_height;
             pt.z() += coord_t(std::llround(scale_(z_diff)));
