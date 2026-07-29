@@ -464,6 +464,11 @@ void PrintObject::make_perimeters()
     m_print->set_status(15, L("Generating walls"));
     BOOST_LOG_TRIVIAL(info) << "Generating walls..." << log_memory_info();
 
+    // Continuous-shell scaffold footprints must exist before any layer builds its bead: the
+    // scaffold is carried on that same bead, and the projection needs the whole layer stack.
+    // No-ops (and leaves m_cs_support empty) unless the feature is enabled.
+    this->continuous_shell_supports();
+
     // Revert the typed slices into untyped slices.
     if (m_typed_slices) {
         for (Layer *layer : m_layers) {
@@ -767,6 +772,82 @@ bool PrintObject::need_z_contouring() const
 bool PrintObject::has_continuous_shell() const
 {
     return this->print()->config().continuous_shell_mode.value;
+}
+
+// Continuous-shell scaffold supports: find every layer's UNSUPPORTED outward growth and
+// project it downward into a scaffold volume.
+//
+// Overhang test: a wall leaning theta from vertical grows outward by layer_height*tan(theta)
+// per layer, so anything this layer adds beyond the layer below grown by that much is
+// unsupported. (threshold 0 -> support every overhang; 90 -> nothing.)
+//
+// The projection is the reason this must be a whole-object pre-pass rather than per-layer
+// work: an overhang discovered at layer k needs a column standing under it at every layer
+// below k, which a single layer's context cannot know. We accumulate top-down, subtracting
+// the model (grown by the clearance gap) at each level so the scaffold never touches the
+// part - the two share one continuous bead, so that gap plus the flow-starved rails are the
+// only things that make the scaffold removable.
+void PrintObject::continuous_shell_supports()
+{
+    m_cs_support.clear();
+    const PrintConfig &cfg = m_print->config();
+    if (!cfg.continuous_shell_mode.value || !cfg.continuous_shell_support.value || m_layers.size() < 2)
+        return;
+
+    const double gap     = cfg.continuous_shell_support_gap.value;
+    const double thr_deg = double(std::clamp(cfg.continuous_shell_support_threshold.value, 0, 90));
+    // tan(90 deg) is unbounded: treat it as "nothing overhangs" and bail rather than overflow.
+    if (thr_deg >= 90.0)
+        return;
+    const double tan_thr = std::tan(thr_deg * M_PI / 180.0);
+
+    const size_t n = m_layers.size();
+    // 1. per-layer unsupported growth
+    std::vector<ExPolygons> overhang(n);
+    for (size_t i = 1; i < n; ++i) {
+        const double grow = m_layers[i]->height * tan_thr;
+        const ExPolygons supported = grow > EPSILON
+            ? offset_ex(m_layers[i - 1]->lslices, float(scale_(grow)))
+            : m_layers[i - 1]->lslices;
+        overhang[i] = diff_ex(m_layers[i]->lslices, supported);
+    }
+
+    // 2. project down: everything overhanging at or above layer i needs a column at i.
+    const coord_t bead = scale_(cfg.nozzle_diameter.empty() ? 0.4 : cfg.nozzle_diameter.get_at(0));
+    m_cs_support.assign(n, ExPolygons());
+    ExPolygons acc;
+    for (size_t k = n; k-- > 0; ) {
+        if (!overhang[k].empty())
+            acc = union_ex(acc, overhang[k]);
+        if (acc.empty())
+            continue;
+        ExPolygons region = diff_ex(acc, offset_ex(m_layers[k]->lslices, float(scale_(gap))));
+        if (region.empty())
+            continue;
+        // CLOSE (dilate then erode), never open. Consecutive layers' overhang rings are thin
+        // and separated by exactly the self-supporting step, so the accumulated footprint is a
+        // family of concentric slivers with gaps between them. An opening erodes each sliver
+        // from both sides and annihilates the whole scaffold; a closing merges them into the
+        // solid footprint they physically represent.
+        region = offset_ex(offset_ex(region, float(bead)), -float(bead));
+        // Then drop pieces too small to print as a column - they would only string under the
+        // part. Area-based, so it cannot delete a thin-but-real footprint the way opening did.
+        const double min_area = 4.0 * double(bead) * double(bead);
+        ExPolygons keep;
+        for (ExPolygon &p : region)
+            if (p.area() >= min_area)
+                keep.emplace_back(std::move(p));
+        if (!keep.empty())
+            m_cs_support[k] = std::move(keep);
+    }
+
+    if (std::getenv("CS_DBG_SUPPORT") != nullptr) {
+        size_t nl = 0; double a = 0.0;
+        for (const ExPolygons &e : m_cs_support)
+            if (!e.empty()) { ++nl; for (const ExPolygon &p : e) a += p.area(); }
+        BOOST_LOG_TRIVIAL(error) << "[cs-support] layers with scaffold: " << nl << "/" << n
+                                 << "  total area " << (a * SCALING_FACTOR * SCALING_FACTOR) << " mm^2";
+    }
 }
 
 // Whole-object per-point Z planner for continuous-shell mode (L1). Runs at the

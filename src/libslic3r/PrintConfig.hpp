@@ -1638,6 +1638,14 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     // post-processing, so it must not vary per object/region (the per-ring tuning options
     // continuous_shell_* remain region options).
     ((ConfigOptionBool,               continuous_shell_mode))
+    // Scaffold supports share continuous_shell_mode's PRINT scope on purpose: the support
+    // region is a whole-object downward projection, so gate and parameters must not be able
+    // to disagree per region.
+    ((ConfigOptionBool,               continuous_shell_support))
+    ((ConfigOptionInt,                continuous_shell_support_threshold))
+    ((ConfigOptionFloat,              continuous_shell_support_gap))
+    ((ConfigOptionPercent,            continuous_shell_support_density))
+    ((ConfigOptionFloat,              continuous_shell_support_base_height))
     ((ConfigOptionBool,               spiral_mode))
     ((ConfigOptionBool,               spiral_mode_smooth))
     ((ConfigOptionFloatOrPercent,     spiral_mode_max_xy_smoothing))

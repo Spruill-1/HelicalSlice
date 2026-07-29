@@ -6231,6 +6231,73 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
+    // Continuous-shell scaffold supports. PRINT-SCOPE, like continuous_shell_mode itself: the
+    // scaffold is a whole-object structure (its region is derived from a downward projection
+    // across the entire layer stack), so gate and parameters deliberately live in the SAME
+    // scope - a region-scoped parameter under a print-scoped gate is exactly the mismatch that
+    // produced the earlier continuous-shell defect cluster.
+    def = this->add("continuous_shell_support", coBool);
+    def->label = L("Continuous shell supports");
+    def->category = L("Support");
+    def->tooltip = L("Generate a break-away scaffold under overhangs in continuous shell mode. Continuous "
+                     "shell prints the object as ONE unbroken bead, so the scaffold cannot be a separate "
+                     "extrusion: it is carried on the same bead as an extra Fermat-spiral region beside the "
+                     "model, held at a fixed clearance and joined only by thin, flow-starved rails that act "
+                     "as a tear line. It is therefore snipped off rather than peeled off, and works best in "
+                     "rigid materials - flexible filaments tear instead of snapping.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("continuous_shell_support_threshold", coInt);
+    def->label = L("Continuous shell support threshold");
+    def->category = L("Support");
+    def->tooltip = L("Overhang angle (from vertical) beyond which a layer's outward growth is considered "
+                     "unsupported and gets a scaffold beneath it. Larger values support less. 0 = support "
+                     "every overhang.");
+    def->sidetext = L("°");
+    def->min = 0;
+    def->max = 90;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(45));
+
+    def = this->add("continuous_shell_support_gap", coFloat);
+    def->label = L("Continuous shell support gap");
+    def->category = L("Support");
+    def->tooltip = L("Horizontal clearance held between the scaffold and the model wall. The scaffold is "
+                     "otherwise fused to the part (it shares one continuous bead), so this gap plus the "
+                     "flow-starved rails are what make removal possible. Too small welds the scaffold on; "
+                     "too large stops it supporting the overhang edge.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->max = 5;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0.6));
+
+    def = this->add("continuous_shell_support_density", coPercent);
+    def->label = L("Continuous shell support density");
+    def->category = L("Support");
+    def->tooltip = L("Ring density of the scaffold above its dense base. 100% prints the scaffold solid; "
+                     "lower values space the spiral's rings out, saving material and leaving a weaker "
+                     "column that snaps off more cleanly.");
+    def->sidetext = L("%");
+    def->min = 5;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(34));
+
+    def = this->add("continuous_shell_support_base_height", coFloat);
+    def->label = L("Continuous shell support dense base");
+    def->category = L("Support");
+    def->tooltip = L("Height over which the scaffold thins from solid at the build plate to the configured "
+                     "density. A scaffold has a small footprint and nothing but plate adhesion holding it, "
+                     "so its first millimetres are printed dense and it lightens as it rises. 0 = no dense "
+                     "base.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->max = 50;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(5));
+
     def = this->add("spiral_starting_flow_ratio", coFloat);
     def->label = L("Spiral starting flow ratio");
     // xgettext:no-c-format, no-boost-format

@@ -468,6 +468,13 @@ public:
     size_t get_id() const { return m_id; }
     void set_id(size_t id) { m_id = id; }
 
+    // Continuous-shell scaffold footprint for a layer, or nullptr when that layer has none.
+    // Read by LayerRegion::make_perimeters, hence public; the pre-pass that fills it is private.
+    const ExPolygons* continuous_shell_support_region(size_t layer_idx) const {
+        return (layer_idx < m_cs_support.size() && !m_cs_support[layer_idx].empty())
+                   ? &m_cs_support[layer_idx] : nullptr;
+    }
+
   private:
     // to be called from Print only.
     friend class Print;
@@ -501,6 +508,11 @@ private:
     // L1 continuous-shell: whole-object per-point Z planner, run at posContouring.
     bool has_continuous_shell() const;
     void continuous_shell_z();
+    // Continuous-shell scaffold supports: whole-object pre-pass (run at the head of
+    // make_perimeters, once slices exist) that finds each layer's unsupported outward
+    // growth and projects it DOWN into a scaffold volume. Per-layer result is consumed by
+    // LayerRegion::make_perimeters. Empty (and never populated) unless the feature is on.
+    void continuous_shell_supports();
     void generate_support_material();
     void estimate_curled_extrusions();
     void simplify_extrusion_path();
@@ -566,6 +578,10 @@ private:
     // this is set to true when LayerRegion->slices is split in top/internal/bottom
     // so that next call to make_perimeters() performs a union() before computing loops
     bool                    				m_typed_slices = false;
+
+    // Continuous-shell scaffold footprint per layer (index-aligned with m_layers).
+    // Left empty when scaffold supports are off, which is what keeps the feature inert.
+    std::vector<ExPolygons>                 m_cs_support;
 
     std::pair<FillAdaptive::OctreePtr, FillAdaptive::OctreePtr> m_adaptive_fill_octrees;
     FillLightning::GeneratorPtr m_lightning_generator;

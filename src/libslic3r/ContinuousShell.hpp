@@ -23,7 +23,16 @@ public:
                                     // them like the bore below) and spanned by a serpentine BRIDGE
                                     // patch appended to the tour, so the next layer's rings close
                                     // over taut lines instead of sagging into the opening.
-                                    const ExPolygons *bridge_over = nullptr);
+                                    const ExPolygons *bridge_over = nullptr,
+                                    // Scaffold-support footprint for this layer, computed by the
+                                    // whole-object pre-pass (PrintObject::continuous_shell_supports).
+                                    // Filled as an extra Fermat-spiral chain carried on the same
+                                    // continuous bead, held at zero Z rise by apply_continuous_z.
+                                    // nullptr (the default) leaves the toolpath bit-identical.
+                                    const ExPolygons *support_region = nullptr,
+                                    // Ring spacing multiplier for that scaffold: 1 = solid, higher
+                                    // = sparser. Ramped by the caller from dense at the plate.
+                                    double support_spacing_mult = 1.0);
 
     // Collect the leaf ExtrusionPaths of a continuous-shell entity tree in traversal
     // order. Used by the whole-object Z planner (PrintObject::continuous_shell_z) at

@@ -2419,3 +2419,104 @@ TEST_CASE("Continuous shell solid multibore layer leaves no see-through coverage
         REQUIRE(in_bore == 0);                        // patches are clipped to the region - bores stay sacred
     }
 }
+
+// The load-bearing invariant of scaffold supports: a scaffold rides the SAME continuous bead
+// as the model, and apply_continuous_z spreads one layer height over the tour by ARC FRACTION.
+// If scaffold arc were counted in that budget it would steal climb from the model contour (the
+// model's own loop would rise only arc_model/arc_total of a layer) and dump the remainder as a
+// Z step at the rail junction. So: the model must rise exactly one layer height regardless of
+// how much scaffold is present, and the scaffold must sit flat.
+TEST_CASE("Continuous shell scaffold support takes no share of the layer's Z rise", "[ContinuousShell]")
+{
+    // A disc, plus a scaffold footprint standing well clear of it.
+    Polygon disc, foot_o, foot_i;
+    for (int i = 0; i < 96; ++i) {
+        const double a = 2.0 * M_PI * i / 96.0;
+        disc.points.emplace_back(coord_t(10000000 * std::cos(a)), coord_t(10000000 * std::sin(a)));
+        // scaffold: an annulus from r=13 to r=17, i.e. 3mm clear of the disc edge
+        foot_o.points.emplace_back(coord_t(17000000 * std::cos(a)), coord_t(17000000 * std::sin(a)));
+        foot_i.points.emplace_back(coord_t(13000000 * std::cos(a)), coord_t(13000000 * std::sin(a)));
+    }
+    ExPolygons foot = diff_ex(Polygons{foot_o}, Polygons{foot_i});
+    REQUIRE(foot.size() == 1);
+
+    Surfaces surfaces{ Surface(stInternal, ExPolygon(disc)) };
+    Flow flow(0.5f, 0.25f, 0.5f);
+    const double layer_h = 0.25;
+
+    // Baseline: no scaffold at all.
+    ExtrusionEntityCollection e_off;
+    std::string reason;
+    REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, layer_h, nullptr, e_off,
+                                                           &reason, false, 4));
+    // With a scaffold.
+    ExtrusionEntityCollection e_on;
+    REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, layer_h, nullptr, e_on,
+                                                           &reason, false, 4, false, nullptr, &foot, 1.0));
+
+    auto z_span = [](ExtrusionEntityCollection &c, bool support) {
+        std::vector<ExtrusionPath *> paths;
+        ContinuousShellPathBuilder::collect_paths(&c, paths);
+        double lo = std::numeric_limits<double>::max(), hi = -lo;
+        for (const ExtrusionPath *p : paths) {
+            if ((p->role() == erSupportMaterial) != support) continue;
+            for (const Point3 &pt : p->polyline.points) {
+                const double z = unscale<double>(pt.z());
+                lo = std::min(lo, z); hi = std::max(hi, z);
+            }
+        }
+        return (hi < lo) ? std::pair<double,double>(0.0, -1.0) : std::pair<double,double>(lo, hi);
+    };
+
+    // The scaffold must actually have been emitted, or this test proves nothing.
+    ContinuousShellPathBuilder::apply_continuous_z(&e_on, layer_h);
+    ContinuousShellPathBuilder::apply_continuous_z(&e_off, layer_h);
+
+    const auto sup = z_span(e_on, true);
+    INFO("scaffold z span " << sup.first << " .. " << sup.second);
+    REQUIRE(sup.second >= sup.first);                       // scaffold paths exist
+
+    // 1. the scaffold is FLAT: its arc froze the ramp fraction.
+    REQUIRE((sup.second - sup.first) < 1e-6);
+
+    // 2. the model still rises exactly one layer height, with or without the scaffold.
+    const auto mon  = z_span(e_on,  false);
+    const auto moff = z_span(e_off, false);
+    REQUIRE(std::abs((mon.second  - mon.first)  - layer_h) < 1e-6);
+    REQUIRE(std::abs((moff.second - moff.first) - layer_h) < 1e-6);
+    // and by the same span as the scaffold-free slice
+    REQUIRE(std::abs((mon.second - mon.first) - (moff.second - moff.first)) < 1e-9);
+}
+
+// A scaffold lives OUTSIDE the part by construction, so it must survive the outer-contour
+// sanctity pass (which exists to stop the model's own bead escaping the contour). Regression
+// guard: an earlier build deleted every scaffold point here and silently emitted nothing.
+TEST_CASE("Continuous shell scaffold survives the outer-contour sanctity pass", "[ContinuousShell]")
+{
+    Polygon disc, foot_o, foot_i;
+    for (int i = 0; i < 96; ++i) {
+        const double a = 2.0 * M_PI * i / 96.0;
+        disc.points.emplace_back(coord_t(10000000 * std::cos(a)), coord_t(10000000 * std::sin(a)));
+        foot_o.points.emplace_back(coord_t(17000000 * std::cos(a)), coord_t(17000000 * std::sin(a)));
+        foot_i.points.emplace_back(coord_t(13000000 * std::cos(a)), coord_t(13000000 * std::sin(a)));
+    }
+    ExPolygons foot = diff_ex(Polygons{foot_o}, Polygons{foot_i});
+    Surfaces surfaces{ Surface(stInternal, ExPolygon(disc)) };
+    Flow flow(0.5f, 0.25f, 0.5f);
+    ExtrusionEntityCollection entities;
+    std::string reason;
+    REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.25, nullptr, entities,
+                                                           &reason, false, 4, false, nullptr, &foot, 1.0));
+    std::vector<ExtrusionPath *> paths;
+    ContinuousShellPathBuilder::collect_paths(&entities, paths);
+    size_t beyond = 0, support_pts = 0;
+    for (const ExtrusionPath *p : paths)
+        for (const Point3 &pt : p->polyline.points) {
+            const double r = std::hypot(unscale<double>(pt.x()), unscale<double>(pt.y()));
+            if (p->role() == erSupportMaterial) ++support_pts;
+            if (r > 11.0) ++beyond;                      // outside the disc + a bead of margin
+        }
+    INFO("support pts " << support_pts << ", points beyond the part " << beyond);
+    REQUIRE(support_pts > 0);                             // scaffold emitted at all
+    REQUIRE(beyond > 0);                                  // and NOT clipped back inside the part
+}

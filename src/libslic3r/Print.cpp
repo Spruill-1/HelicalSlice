@@ -287,7 +287,15 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
             || opt_key == "spiral_mode"
             // Continuous shell replaces perimeter/infill generation and the whole-object
             // Z plan; recompute from slicing like spiral_mode when toggled.
-            || opt_key == "continuous_shell_mode") {
+            || opt_key == "continuous_shell_mode"
+            // The scaffold's region is a downward projection over the whole layer stack and it
+            // is carried on the object's own bead, so any of these changes the toolpath from
+            // perimeter generation onward - reslice like the mode toggle itself.
+            || opt_key == "continuous_shell_support"
+            || opt_key == "continuous_shell_support_threshold"
+            || opt_key == "continuous_shell_support_gap"
+            || opt_key == "continuous_shell_support_density"
+            || opt_key == "continuous_shell_support_base_height") {
             osteps.emplace_back(posSlice);
         } else if (
                opt_key == "print_sequence"

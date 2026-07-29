@@ -282,10 +282,25 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
                         bridge_over.push_back(std::move(isl));
             }
         }
+        // Scaffold footprint for this layer (whole-object pre-pass), plus its density ramp:
+        // solid at the plate, thinning to continuous_shell_support_density over the dense-base
+        // height. A scaffold's footprint is small and only plate adhesion holds it, so the
+        // first millimetres are printed solid and it lightens as it rises.
+        const PrintConfig &print_cfg   = this->layer()->object()->print()->config();
+        const ExPolygons  *support_reg = this->layer()->object()->continuous_shell_support_region(
+                                             size_t(this->layer()->id()));
+        double support_mult = 1.0;
+        if (support_reg != nullptr) {
+            const double density = std::clamp(double(print_cfg.continuous_shell_support_density.value), 5.0, 100.0);
+            const double sparse  = 100.0 / density;                   // 34% -> ~2.9x ring spacing
+            const double base_h  = print_cfg.continuous_shell_support_base_height.value;
+            const double t       = base_h > EPSILON ? std::min(1.0, this->layer()->print_z / base_h) : 1.0;
+            support_mult = 1.0 + (sparse - 1.0) * t;
+        }
         if (ContinuousShellPathBuilder::build_cross_section(
                 slices.surfaces, this->flow(frExternalPerimeter), this->layer()->height, &region_config,
                 continuous_entities, &reason, (this->layer()->id() & 1u) != 0, size_t(this->layer()->id()), force_solid,
-                bridge_over.empty() ? nullptr : &bridge_over)) {
+                bridge_over.empty() ? nullptr : &bridge_over, support_reg, support_mult)) {
             this->perimeters.no_sort = false;
             this->perimeters.clear();
             // Perimeter consumers require each top-level item to be an

@@ -2661,7 +2661,8 @@ bool build_serpentine_cap(const ExPolygon &region, const Flow &flow, double laye
 bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, const Flow &flow, double layer_height,
                                                      const PrintRegionConfig *config, ExtrusionEntityCollection &entities,
                                                      std::string *reason, bool reverse_path, size_t layer_index, bool force_solid,
-                                                     const ExPolygons *bridge_over)
+                                                     const ExPolygons *bridge_over,
+                                                     const ExPolygons *support_region, double support_spacing_mult)
 {
     ExPolygons regions;
     regions.reserve(surfaces.size());
@@ -2873,7 +2874,7 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     const bool closed_tour     = chains.size() > 1 || deep_concave;
     const bool reverse_chains  = closed_tour ? false : reverse_path;
 
-    // ---- experimental scaffold support (PROTOTYPE gate: CS_SUPPORT=<width_mm>) -----------
+    // ---- scaffold supports ---------------------------------------------------------------
     // Continuous-shell mode has no second extrusion to hand a support, so a scaffold has to
     // ride the SAME continuous bead. It therefore becomes just one more chain: the existing
     // connected-Fermat filler already emits a region with BOTH ENDS ON FREE SURFACES, which
@@ -2885,37 +2886,33 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     // whole tour, so scaffold arc would otherwise steal climb from the model contour and
     // dump the remainder as a step at the rail junction.
     //
-    // Density ramps with height - dense at the plate (a scaffold's small footprint is all
-    // that holds it down) thinning as it rises (less material, and a weaker column snaps
-    // rather than tearing the wall on removal).
-    if (const char *sw = std::getenv("CS_SUPPORT"); sw != nullptr && std::atof(sw) > 0.0) {
-        auto envd = [](const char *n, double dflt) {
-            const char *v = std::getenv(n);
-            return (v != nullptr && *v != '\0' && std::atof(v) > 0.0) ? std::atof(v) : dflt;
-        };
-        const double width_mm = std::atof(sw);
-        const double gap_mm   = envd("CS_SUPPORT_GAP", 0.6);      // XY clearance to the model
-        const double sparse   = std::max(1.0, envd("CS_SUPPORT_SPARSE", 3.0));
-        const double ramp_mm  = envd("CS_SUPPORT_RAMP", 30.0);
-        const double z_mm     = double(layer_index) * layer_height;
-        const double mult     = 1.0 + (sparse - 1.0) * std::min(1.0, z_mm / ramp_mm);
-        const coord_t step    = std::max<coord_t>(coord_t(ring_spacing * mult), 1);
-
-        ContourChain sup;
-        sup.is_support = true;
-        sup.has_bore   = true;   // an annulus: the Fermat U-turn puts both ends on free surface
-        for (coord_t r = coord_t(scale_(gap_mm + width_mm)); r >= coord_t(scale_(gap_mm)); r -= step) {
-            Polygons ring = offset(merged.front().contour, float(r));
-            for (Polygon &g : ring)
-                sup.loops.emplace_back(std::move(g));
+    // The footprint comes from the whole-object pre-pass (each layer's unsupported outward
+    // growth, projected downward and held clear of the part); support_spacing_mult is ramped
+    // by the caller from solid at the plate to the configured density as the scaffold rises.
+    if (support_region != nullptr && !support_region->empty()) {
+        const coord_t step = std::max<coord_t>(coord_t(ring_spacing * std::max(1.0, support_spacing_mult)), 1);
+        for (const ExPolygon &foot : *support_region) {
+            // March concentric rings inward from the footprint edge - the nested-ring form
+            // spiralize_rings expects. Start half a bead in so the outermost bead sits inside
+            // the footprint instead of straddling its edge.
+            ContourChain sup;
+            sup.is_support = true;
+            // has_bore only for a genuine annulus: the Fermat U-turn then keeps both spiral
+            // ends on free surfaces instead of burying one in a solid core.
+            sup.has_bore   = !foot.holes.empty();
+            for (coord_t d = coord_t(ring_spacing / 2); ; d += step) {
+                ExPolygons inner = offset_ex(foot, -float(d));
+                if (inner.empty() || sup.loops.size() > 400)   // guard pathological footprints
+                    break;
+                for (const ExPolygon &ip : inner)
+                    sup.loops.emplace_back(ip.contour);
+            }
+            if (sup.loops.size() >= 2)                          // one ring has no Fermat partner
+                chains.push_back(std::move(sup));
         }
         if (cs_env_on("CS_DBG_SUPPORT"))
-            fprintf(stderr, "[cs-support] L%zu width=%.2f gap=%.2f step=%lld r0=%lld r1=%lld loops=%zu chains=%zu\n",
-                    layer_index, width_mm, gap_mm, (long long) step,
-                    (long long) coord_t(scale_(gap_mm + width_mm)), (long long) coord_t(scale_(gap_mm)),
-                    sup.loops.size(), chains.size());
-        if (sup.loops.size() >= 2)
-            chains.push_back(std::move(sup));
+            fprintf(stderr, "[cs-support] L%zu feet=%zu step=%lld mult=%.2f chains=%zu\n",
+                    layer_index, support_region->size(), (long long) step, support_spacing_mult, chains.size());
     }
 
     for (const ContourChain &chain : chains) {
@@ -3572,6 +3569,27 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         constexpr double connector_mult = 0.5;
         for (size_t i = 0; i < fmul.size(); ++i)
             if (connector[i]) fmul[i] *= connector_mult;
+
+        // BREAK-AWAY RAILS. A scaffold shares one continuous bead with the model, so the only
+        // thing that can make it removable is a deliberately weak junction: the connector runs
+        // that cross between model and scaffold are starved further, to roughly a third of a
+        // normal connector, so they snap under a cutter instead of tearing the wall. Rails that
+        // join two model chains are left alone - they are structural.
+        // A run qualifies when the material on EITHER side of it is scaffold.
+        if (support.size() == fmul.size()) {
+            constexpr double breakaway_mult = 0.35;
+            for (size_t i = 0; i < fmul.size(); ) {
+                if (!connector[i]) { ++i; continue; }
+                size_t j = i;
+                while (j + 1 < fmul.size() && connector[j + 1]) ++j;      // maximal connector run
+                const bool before_sup = i > 0 && support[i - 1] != 0;
+                const bool after_sup  = j + 1 < support.size() && support[j + 1] != 0;
+                if (before_sup != after_sup)                              // model <-> scaffold
+                    for (size_t k = i; k <= j; ++k)
+                        fmul[k] *= breakaway_mult;
+                i = j + 1;
+            }
+        }
     }
 
     // Emit maximal runs of equal flow multiplier as sub-paths (keyed on the segment's
