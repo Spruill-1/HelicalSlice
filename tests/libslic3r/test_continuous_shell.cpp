@@ -842,3 +842,200 @@ TEST_CASE("Continuous shell infill weave frequency sets the lobe count, amplitud
     REQUIRE(base > 4);                         // there IS a radial weave
     REQUIRE(fine * 3 > base * 4);              // a higher frequency = more lobes = more radial reversals (>1.33x)
 }
+
+namespace {
+// A deep crescent: circle r8 at the origin minus a r6 bite centred at (5.5, 0). The bite
+// reaches past the part centre, so the outline FOLDS relative to any interior point - the
+// canonical non-star-shaped section (the angle about the centroid backtracks along the
+// bite arc near the horns). Used by the star-shape-gate regressions below.
+ExPolygon make_deep_crescent() {
+    Polygon circle, bite;
+    for (int i = 0; i < 96; ++i) {
+        const double a = 2.0 * M_PI * i / 96.0;
+        circle.points.emplace_back(coord_t(8000000 * std::cos(a)), coord_t(8000000 * std::sin(a)));
+        bite.points.emplace_back(coord_t(5500000 + 6000000 * std::cos(a)), coord_t(6000000 * std::sin(a)));
+    }
+    ExPolygons cres = diff_ex(Polygons{circle}, Polygons{bite});
+    REQUIRE(cres.size() == 1);
+    REQUIRE(cres.front().holes.empty());
+    return cres.front();
+}
+
+std::vector<Point3> cs_path_points(const Surfaces &surfaces, const Flow &flow, PrintRegionConfig &cfg,
+                                   size_t layer_index, bool force_solid) {
+    ExtrusionEntityCollection e; std::string reason;
+    const bool built = ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.25, &cfg, e, &reason,
+                                                                       false, layer_index, force_solid);
+    INFO(reason);
+    REQUIRE(built);
+    std::vector<ExtrusionPath *> paths;
+    for (ExtrusionEntity *ent : e.entities)
+        ContinuousShellPathBuilder::collect_paths(ent, paths);
+    std::vector<Point3> pts;
+    for (const ExtrusionPath *p : paths)
+        for (const Point3 &q : p->polyline.points) pts.push_back(q);
+    REQUIRE(pts.size() > 8);
+    return pts;
+}
+} // namespace
+
+TEST_CASE("Continuous shell sub-bead medial fallback: closed ring works, open blade declines", "[ContinuousShell]") {
+    // A region thinner than one bead falls back to a medial-axis centreline. That is only
+    // honest when the medial is a genuinely CLOSED loop (a thin tube wall): force-closing an
+    // OPEN centreline would fabricate an extruding chord from its end straight back to its
+    // start, through air. The open case must decline loudly, not print a phantom chord.
+    Flow flow(0.5f, 0.25f, 0.5f);
+
+    // Closed control: a 0.3mm-thick full annulus (thinner than the 0.5mm bead), built via
+    // diff_ex so the hole gets the proper (CW) winding.
+    Polygon outer, inner;
+    for (int i = 0; i < 180; ++i) {
+        const double a = 2.0 * M_PI * i / 180.0;
+        outer.points.emplace_back(coord_t(5000000 * std::cos(a)), coord_t(5000000 * std::sin(a)));
+        inner.points.emplace_back(coord_t(4700000 * std::cos(a)), coord_t(4700000 * std::sin(a)));
+    }
+    ExPolygons annulus = diff_ex(Polygons{outer}, Polygons{inner});
+    REQUIRE(annulus.size() == 1);
+    REQUIRE(annulus.front().holes.size() == 1);
+    Surfaces ring_s{ Surface(stInternal, annulus.front()) };
+    ExtrusionEntityCollection e1; std::string reason1;
+    const bool ring_built = ContinuousShellPathBuilder::build_cross_section(ring_s, flow, 0.2, nullptr, e1, &reason1, false, 2);
+    INFO(reason1);
+    REQUIRE(ring_built);
+    std::vector<ExtrusionPath *> paths;
+    for (ExtrusionEntity *ent : e1.entities)
+        ContinuousShellPathBuilder::collect_paths(ent, paths);
+    REQUIRE_FALSE(paths.empty());
+    double min_r = std::numeric_limits<double>::max(), max_r = 0.0;
+    for (const ExtrusionPath *p : paths)
+        for (const Point3 &q : p->polyline.points) {
+            const double r = Point(q.x(), q.y()).cast<double>().norm() * SCALING_FACTOR;
+            min_r = std::min(min_r, r);
+            max_r = std::max(max_r, r);
+        }
+    REQUIRE(min_r > 4.5);    // the bead rides the medial: never dives across the bore
+    REQUIRE(max_r < 5.1);    // and never bulges outside the wall
+
+    // Open case: the same thin wall with a 60-degree mouth cut out (a C-strip). Its medial
+    // is an open arc; the old code closed it with a ~2.9mm chord across the mouth.
+    Polygon cpoly;
+    const double a0 = 0.5, a1 = 2.0 * M_PI - 0.5;
+    for (int i = 0; i <= 150; ++i) {
+        const double a = a0 + (a1 - a0) * i / 150.0;
+        cpoly.points.emplace_back(coord_t(5000000 * std::cos(a)), coord_t(5000000 * std::sin(a)));
+    }
+    for (int i = 150; i >= 0; --i) {
+        const double a = a0 + (a1 - a0) * i / 150.0;
+        cpoly.points.emplace_back(coord_t(4700000 * std::cos(a)), coord_t(4700000 * std::sin(a)));
+    }
+    Surfaces cstrip_s{ Surface(stInternal, ExPolygon(cpoly)) };
+    ExtrusionEntityCollection e2; std::string reason2;
+    const bool blade_built = ContinuousShellPathBuilder::build_cross_section(cstrip_s, flow, 0.2, nullptr, e2, &reason2, false, 2);
+    REQUIRE_FALSE(blade_built);
+    REQUIRE_FALSE(reason2.empty());
+}
+
+TEST_CASE("Continuous shell samples the free surface finely on a large section", "[ContinuousShell]") {
+    // The resampled ring points ARE the toolpath - z_contoured beads are exempt from
+    // downstream simplification - so the old fixed 256-point cap quantized a large part's
+    // outer surface to ~1mm chords (and put polygon corners up to ~0.8mm off). Ring
+    // sampling is now per-ring, targeting a half-bead chord on the free surfaces.
+    // A r=30mm disc (188mm circumference) must get outer-surface segments well under
+    // 0.5mm; the fixed cap would have produced ~0.74mm.
+    Polygon circ;
+    for (int i = 0; i < 720; ++i) {                         // fine input: not the limiting factor
+        const double a = 2.0 * M_PI * i / 720.0;
+        circ.points.emplace_back(coord_t(30000000 * std::cos(a)), coord_t(30000000 * std::sin(a)));
+    }
+    Surfaces surfaces{ Surface(stInternal, ExPolygon(circ)) };
+    Flow flow(0.5f, 0.25f, 0.5f);
+    ExtrusionEntityCollection e; std::string reason;
+    REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.25, nullptr, e, &reason, false, 3));
+    std::vector<ExtrusionPath *> paths;
+    for (ExtrusionEntity *ent : e.entities)
+        ContinuousShellPathBuilder::collect_paths(ent, paths);
+    REQUIRE_FALSE(paths.empty());
+    // Longest segment whose BOTH ends lie within one bead of the outer surface (the
+    // radial band excludes the seam hop down to the second ring).
+    const double band = 29500000.0;                        // r > 29.5mm: outer ring only
+    double max_seg = 0.0;
+    size_t surface_segs = 0;
+    for (const ExtrusionPath *p : paths)
+        for (size_t i = 1; i < p->polyline.points.size(); ++i) {
+            const Point a(p->polyline.points[i - 1].x(), p->polyline.points[i - 1].y());
+            const Point b(p->polyline.points[i].x(), p->polyline.points[i].y());
+            if (a.cast<double>().norm() > band && b.cast<double>().norm() > band) {
+                max_seg = std::max(max_seg, (b - a).cast<double>().norm());
+                ++surface_segs;
+            }
+        }
+    REQUIRE(surface_segs > 400);                            // the outer ring is densely sampled
+    REQUIRE(max_seg * SCALING_FACTOR < 0.5);                // half-bead-chord target (was ~0.74mm)
+}
+
+TEST_CASE("Continuous shell declines the weave and Z-wave on a non-star (crescent) section", "[ContinuousShell]") {
+    // The woven infill phases and clamps every ring by its angle about the section centroid,
+    // which is only meaningful on star-shaped sections. On this crescent the 360-bin shell
+    // profile would average the two boundary branches a ray crosses, and "clamping" to that
+    // fiction can drag a bead half the section width off its ring. The star-shape gate must
+    // therefore decline the radial weave AND the Z-wave here - while KEEPING the sparse
+    // decimation, which needs no angular parametrization.
+    Surfaces surfaces{ Surface(stInternal, make_deep_crescent()) };
+    Flow flow(0.5f, 0.25f, 0.5f);
+    auto measure = [&](int density, int weave) {
+        PrintRegionConfig cfg;
+        cfg.wall_loops.value = 2;
+        cfg.continuous_shell_infill_density.value = density;
+        cfg.continuous_shell_infill_weave.value   = weave;
+        return cs_path_points(surfaces, flow, cfg, /*layer_index=*/3, /*force_solid=*/false);
+    };
+    auto xy_len = [](const std::vector<Point3> &pts) {
+        double len = 0.0;
+        for (size_t i = 1; i < pts.size(); ++i)
+            len += (Point(pts[i].x(), pts[i].y()) - Point(pts[i-1].x(), pts[i-1].y())).cast<double>().norm();
+        return len * SCALING_FACTOR;
+    };
+    const std::vector<Point3> solid  = measure(0,  0);
+    const std::vector<Point3> sparse = measure(20, 0);
+    const std::vector<Point3> woven  = measure(20, 100);
+
+    // Sparse decimation still applies on the folded section (it drops rings, no parametrization).
+    REQUIRE(xy_len(sparse) < 0.85 * xy_len(solid));
+    // The gate declines the weave outright: with it requested, the path is IDENTICAL to the
+    // plain sparse path - no point moved, no Z perturbation added.
+    REQUIRE(woven.size() == sparse.size());
+    coord_t max_dev = 0, z_span = 0;
+    for (size_t i = 0; i < woven.size(); ++i) {
+        max_dev = std::max(max_dev, coord_t(std::abs(woven[i].x() - sparse[i].x())));
+        max_dev = std::max(max_dev, coord_t(std::abs(woven[i].y() - sparse[i].y())));
+        z_span  = std::max(z_span,  coord_t(std::abs(woven[i].z())));
+    }
+    REQUIRE(max_dev == 0);
+    REQUIRE(z_span == 0);
+}
+
+TEST_CASE("Continuous shell declines the solid-cap stagger on a non-star (crescent) section", "[ContinuousShell]") {
+    // The odd-layer brick stagger shifts interior rings radially toward the centroid, clamped
+    // by the same angle-binned bore profile as the weave - equally fictional on a folded
+    // section. The gate must decline it: an odd solid-cap layer of a woven-infill part prints
+    // identically to the stagger-free baseline (density 0). The star-shaped control for the
+    // stagger actually MOVING the interior is the multi-layer solid cap test above.
+    Surfaces surfaces{ Surface(stInternal, make_deep_crescent()) };
+    Flow flow(0.5f, 0.25f, 0.5f);
+    auto measure = [&](int density) {
+        PrintRegionConfig cfg;
+        cfg.wall_loops.value = 2;
+        cfg.continuous_shell_infill_density.value = density;
+        cfg.top_surface_pattern.value = ipConcentric;    // concentric cap path (serpentine declines anyway)
+        return cs_path_points(surfaces, flow, cfg, /*layer_index=*/1, /*force_solid=*/true);
+    };
+    const std::vector<Point3> plain     = measure(0);    // stagger disabled by density=0
+    const std::vector<Point3> staggered = measure(20);   // stagger requested on this odd layer
+    REQUIRE(staggered.size() == plain.size());
+    coord_t max_dev = 0;
+    for (size_t i = 0; i < staggered.size(); ++i) {
+        max_dev = std::max(max_dev, coord_t(std::abs(staggered[i].x() - plain[i].x())));
+        max_dev = std::max(max_dev, coord_t(std::abs(staggered[i].y() - plain[i].y())));
+    }
+    REQUIRE(max_dev == 0);
+}

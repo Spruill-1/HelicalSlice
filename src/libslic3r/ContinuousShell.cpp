@@ -69,9 +69,11 @@ ExtrusionPath make_path(const Polyline3 &polyline, const Flow &flow, double laye
     return path;
 }
 
-// Resample a closed polygon to exactly N points spaced evenly by arc length.
-// This gives adjacent concentric rings a common parametrization so we can morph
-// smoothly between them.
+// Resample a closed polygon to exactly N points spaced evenly by arc length. Even
+// spacing keeps the seam anchoring, the weave phase, and the arc-length Z ramp well
+// conditioned (no point-density bias). N is chosen PER RING by the caller: these
+// points are the final toolpath (z_contoured beads are exempt from downstream
+// simplification), so surface rings are sampled finely and buried rings coarsely.
 std::vector<Point> resample_closed(const Polygon &poly, size_t N)
 {
     std::vector<Point> out;
@@ -100,6 +102,44 @@ std::vector<Point> resample_closed(const Polygon &poly, size_t N)
                          a.y() + coord_t(std::llround((b.y() - a.y()) * u)));
     }
     return out;
+}
+
+// The woven infill, the solid stagger, and the Z-wave all parametrize each ring by the
+// ANGLE of its points about one centre - the perturbation phase is sin(lobes*theta), and
+// the shell-clamp profiles bin "the shell radius at angle theta". That is only meaningful
+// when every ring is star-shaped about that centre: each ray from the centre crosses the
+// ring exactly once. On a folded section (a crescent, an L whose centroid sits outside
+// the material) a bin averages multiple crossings, and clamping to that fiction can drag
+// a bead half the section width off its ring (colliding with its neighbours). Detect the
+// fold: traversing the ring, theta must advance monotonically through one full turn -
+// whichever orientation - with no backtracking beyond discretization noise.
+bool star_shaped_about(const Polygon &poly, const Vec2d &centre)
+{
+    const size_t n = poly.points.size();
+    if (n < 3)
+        return false;
+    Vec2d d0 = poly.points.front().cast<double>() - centre;
+    if (d0.norm() < 1.0)
+        return false;                       // ring passes (numerically) through the centre
+    double pos = 0., neg = 0.;
+    double prev = std::atan2(d0.y(), d0.x());
+    for (size_t i = 1; i <= n; ++i) {
+        const Vec2d d = poly.points[i % n].cast<double>() - centre;
+        if (d.norm() < 1.0)
+            return false;
+        const double th = std::atan2(d.y(), d.x());
+        double inc = th - prev;
+        inc = std::atan2(std::sin(inc), std::cos(inc));   // wrap to (-pi, pi]
+        (inc >= 0. ? pos : neg) += inc;
+        prev = th;
+    }
+    constexpr double tol = 0.1;             // rad of slack for discretization noise
+    const double winding = pos + neg;
+    if (std::abs(winding - 2. * M_PI) < tol)
+        return -neg < tol;                  // CCW ring: negligible backtracking
+    if (std::abs(winding + 2. * M_PI) < tol)
+        return pos < tol;                   // CW ring (a hole contour)
+    return false;                           // centre outside the ring, or a multi-fold
 }
 
 // Deterministic per-layer pseudo-random value in [-1, +1]. Deterministic so
@@ -161,10 +201,19 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
         return spiral;
     const Polygons &rings = rings_in;    // original radial order: outer (0) -> inner
 
-    size_t N = 0;
-    for (const Polygon &r : rings)
-        N = std::max(N, r.points.size());
-    N = std::clamp<size_t>(N, size_t(64), size_t(256));
+    // Per-ring resample density. These points ARE the printed toolpath: z_contoured beads
+    // are exempt from downstream simplification and arc fitting (ExtrusionPath::simplify),
+    // so every sample emitted here becomes one G-code segment. Target a half-bead chord so
+    // detail down to the bead scale survives - the old fixed 256-point cap put the corners
+    // of a large ring up to ~0.8 mm off their true position. The two FREE-SURFACE rings get
+    // a generous cap (their fidelity is the printed finish; ~2k points matches what normal
+    // slicing emits for a large perimeter). Buried rings only shape density and the weave,
+    // so they keep a tight cap: extra points there are pure G-code bloat.
+    const double chord = std::max(0.5 * ring_spacing, 1.0);
+    auto ring_samples = [&](const Polygon &r, bool surface) -> size_t {
+        const size_t cap = surface ? 2048 : 512;
+        return std::clamp<size_t>(size_t(std::llround(r.length() / chord)), size_t(64), cap);
+    };
 
     // Cross-section centre (centroid of the largest-area ring = the outer contour) and
     // its mean radius. The seam is anchored by absolute angle about this centre.
@@ -277,7 +326,8 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
         // interpolated chords cut straight across the bore (the "leaf" artifact).
         Polygon oriented = rings[ri];
         oriented.make_counter_clockwise();
-        std::vector<Point> pts = resample_closed(oriented, N);
+        const bool surface_ring = ri == 0 || (has_bore && ri + 1 == rings.size());
+        std::vector<Point> pts = resample_closed(oriented, ring_samples(oriented, surface_ring));
         if (pts.empty())
             return {};
         anchor_to_angle(pts, ring_angle[ri]);
@@ -318,7 +368,7 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
     };
 
     if (grid.size() == 1) {
-        for (size_t k = 0; k < N; ++k) { spiral.points.push_back(grid[0][k]); flag(false); zoff(0); }
+        for (size_t k = 0; k < grid[0].size(); ++k) { spiral.points.push_back(grid[0][k]); flag(false); zoff(0); }
         spiral.points.push_back(grid[0][0]); flag(false); zoff(0);
         return spiral;
     }
@@ -364,7 +414,11 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
     if (reverse && !has_bore)
         std::reverse(order.begin(), order.end());
 
-    spiral.points.reserve(n_rings * N);
+    {
+        size_t total = 0;
+        for (const std::vector<Point> &c : grid) total += c.size();
+        spiral.points.reserve(total + 2);
+    }
     for (const size_t idx : order) {
         const bool internal_ring = (infill_shell_loops > 0) ? is_infill(idx) : !is_surface(idx);
         const coord_t zo = ring_z_off(idx);
@@ -392,7 +446,7 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
                     std::rotate(c.begin(), c.begin() + bestk, c.end());
             }
         }
-        for (size_t k = 0; k < N; ++k) { spiral.points.push_back(c[k]); flag(internal_ring); zoff(zo); }
+        for (size_t k = 0; k < c.size(); ++k) { spiral.points.push_back(c[k]); flag(internal_ring); zoff(zo); }
     }
 
     return spiral;
@@ -456,6 +510,12 @@ struct ContourChain {
     Polygons loops;
     bool     has_bore = false;
     bool     woven_infill = false;   // true once this chain's interior was thinned to sparse infill
+    // False when the chain's rings are not star-shaped about the perturbation centre, so
+    // every angular-parametrized perturbation (radial weave, solid stagger, and this
+    // chain's share of the Z-wave) was/must be declined. Sparse DECIMATION is unaffected -
+    // dropping rings needs no parametrization - so a declined chain still prints plain
+    // concentric sparse rings.
+    bool     star_ok = true;
 };
 
 // Decompose a single connected cross-section into the concentric loop sets that fill
@@ -487,16 +547,27 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
     std::vector<ContourChain> out;
 
     if (chains.empty()) {
-        // Sub-bead-width region: fall back to a single medial-axis centreline pass so
-        // the wall stays connected. Adaptive bead width is deliberately future work.
+        // Sub-bead-width region: fall back to a medial-axis centreline pass so the wall
+        // stays connected. Adaptive bead width is deliberately future work. Only a medial
+        // that is GENUINELY (near-)closed may become a ring: force-closing an OPEN
+        // centreline (a thin blade, an open horseshoe) would fabricate a chord from its
+        // end straight back to its start - through air - and every downstream consumer
+        // assumes rings. Decline those (empty result -> build_cross_section fails loudly)
+        // rather than silently printing a phantom chord. All kept loops stay in ONE chain:
+        // the medial of a thin closed wall can come back as several near-closed fragments,
+        // and only the in-chain positional re-anchor (spiralize_rings) can hop between
+        // them along the wall - the inter-chain stitcher has no rails at sub-bead width
+        // (offset_ex by -1.5 beads is empty) and would chord straight across the bore.
         Polygons loops;
         Polylines centerlines = region.medial_axis(double(width) / 5., double(2 * width));
         for (const Polyline &pl : centerlines) {
             if (pl.points.size() < 3)
                 continue;
             Polygon loop(pl.points);
-            if (loop.points.size() > 1 && loop.points.front() == loop.points.back())
+            if (loop.points.front() == loop.points.back())
                 loop.points.pop_back();
+            else if ((loop.points.front() - loop.points.back()).cast<double>().norm() > 2.0 * width)
+                return {};        // an open centreline: no honest closed-bead path exists
             if (loop.points.size() >= 3)
                 loops.push_back(std::move(loop));
         }
@@ -578,6 +649,20 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
                 return annular ? (i + sl < n) : (i + 1 < n);
             };
             const bool thick = annular ? (n > 2 * sl + 1) : (n > sl + 1);
+            // Perturbation centre = centroid of the outer boundary loop (shared by the
+            // weave and the solid stagger below).
+            Vec2d centre(0., 0.);
+            if (!cc.loops.front().points.empty()) {
+                for (const Point &p : cc.loops.front().points) centre += p.cast<double>();
+                centre /= double(cc.loops.front().points.size());
+            }
+            // Angular-parametrization gate (see star_shaped_about): on a folded section
+            // decline every perturbation that phases or clamps by angle-about-centre.
+            // Checked over the FULL pre-decimation ring set (a superset of the kept
+            // rings), so the kept rings are covered too. Decimation itself stays on.
+            if (thick)
+                for (const Polygon &ring : cc.loops)
+                    if (!star_shaped_about(ring, centre)) { cc.star_ok = false; break; }
             if (K > 1 && thick) {
                 Polygons kept; std::vector<char> kept_infill;
                 kept.reserve(n); kept_infill.reserve(n);
@@ -591,14 +676,7 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
                 cc.loops = std::move(kept);
                 cc.woven_infill = true;   // spiralize_rings should tag [shell | infill | shell] accordingly
 
-                if (woven.weave > 0.0) {
-                    // Perturbation centre = centroid of the outer boundary loop.
-                    Vec2d centre(0., 0.);
-                    const Polygon &outer = cc.loops.front();
-                    if (!outer.points.empty()) {
-                        for (const Point &p : outer.points) centre += p.cast<double>();
-                        centre /= double(outer.points.size());
-                    }
+                if (woven.weave > 0.0 && cc.star_ok) {
                     // Radial amplitude sized so that ANTI-PHASE neighbours just touch. Sparse rings
                     // sit K*spacing apart; giving consecutive infill rings a pi phase offset makes ring
                     // j bulge OUT where ring j+1 bulges IN, so their closest approach is
@@ -657,17 +735,11 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
                         }
                     }
                 }
-            } else if (woven.solid_stagger > 0.0 && thick) {
+            } else if (woven.solid_stagger > 0.0 && thick && cc.star_ok) {
                 // Solid cap/shell brick stagger (see build_cross_section). Shift only the interior rings
                 // inward by solid_stagger this layer; the outer wall rings (< sl) and, for a tube, the
                 // bore shell stay put. Bounded so a ring never invades the bore. The fill stays fully
                 // solid (no decimation, no infill tag) - this only nudges interior geometry per layer.
-                Vec2d centre(0., 0.);
-                const Polygon &outer0 = cc.loops.front();
-                if (!outer0.points.empty()) {
-                    for (const Point &p : outer0.points) centre += p.cast<double>();
-                    centre /= double(outer0.points.size());
-                }
                 const int NB = 360;
                 std::vector<double> inner_prof;
                 if (annular) {                                   // per-angle bore-shell radius (shape-aware)
@@ -976,7 +1048,7 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     // running tail - so a split cross-section's pieces are joined by the shortest hop
     // (along the wall) instead of long chords across the bore. A simple cross-section has
     // exactly one chain, so this is identical to a single spiral there.
-    struct Sub { Polyline pl; std::vector<char> flags; std::vector<coord_t> zoff; };
+    struct Sub { Polyline pl; std::vector<char> flags; std::vector<coord_t> zoff; bool zwave = false; };
     std::vector<Sub> subs;
     // Per-layer reversal exists to give SINGLE-chain solid layers short inter-layer
     // joins (core end meets core start). A stitched MULTI-chain tour instead closes
@@ -993,7 +1065,10 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
                                        connector_spread, chain.woven_infill ? woven.shell_loops : 0,
                                        &merged.front());
         if (sub.points.size() >= 2 && sub.points.size() == flags.size() && sub.points.size() == zoff.size())
-            subs.push_back({ std::move(sub), std::move(flags), std::move(zoff) });
+            // A chain carries the Z-wave only when its interior was actually thinned AND its
+            // rings passed the star-shape gate (angular phase is meaningless on a folded chain).
+            subs.push_back({ std::move(sub), std::move(flags), std::move(zoff),
+                             chain.woven_infill && chain.star_ok });
     }
     if (subs.empty()) {
         if (reason != nullptr)
@@ -1004,6 +1079,7 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     Polyline spiral;
     std::vector<char> internal;
     std::vector<char> connector;        // 1 on inter-chain connector points (thinned flow)
+    std::vector<char> weavable;         // 1 where the owning chain may carry the Z-wave (star gate)
     std::vector<coord_t> interlock_z;   // per-point Z offset (brick interlock), parallel to spiral.points
     auto append_sub = [&](Sub &s, bool rev) {
         if (rev) {
@@ -1015,6 +1091,7 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         internal.insert(internal.end(), s.flags.begin(), s.flags.end());
         interlock_z.insert(interlock_z.end(), s.zoff.begin(), s.zoff.end());
         connector.insert(connector.end(), s.pl.points.size(), char(0));
+        weavable.insert(weavable.end(), s.pl.points.size(), char(s.zwave ? 1 : 0));
     };
 
     // Inter-chain connector routing. A split cross-section's sub-chains can END deep
@@ -1044,21 +1121,14 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         }
     }
     auto route_connector = [&](const Point &from, const Point &to) -> Polyline {
-        const bool dbg = std::getenv("CS_DEBUG_ROUTE") != nullptr;
         if ((to - from).cast<double>().norm() <= 2.0 * ring_spacing)
             return {};                                    // short local hop: leave straight
         Polyline direct;
         direct.points = { from, to };
-        if (merged.front().contains(direct)) {
-            if (dbg) std::printf("ROUTE (%.2f,%.2f)->(%.2f,%.2f): contained, straight\n",
-                                 from.x() / 1e6, from.y() / 1e6, to.x() / 1e6, to.y() / 1e6);
+        if (merged.front().contains(direct))
             return {};                                    // straight hop stays in material
-        }
-        if (rails.empty()) {
-            if (dbg) std::printf("ROUTE (%.2f,%.2f)->(%.2f,%.2f): NO RAILS\n",
-                                 from.x() / 1e6, from.y() / 1e6, to.x() / 1e6, to.y() / 1e6);
+        if (rails.empty())
             return {};
-        }
         // Pick the rail with the closest approach to both endpoints.
         size_t best_rail = 0, ia = 0, ib = 0;
         double best_sum = std::numeric_limits<double>::max();
@@ -1106,15 +1176,12 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         }
         const Point head = best_rev ? subs[best].pl.points.back() : subs[best].pl.points.front();
         const Polyline arc = route_connector(tail, head);
-        if (std::getenv("CS_DEBUG_ROUTE") != nullptr)
-            std::printf("STITCH tail(%.2f,%.2f) -> head(%.2f,%.2f) rev=%d arc=%zu\n",
-                        tail.x() / 1e6, tail.y() / 1e6, head.x() / 1e6, head.y() / 1e6,
-                        int(best_rev), arc.points.size());
         for (const Point &rp : arc.points) {
             spiral.points.push_back(rp);
             internal.push_back(1);          // rails are buried by construction
             interlock_z.push_back(0);
             connector.push_back(1);
+            weavable.push_back(0);
         }
         const size_t head_idx = spiral.points.size();
         append_sub(subs[best], best_rev);
@@ -1138,11 +1205,13 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
             internal.push_back(1);
             interlock_z.push_back(0);
             connector.push_back(1);
+            weavable.push_back(0);
         }
         spiral.points.push_back(head);
         internal.push_back(1);
         interlock_z.push_back(0);
         connector.push_back(1);
+        weavable.push_back(0);
     }
     if (spiral.points.size() < 2) {
         if (reason != nullptr)
@@ -1169,7 +1238,8 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     // phase, adjacent layers' undulations are offset and nest into each other (vertical interlock),
     // completing the 3D gyroid-like structure. Composes onto interlock_z; apply_continuous_z adds
     // the ramp on top. Surfaces (shell) are left flat.
-    if (have_interlock && have_flags && !merged.empty() && any_woven && woven.zamp > 0.0) {
+    if (have_interlock && have_flags && weavable.size() == spiral.points.size() && !merged.empty()
+        && any_woven && woven.zamp > 0.0) {
         Vec2d centre(0., 0.);
         const Polygon &oc = merged.front().contour;
         if (!oc.points.empty()) {
@@ -1179,7 +1249,9 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         const double zamp  = std::clamp(woven.zamp, 0.0, 0.5) * scale_(layer_height);
         const double phase = double(layer_index) * woven.dphase + woven.zphase;
         for (size_t i = 0; i < spiral.points.size(); ++i) {
-            if (!internal[i] || connector[i]) continue;   // buried (woven) infill only - not shells, not connectors
+            // Buried (woven) infill only - not shells, not connectors, and not chains whose
+            // rings failed the star-shape gate (their angular phase would be meaningless).
+            if (!internal[i] || connector[i] || !weavable[i]) continue;
             const Vec2d d = spiral.points[i].cast<double>() - centre;
             const double th = std::atan2(d.y(), d.x());
             interlock_z[i] += coord_t(std::llround(zamp * std::sin(woven.lobes * th + phase)));
