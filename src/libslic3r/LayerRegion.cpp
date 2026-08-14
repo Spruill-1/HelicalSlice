@@ -205,9 +205,24 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
             force_solid = (tsl > 0 && cs_air_within(this->layer(), +1, tsl, merged_slice))
                        || (bsl > 0 && cs_air_within(this->layer(), -1, bsl, merged_slice));
         }
+        // Printable-width bounds for the adaptive bead width: the same object-scope percent
+        // options (of the smallest nozzle) the Arachne generator honours. Unset options stay
+        // zero and derive Arachne-consistent defaults from the flow's nozzle inside.
+        ContinuousShellWidthLimits cs_width_limits;
+        {
+            const PrintConfig &print_config = this->layer()->object()->print()->config();
+            const double min_nozzle = *std::min_element(print_config.nozzle_diameter.values.begin(),
+                                                        print_config.nozzle_diameter.values.end());
+            const PrintObjectConfig &object_config = this->layer()->object()->config();
+            if (const auto &opt = object_config.min_bead_width)
+                cs_width_limits.min_bead_width_mm = opt.value * 0.01 * min_nozzle;
+            if (const auto &opt = object_config.min_feature_size)
+                cs_width_limits.min_feature_size_mm = opt.value * 0.01 * min_nozzle;
+        }
         if (ContinuousShellPathBuilder::build_cross_section(
                 slices.surfaces, this->flow(frExternalPerimeter), this->layer()->height, &region_config,
-                continuous_entities, &reason, (this->layer()->id() & 1u) != 0, size_t(this->layer()->id()), force_solid)) {
+                continuous_entities, &reason, (this->layer()->id() & 1u) != 0, size_t(this->layer()->id()), force_solid,
+                cs_width_limits)) {
             this->perimeters.no_sort = false;
             this->perimeters.clear();
             // Perimeter consumers require each top-level item to be an

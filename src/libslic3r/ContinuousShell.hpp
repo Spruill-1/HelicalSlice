@@ -12,12 +12,24 @@
 
 namespace Slic3r {
 
+// Printable-width bounds for the adaptive bead width (C-lite). Zero fields derive
+// Arachne-consistent defaults from the flow's nozzle diameter (85% / 25%). The caller
+// (LayerRegion) fills these from the object-scope min_bead_width / min_feature_size
+// percent options so continuous shell honours the same limits as the Arachne generator.
+struct ContinuousShellWidthLimits {
+    double min_bead_width_mm   = 0.;   // narrowest printable bead
+    double min_feature_size_mm = 0.;   // walls thinner than this are declined outright
+};
+
 class ContinuousShellPathBuilder
 {
 public:
+    using WidthLimits = ContinuousShellWidthLimits;
+
     static bool build_cross_section(const Surfaces &surfaces, const Flow &flow, double layer_height, const PrintRegionConfig *config,
                                     ExtrusionEntityCollection &entities, std::string *reason = nullptr,
-                                    bool reverse_path = false, size_t layer_index = 0, bool force_solid = false);
+                                    bool reverse_path = false, size_t layer_index = 0, bool force_solid = false,
+                                    const ContinuousShellWidthLimits &width_limits = {});
 
     // Collect the leaf ExtrusionPaths of a continuous-shell entity tree in traversal
     // order. Used by the whole-object Z planner (PrintObject::continuous_shell_z) at

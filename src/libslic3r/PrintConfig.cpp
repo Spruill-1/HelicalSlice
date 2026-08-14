@@ -6077,6 +6077,22 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionPercent(0));
 
+    def = this->add("continuous_shell_scarf_length", coFloat);
+    def->label = L("Continuous shell scarf length");
+    def->category = L("Strength");
+    def->tooltip = L("Softens every ring-to-ring junction of the continuous-shell bead with an in-plane scarf: "
+                     "over this arc length before and after each junction the bead width tapers down toward half "
+                     "width and back up, and the junction diagonal itself is laid at the tapered width - so the "
+                     "once-per-revolution radial step deposits a gradual blend instead of an abrupt overfill ridge. "
+                     "This is the geometric successor to seam coast (which only thins flow in a tiny fixed window). "
+                     "0 disables the scarf. Longer scarves hide the seam better but slightly soften the wall near "
+                     "junctions; 5-15 mm is a reasonable range.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->max = 50;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
     def = this->add("continuous_shell_infill_density", coPercent);
     def->label = L("Continuous shell infill density");
     def->category = L("Strength");

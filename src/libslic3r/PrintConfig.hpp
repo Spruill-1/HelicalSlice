@@ -1240,6 +1240,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionPercent,              continuous_shell_interlock))
     ((ConfigOptionPercent,              continuous_shell_connector_spread))
     ((ConfigOptionPercent,              continuous_shell_seam_coast))
+    ((ConfigOptionFloat,                continuous_shell_scarf_length))
     ((ConfigOptionPercent,              continuous_shell_infill_density))
     ((ConfigOptionPercent,              continuous_shell_infill_weave))
     ((ConfigOptionPercent,              continuous_shell_infill_weave_shift))

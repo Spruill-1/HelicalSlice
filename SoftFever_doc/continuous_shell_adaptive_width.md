@@ -1,0 +1,129 @@
+# Continuous Shell: Adaptive Bead Width — Design
+
+Status: phase 1 (C-lite + prerequisites) implemented. Sequencing agreed 2026-08-12: **C-lite → A (scarf) → C-full → B (spiral)**.
+
+## 1. What the helical seam actually is
+
+Three distinct artifacts, treated differently by each option:
+
+1. **Per-ring join diagonal.** Every ring is a complete closed loop; the bead then hops one
+   spacing inward (two on the Fermat arms) over a short arc. The diagonal crosses a region the
+   neighbouring rings already cover → a local ~50% overfill ridge. `continuous_shell_seam_coast`
+   thins flow there; `continuous_shell_connector_spread` fans the ridges apart. Neither removes them.
+2. **Surface dive** — the once-per-layer point where the bead leaves ring 0. Same mechanism, visible.
+3. **Layer join** — solved by the arc-length Z ramp (`apply_continuous_z`).
+
+Topological invariant: at a given radius the bead covers the circumference exactly once, so the
+one-spacing-per-revolution descent must happen *somewhere*. Every design option is a choice of
+**how long an arc the descent spreads over, per ring class**:
+
+- **Option A (scarf)** = short transition windows at every join.
+- **Option B (interior spiral)** = full-revolution transitions for buried rings; surfaces stay
+  closed loops with compact scarfed joins.
+- **Option C (BeadingStrategy)** = the machinery deciding bead **count and widths** — which is
+  what makes B's boundary geometry close without voids (see §4). They compose; they don't compete.
+
+## 2. Platform constraints (bind all options)
+
+Established by code survey 2026-08-12; line numbers as of commit after the review fixes.
+
+| Constraint | Where |
+|---|---|
+| `ExtrusionPath` has no per-point width — scalar `width`/`mm3_per_mm`/`height` only. Variable width = many constant-width sub-paths (Arachne quantizes width into 0.05 mm buckets: `VariableWidth.cpp:29-63`) or flow-only modulation (precedents: `z_contoured` ratio `GCode.cpp:7087-7106`, scarf `e_ratio` `GCode.cpp:7114-7123`) | `ExtrusionEntity.hpp:162-318` |
+| Sub-paths of one multipath emit back-to-back, no travel/retract/seam between them | `GCode.cpp:6117-6142` |
+| Preview width is sticky-forced from `;WIDTH:` tags (`m_forced_width`); changing `mm3_per_mm` without `path.width` makes the preview lie; changing width without flow doesn't change the print. Keep them consistent via `Flow::with_width` | `GCode.cpp:6867-6871`, `GCodeProcessor.cpp:3943` |
+| `path.width` feeds real logic, not just preview: volumetric speed cap (`GCode.cpp:6629`), seam gap, `polygons_covered_by_width` | various |
+| Hard flow floor: `Flow::mm3_per_mm` throws below width ≈ 0.215×height; practical floor `min_bead_width` (85% nozzle default) | `Flow.cpp:227` |
+| Volumetric cap makes F ∝ 1/mm3_per_mm per sub-path → feedrate steps at width changes | `GCode.cpp:6689` |
+| Resonance-avoidance bi-quantizes external-perimeter speed → large F jumps at transitions. **Gated off under continuous shell** (phase-1 patch) | `GCode.cpp:6691-6725` |
+| Adaptive PA is absent from the spiral-vase pipeline (its `;PA_CHANGE` tags are never consumed) → flow transitions must be long/gradual | `GCode.cpp:3763-3770` |
+| PressureEqualizer runs after SpiralVase, splits/ramps F at flow steps, preserves per-point Z — helpful | `PressureEqualizer.cpp:471-509` |
+| SpiralVase XY smoothing is forced on in continuous shell and pulls points toward the previous layer by (1−factor) — smears deliberate centerline-shift geometry (previous layer's transition is at a precessed angle). Width/flow modulation is immune; escape hatch `spiral_mode_max_xy_smoothing = 0` | `SpiralVase.hpp:27`, `SpiralVase.cpp:248-277` |
+| SpiralVase short-segment filter is lossy in E; threshold 2×`resolution` ≈ 0.02 mm | `SpiralVase.cpp:182,213` |
+| Whole shell is `erExternalPerimeter`: `dont_slow_down_outer_wall` disables layer-time cooling slowdown for everything | `CoolingBuffer.cpp:432-437` |
+| Per-sub-path Z-sync can emit a bare mid-bead `G1 Z`, silently swallowed by the SpiralVase filter — watch when debugging Z discontinuities | `GCode.cpp:6463-6469`, `SpiralVase.cpp:200-210` |
+
+## 3. Arachne reuse boundary
+
+The **entire `BeadingStrategy` stack is pure, stateless, standalone-callable** (proven in-tree:
+`tests/libslic3r/test_arachne_walls.cpp:247-267`). `compute(thickness, bead_count)` with a count
+that deliberately disagrees with `getOptimalBeadCount`, blended against `compute(t, count+1)` by
+`SkeletalTrapezoidation::interpolate` (~20 lines, `SkeletalTrapezoidation.cpp:1712-1731`), is the
+entire transition mechanism; the strategies guarantee both branches vary continuously in thickness.
+
+Graph-bound and NOT reusable: transition anchor placement + arclength ramp walk
+(`SkeletalTrapezoidation.cpp:746-1200`). The angular re-derivation for rings is ~100–150 lines:
+root-find θ* where t(θ) crosses `getTransitionThickness(n)`, straddle with an arc window of
+`transition_length` split by `getTransitionAnchorPos`, blend beadings inside the window.
+
+Gotchas when reusing: feed **spacings** as the preferred widths; derive split/add thresholds from
+extrusion **widths** (`WallToolPaths.cpp:516-522`); handle `LimitedBeadingStrategy`'s zero-width
+marker walls; `transitioning_angle` is inert inside the strategies.
+
+Config: the relevant options (`wall_transition_length/angle/filter_deviation`,
+`wall_distribution_count`, `min_bead_width`, `min_feature_size`) are **object-scope percent of the
+min nozzle diameter** — reuse them rather than minting new ones (GUI note: they may be hidden when
+the wall generator isn't Arachne; toggle logic needs a continuous-shell clause when C-full lands).
+
+## 4. Phases
+
+### C-lite (implemented, phase 1)
+
+Insight that collapsed the scope: marching only stops when another band cannot fit, so the medial
+void `v = 2·d_res − w ≤ 2·spacing − w ≈ 0.8·w` **always** — no medial-bead-count planning needed.
+
+- Measure the vanished band's residual half-thickness by bisection (`vanish_depth`); close the
+  void by widening the innermost ring pair by v/2 each, centrelines shifted v/4 toward the medial
+  (inner flank extends by exactly v/2 → beads meet at the medial; outer flank untouched).
+  Replaces the heuristic medial-strip patch. Skipped for sparsified chains and pinch/split chains.
+- Sub-bead fallback fits the bead to the measured wall (clamped to `min_bead_width`), declines
+  below `min_feature_size` (WideningBeadingStrategy semantics).
+- Emission: per-point width array → sub-paths split on (flow multiplier, width), each built with
+  its own `Flow::with_width` so `path.width`/`mm3_per_mm` stay consistent (truthful preview).
+- Prereq patches: resonance-avoidance gated off in continuous-shell mode; honest per-sub-path width.
+- The strategy stack itself enters at C-full; C-lite implements its degenerate uniform case
+  directly and validates all the emission plumbing.
+
+### A — scarf at the joins (implemented, phase 2)
+
+Per-point width taper over a window at each ring join (`continuous_shell_scarf_length`, mm,
+default 0 = off): the outgoing ring's tail narrows linearly to a floor, the incoming ring's
+head widens back, and the junction diagonal itself is laid at the floor. Width/flow only —
+no centerline moves (SpiralVase smoothing smears those; flow passes through untouched).
+Design decisions that emerged in implementation:
+
+- **Floor is transitional, not structural**: `max(w/2, nozzle/4)` — a scarf bead overlaps the
+  junction zone, so it is not bound by `min_bead_width` (which is for standalone beads).
+- **Free-surface rings are never tapered** — narrowing a surface bead recedes its outer flank
+  into a visible relief groove; only the diagonal and the buried partner soften those joins.
+- **Window capped at a quarter of the ring's own arc** so aggressive scarf lengths never thin a
+  small inner ring wall-to-wall (at most half of any ring is below full width).
+- Tapers compute from the ring's ORIGINAL width (overlapping head/tail windows on short rings
+  otherwise compound below the floor; overlaps keep min()).
+- Widths quantized to Arachne's 0.05 mm buckets so a taper is a handful of sub-paths.
+- Woven chains excluded: their inter-ring diagonals are structural struts across open space.
+- `seam_coast` is superseded but kept functional (both compose; tooltip documents).
+
+### C-full — per-angle beading
+
+Thickness field t(θ) from outer/bore distance; per-angle bead plan; rings become iso-index curves
+of the plan. Needs the angular transition re-derivation (§3) and inherits the star-shape gate —
+non-star chains degrade to C-lite. Absorbs non-uniform walls and B's boundary wedge.
+
+### B — true interior spiral
+
+Buried rings become a continuous double-arm Fermat spiral (each arm at 2×pitch, both ends at free
+surfaces); surface rings stay closed loops with scarfed joins. Requires pairwise ring-morph
+parametrization (deliberately reintroduced; removed as vestigial in the review fixes) with
+containment checks on concave sections. **The spiral-to-loop boundary opens a wedge growing s → 2s
+over the first revolution; only C-full's distributed widths close it** — hence B last. Open
+question: whether brick interlock still earns its keep once no two layers share aligned ring circles.
+
+## 5. Seam-impact / risk summary
+
+| Phase | Seam impact | Other wins | Risk |
+|---|---|---|---|
+| C-lite | indirect (void-free, width-continuous medial; fewer improvised joins) | kills medial gap, ring-pop voids, sub-bead over-extrusion | low |
+| A | direct: de-lumps every join ridge + surface dive | subsumes seam_coast | low-med |
+| C-full | enables B; per-angle density uniformity | non-uniform walls | med |
+| B | interior joins eliminated; 2 joins/layer total | most uniform interior | high |

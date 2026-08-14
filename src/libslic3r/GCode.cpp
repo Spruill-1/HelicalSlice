@@ -6691,8 +6691,13 @@ std::string GCode::_extrude(const ExtrusionPath &path, std::string description, 
     // ORCA: resonance‑avoidance on short external perimeters
 {
     double ref_speed = speed;  // stash the pre‑cap speed
+    // Continuous-shell mode prints the ENTIRE object as erExternalPerimeter sub-paths whose
+    // mm3_per_mm varies along one bead (over-extrusion, seam coast, variable width). The RA
+    // bi-quantizer would snap each sub-path's speed to min or max of the range, turning small
+    // flow changes into large feedrate jumps mid-bead - so it must not fire in that mode.
     if (path.role() == erExternalPerimeter
-        && m_config.resonance_avoidance.value) {
+        && m_config.resonance_avoidance.value
+        && !m_config.continuous_shell_mode) {
 
         // if our original speed was above “max”, disable RA for this loop
         if (ref_speed > m_config.max_resonance_avoidance_speed.value) {

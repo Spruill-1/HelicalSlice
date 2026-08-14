@@ -332,10 +332,11 @@ TEST_CASE("Continuous shell over-extrusion is capped to the residual void (no su
     Surfaces surfaces{ annulus };
     Flow flow(0.5f, 0.25f, 0.5f);
     const double layer_height = 0.25;
-    const double base = flow.mm3_per_mm();
     const double v_model = std::abs(annulus.expolygon.area()) * SCALING_FACTOR * SCALING_FACTOR * layer_height;
 
-    // Total extruded volume (mm^3) and the largest per-bead flow multiple, for a given knob.
+    // Total extruded volume (mm^3) and the largest per-bead flow MULTIPLIER, for a given knob.
+    // The multiplier is measured against each path's OWN width baseline (adaptive bead width
+    // legitimately raises mm3_per_mm on widened medial beads at multiplier 1.0).
     auto measure = [&](double over_pct, double &max_mult) {
         PrintRegionConfig cfg;
         cfg.continuous_shell_internal_overextrusion.value = over_pct;
@@ -346,7 +347,7 @@ TEST_CASE("Continuous shell over-extrusion is capped to the residual void (no su
         double vol = 0.0; max_mult = 0.0;
         for (const ExtrusionPath &p : mp->paths) {
             vol += p.mm3_per_mm * p.polyline.length() * SCALING_FACTOR;
-            max_mult = std::max(max_mult, p.mm3_per_mm / base);
+            max_mult = std::max(max_mult, p.mm3_per_mm / flow.with_width(p.width).mm3_per_mm());
         }
         return vol;
     };
@@ -551,8 +552,9 @@ TEST_CASE("Continuous shell seam coast thins flow at the surface handoff (A3)", 
             Polygon{{3000000, 3000000}, {3000000, 5000000}, {5000000, 5000000}, {5000000, 3000000}}));
     Surfaces surfaces{ annulus };
     Flow flow(0.5f, 0.25f, 0.5f);
-    const double base = flow.mm3_per_mm();
 
+    // Flow MULTIPLIER extremes against each path's own width baseline (adaptive bead width
+    // legitimately raises mm3_per_mm on widened medial beads at multiplier 1.0).
     auto flow_extremes = [&](double coast_pct) {
         PrintRegionConfig cfg;
         cfg.continuous_shell_seam_coast.value = coast_pct;
@@ -561,18 +563,21 @@ TEST_CASE("Continuous shell seam coast thins flow at the surface handoff (A3)", 
         auto *mp = dynamic_cast<ExtrusionMultiPath *>(e.entities.front());
         REQUIRE(mp != nullptr);
         double mn = std::numeric_limits<double>::max(), mx = 0.0;
-        for (auto &p : mp->paths) { mn = std::min(mn, p.mm3_per_mm); mx = std::max(mx, p.mm3_per_mm); }
+        for (auto &p : mp->paths) {
+            const double mult = p.mm3_per_mm / flow.with_width(p.width).mm3_per_mm();
+            mn = std::min(mn, mult); mx = std::max(mx, mult);
+        }
         return std::make_pair(mn, mx);
     };
 
     const auto off = flow_extremes(0.0);
-    REQUIRE(off.first  > base * 0.999);   // no coast -> uniform base flow everywhere
-    REQUIRE(off.second < base * 1.001);
+    REQUIRE(off.first  > 0.999);          // no coast -> no flow modifier anywhere
+    REQUIRE(off.second < 1.001);
 
     const auto on = flow_extremes(50.0);  // 50% coast
-    REQUIRE(on.second  > base * 0.999);   // surface + interior beads keep full flow
-    REQUIRE(on.second  < base * 1.001);
-    REQUIRE(on.first   < base * 0.6);     // the seam crossings are thinned to ~0.5x
+    REQUIRE(on.second  > 0.999);          // surface + interior beads keep full flow
+    REQUIRE(on.second  < 1.001);
+    REQUIRE(on.first   < 0.6);            // the seam crossings are thinned to ~0.5x
 }
 
 TEST_CASE("Continuous shell woven infill sparsifies the interior and weaves it in Z", "[ContinuousShell]") {
@@ -878,6 +883,147 @@ std::vector<Point3> cs_path_points(const Surfaces &surfaces, const Flow &flow, P
     return pts;
 }
 } // namespace
+
+TEST_CASE("Continuous shell closes the medial deficit by widening the innermost beads", "[ContinuousShell]") {
+    // Adaptive bead width (C-lite). A 2.193mm annular wall fits two band pairs (0.5mm beads
+    // at ~0.446 spacing) and leaves a ~0.3mm residual void between the innermost bead edges -
+    // the old code patched it with heuristic medial strips or left it open. Now the deficit
+    // is measured (vanish-depth bisection) and closed by widening the innermost BURIED ring
+    // pair by v/2 each, centrelines shifted v/4 toward the medial. The free surfaces must
+    // keep nominal width, every sub-path's flow must be consistent with its declared width
+    // (the preview contract), and the deposited volume must come out near the model's own.
+    Polygon outer, inner;
+    for (int i = 0; i < 240; ++i) {
+        const double a = 2.0 * M_PI * i / 240.0;
+        outer.points.emplace_back(coord_t(10000000 * std::cos(a)), coord_t(10000000 * std::sin(a)));
+        inner.points.emplace_back(coord_t( 7807000 * std::cos(a)), coord_t( 7807000 * std::sin(a)));
+    }
+    ExPolygons annulus = diff_ex(Polygons{outer}, Polygons{inner});
+    REQUIRE(annulus.size() == 1);
+    REQUIRE(annulus.front().holes.size() == 1);
+    const double model_area_mm2 = annulus.front().area() * SCALING_FACTOR * SCALING_FACTOR;
+
+    Surfaces surfaces{ Surface(stInternal, annulus.front()) };
+    Flow flow(0.5f, 0.25f, 0.5f);
+    ExtrusionEntityCollection e; std::string reason;
+    REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.25, nullptr, e, &reason, false, 3));
+    std::vector<ExtrusionPath *> paths;
+    for (ExtrusionEntity *ent : e.entities)
+        ContinuousShellPathBuilder::collect_paths(ent, paths);
+    REQUIRE_FALSE(paths.empty());
+
+    float  max_w = 0.f, first_w = paths.front()->width;
+    double volume = 0.0;
+    for (const ExtrusionPath *p : paths) {
+        max_w = std::max(max_w, p->width);
+        // Preview/flow contract: mm3_per_mm must be exactly what a Flow of this width
+        // gives (no flow modifiers are configured here).
+        REQUIRE_THAT(double(p->mm3_per_mm), Catch::Matchers::WithinRel(double(flow.with_width(p->width).mm3_per_mm()), 0.001));
+        for (size_t i = 1; i < p->polyline.points.size(); ++i) {
+            const Point a(p->polyline.points[i-1].x(), p->polyline.points[i-1].y());
+            const Point b(p->polyline.points[i].x(),   p->polyline.points[i].y());
+            volume += (b - a).cast<double>().norm() * SCALING_FACTOR * p->mm3_per_mm;
+        }
+    }
+    // The path starts on the outer surface ring: it must stay at nominal width.
+    REQUIRE_THAT(double(first_w), Catch::Matchers::WithinAbs(0.5, 0.001));
+    // The innermost pair was widened by ~v/2 = ~0.15mm.
+    REQUIRE(max_w > 0.56f);
+    REQUIRE(max_w < 0.75f);
+    // Total deposited volume is close to the model's solid volume (the old gap lost ~20%).
+    const double model_volume = model_area_mm2 * 0.25;
+    REQUIRE(volume > 0.90 * model_volume);
+    REQUIRE(volume < 1.08 * model_volume);
+}
+
+TEST_CASE("Continuous shell scarf tapers junctions, spares surfaces, bounds sub-paths", "[ContinuousShell]") {
+    // Option A: the in-plane scarf tapers bead width toward a floor across every ring-to-ring
+    // junction so the once-per-revolution radial step blends instead of ridging. Free-surface
+    // rings are never tapered (their outer flank would recede into a relief groove). Tapered
+    // widths are quantized to 0.05mm buckets so the taper stays a handful of sub-paths.
+    Polygon circ;
+    for (int i = 0; i < 96; ++i) {
+        const double a = 2.0 * M_PI * i / 96.0;
+        circ.points.emplace_back(coord_t(8000000 * std::cos(a)), coord_t(8000000 * std::sin(a)));
+    }
+    Surfaces surfaces{ Surface(stInternal, ExPolygon(circ)) };
+    Flow flow(0.5f, 0.25f, 0.5f);
+
+    struct R { double vol = 0.; float min_w = 1e9f, first_w = 0.f; double first_len = 0.; size_t n_paths = 0; };
+    auto measure = [&](double scarf_mm) {
+        PrintRegionConfig cfg;
+        cfg.continuous_shell_scarf_length.value = scarf_mm;
+        ExtrusionEntityCollection e; std::string reason;
+        REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.25, &cfg, e, &reason, false, 3));
+        std::vector<ExtrusionPath *> paths;
+        for (ExtrusionEntity *ent : e.entities)
+            ContinuousShellPathBuilder::collect_paths(ent, paths);
+        REQUIRE_FALSE(paths.empty());
+        R r;
+        r.n_paths   = paths.size();
+        r.first_w   = paths.front()->width;
+        r.first_len = paths.front()->polyline.length() * SCALING_FACTOR;
+        for (const ExtrusionPath *p : paths) {
+            r.min_w = std::min(r.min_w, p->width);
+            r.vol  += p->mm3_per_mm * p->polyline.length() * SCALING_FACTOR;
+            // Width/flow consistency holds through the scarf (no flow modifiers configured).
+            REQUIRE_THAT(double(p->mm3_per_mm), Catch::Matchers::WithinRel(double(flow.with_width(p->width).mm3_per_mm()), 0.001));
+        }
+        return r;
+    };
+
+    const R off = measure(0.0);
+    const R on  = measure(8.0);
+
+    REQUIRE(off.min_w > 0.49f);                        // scarf off: nothing below nominal width
+    REQUIRE(on.min_w  > 0.20f);                        // scarf on: tapered down to the floor...
+    REQUIRE(on.min_w  < 0.31f);                        // ...which is max(w/2, nozzle/4) = 0.25
+    // The outer surface ring is spared: the path starts with the full ring 0 loop at
+    // nominal width (circumference of the r = 8 - w/2 centreline).
+    REQUIRE_THAT(double(on.first_w), Catch::Matchers::WithinAbs(0.5, 0.001));
+    REQUIRE(on.first_len > 0.9 * 2.0 * M_PI * 7.75);
+    // The taper deficit is local and bounded; the buckets keep the sub-path count sane.
+    REQUIRE(on.vol < off.vol);
+    REQUIRE(on.vol > 0.85 * off.vol);
+    REQUIRE(on.n_paths < 500);
+    REQUIRE(on.n_paths > off.n_paths);                 // it did split the taper into runs
+}
+
+TEST_CASE("Continuous shell fits the bead to a sub-bead wall and declines below min feature size", "[ContinuousShell]") {
+    // Adaptive bead width on the sub-bead medial fallback: a 0.3mm wall used to print at
+    // the nominal 0.5mm width (66% over-extrusion); now it prints at the narrowest
+    // printable bead (default 85% of the 0.5 nozzle = 0.425). A 0.1mm wall is below the
+    // minimum feature size (default 25% of nozzle = 0.125) and must decline loudly.
+    Flow flow(0.5f, 0.25f, 0.5f);
+    auto thin_annulus = [](coord_t r_out, coord_t r_in) {
+        Polygon o, i2;
+        for (int i = 0; i < 180; ++i) {
+            const double a = 2.0 * M_PI * i / 180.0;
+            o.points.emplace_back(coord_t(r_out * std::cos(a)), coord_t(r_out * std::sin(a)));
+            i2.points.emplace_back(coord_t(r_in  * std::cos(a)), coord_t(r_in  * std::sin(a)));
+        }
+        ExPolygons ann = diff_ex(Polygons{o}, Polygons{i2});
+        REQUIRE(ann.size() == 1);
+        return ann.front();
+    };
+
+    Surfaces s03{ Surface(stInternal, thin_annulus(5000000, 4700000)) };   // 0.3mm wall
+    ExtrusionEntityCollection e1; std::string r1;
+    REQUIRE(ContinuousShellPathBuilder::build_cross_section(s03, flow, 0.2, nullptr, e1, &r1, false, 2));
+    std::vector<ExtrusionPath *> paths;
+    for (ExtrusionEntity *ent : e1.entities)
+        ContinuousShellPathBuilder::collect_paths(ent, paths);
+    REQUIRE_FALSE(paths.empty());
+    for (const ExtrusionPath *p : paths) {
+        REQUIRE_THAT(double(p->width), Catch::Matchers::WithinAbs(0.425, 0.01));   // fitted, not nominal
+        REQUIRE_THAT(double(p->mm3_per_mm), Catch::Matchers::WithinRel(double(flow.with_width(p->width).mm3_per_mm()), 0.001));
+    }
+
+    Surfaces s01{ Surface(stInternal, thin_annulus(5000000, 4900000)) };   // 0.1mm wall
+    ExtrusionEntityCollection e2; std::string r2;
+    REQUIRE_FALSE(ContinuousShellPathBuilder::build_cross_section(s01, flow, 0.2, nullptr, e2, &r2, false, 2));
+    REQUIRE_FALSE(r2.empty());
+}
 
 TEST_CASE("Continuous shell sub-bead medial fallback: closed ring works, open blade declines", "[ContinuousShell]") {
     // A region thinner than one bead falls back to a medial-axis centreline. That is only

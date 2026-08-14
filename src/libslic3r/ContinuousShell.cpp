@@ -194,7 +194,10 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
                          double ring_spacing, size_t layer_index, bool has_bore, std::vector<char> *internal,
                          coord_t interlock_amp = 0, std::vector<coord_t> *z_off = nullptr,
                          double connector_spread = 0.0, size_t infill_shell_loops = 0,
-                         const ExPolygon *region = nullptr)
+                         const ExPolygon *region = nullptr,
+                         const std::vector<float> *ring_widths = nullptr, std::vector<float> *pt_width = nullptr,
+                         float nominal_width = 0.f,
+                         coord_t scarf_len = 0, float scarf_floor = 0.f)
 {
     Polyline spiral;
     if (rings_in.empty())
@@ -352,6 +355,12 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
     };
     auto flag = [&](bool is_internal) { if (internal) internal->push_back(is_internal ? char(1) : char(0)); };
     auto zoff = [&](coord_t z) { if (z_off) z_off->push_back(z); };
+    // Per-point extrusion width (adaptive bead width): each point carries its ring's
+    // planned width, nominal when the chain has no explicit plan.
+    auto width_of = [&](size_t idx) -> float {
+        return (ring_widths != nullptr && idx < ring_widths->size()) ? (*ring_widths)[idx] : nominal_width;
+    };
+    auto pw = [&](float w) { if (pt_width) pt_width->push_back(w); };
 
     // Brick interlock: nudge buried wall rings up/down in Z so radially-adjacent beads
     // stop sharing a Z level (a continuous horizontal interface is the wall's weak plane).
@@ -368,8 +377,8 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
     };
 
     if (grid.size() == 1) {
-        for (size_t k = 0; k < grid[0].size(); ++k) { spiral.points.push_back(grid[0][k]); flag(false); zoff(0); }
-        spiral.points.push_back(grid[0][0]); flag(false); zoff(0);
+        for (size_t k = 0; k < grid[0].size(); ++k) { spiral.points.push_back(grid[0][k]); flag(false); zoff(0); pw(width_of(0)); }
+        spiral.points.push_back(grid[0][0]); flag(false); zoff(0); pw(width_of(0));
         return spiral;
     }
 
@@ -419,7 +428,16 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
         for (const std::vector<Point> &c : grid) total += c.size();
         spiral.points.reserve(total + 2);
     }
+    std::vector<size_t> ring_starts;                 // emitted start index of each ring, path order
+    std::vector<char>   ring_surface;                // is the emitted ring a free surface? (path order)
+    std::vector<float>  ring_base_w;                 // the ring's own (pre-scarf) width, path order
+    ring_starts.reserve(order.size());
+    ring_surface.reserve(order.size());
+    ring_base_w.reserve(order.size());
     for (const size_t idx : order) {
+        ring_starts.push_back(spiral.points.size());
+        ring_surface.push_back(char(is_surface(idx) ? 1 : 0));
+        ring_base_w.push_back(width_of(idx));
         const bool internal_ring = (infill_shell_loops > 0) ? is_infill(idx) : !is_surface(idx);
         const coord_t zo = ring_z_off(idx);
         std::vector<Point> &c = grid[idx];
@@ -446,7 +464,77 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
                     std::rotate(c.begin(), c.begin() + bestk, c.end());
             }
         }
-        for (size_t k = 0; k < c.size(); ++k) { spiral.points.push_back(c[k]); flag(internal_ring); zoff(zo); }
+        for (size_t k = 0; k < c.size(); ++k) { spiral.points.push_back(c[k]); flag(internal_ring); zoff(zo); pw(width_of(idx)); }
+    }
+
+    // In-plane scarf (option A). Every ring-to-ring junction is a one-spacing radial step
+    // whose diagonal crosses track the neighbouring rings already cover - an abrupt overfill
+    // ridge, the once-per-layer visible seam when it involves ring 0. Soften it by tapering
+    // the bead width toward a floor over the last `scarf_len` of the outgoing ring and back
+    // up over the first `scarf_len` of the incoming ring; the junction diagonal itself (the
+    // segment keyed on the incoming ring's first point) is laid at the floor. WIDTH/FLOW
+    // ONLY - no centreline moves - because SpiralVase's forced-on XY smoothing pulls points
+    // toward the PREVIOUS layer (whose junction sits at a precessed angle) and would smear
+    // any deliberate centreline shift; flow modulation passes through it untouched.
+    // Tapered widths are quantized to Arachne's 0.05mm bucket so the taper becomes a handful
+    // of sub-paths, not one per point. Windows never cross their own ring's far end (a short
+    // ring gets a shorter taper), and overlapping windows keep the smaller width. Woven
+    // chains are excluded: their inter-ring diagonals are structural struts across open
+    // sparse space, not redundant track. Floor: half the ring's width, but never below the
+    // caller's printable floor.
+    if (scarf_len > 0 && pt_width != nullptr && infill_shell_loops == 0 && ring_starts.size() > 1) {
+        auto taper = [&](size_t begin, size_t end, size_t join_end, bool towards_end, float base_w) {
+            // Points [begin, end) belong to one ring; the junction sits at index join_end
+            // (one past the ring's last point when towards_end, at the ring's first point
+            // otherwise). Walk away from the junction accumulating XY arc length. The taper
+            // is computed from the ring's ORIGINAL width, never the current point width -
+            // on a short ring the head and tail windows overlap, and re-tapering an
+            // already-tapered point would compound below the floor. Overlaps keep min().
+            // The window is capped at a quarter of the ring's own arc so a small inner ring
+            // is never thinned wall-to-wall by an aggressive scarf length: at most half of
+            // any ring (a quarter from each end) is ever below full width.
+            double ring_arc = 0.;
+            for (size_t j = begin + 1; j < end; ++j)
+                ring_arc += (spiral.points[j] - spiral.points[j - 1]).cast<double>().norm();
+            double acc = 0.;
+            const double L = std::min(double(scarf_len), 0.25 * ring_arc);
+            if (L <= 0.)
+                return;
+            const float floor_w = std::max(scarf_floor, 0.5f * base_w);
+            size_t i = towards_end ? (join_end - 1) : begin;
+            size_t prev = i;
+            while (i >= begin && i < end) {
+                acc += (spiral.points[i] - spiral.points[prev]).cast<double>().norm();
+                if (acc >= L)
+                    break;
+                float tapered = floor_w + (base_w - floor_w) * float(acc / L);
+                tapered = std::round(tapered / 0.05f) * 0.05f;              // 0.05mm buckets
+                tapered = std::max(tapered, floor_w);
+                float &w = (*pt_width)[i];
+                w = std::min(w, tapered);
+                prev = i;
+                if (towards_end) { if (i == begin) break; --i; } else { ++i; }
+            }
+        };
+        // Free-surface rings are never tapered: narrowing a surface bead recedes its
+        // OUTER flank and would trade the overfill ridge for a visible relief groove.
+        // Their junctions still soften via the diagonal (floor width, keyed on the
+        // incoming ring's first point) and the buried partner's taper.
+        for (size_t k = 1; k < ring_starts.size(); ++k) {
+            const size_t b = ring_starts[k];                                 // incoming ring's first point
+            if (!ring_surface[k - 1])
+                taper(ring_starts[k - 1], b, b, /*towards_end=*/true, ring_base_w[k - 1]);   // outgoing ring's tail
+            if (!ring_surface[k]) {
+                const size_t ring_end = (k + 1 < ring_starts.size()) ? ring_starts[k + 1] : spiral.points.size();
+                taper(b, ring_end, b, /*towards_end=*/false, ring_base_w[k]);                // incoming ring's head
+            } else if (b < pt_width->size()) {
+                // Even into a surface ring, the junction DIAGONAL (the segment keyed on the
+                // ring's first point) is redundant track and stays at the floor; only the
+                // ring's own subsequent points keep full surface width.
+                float &w = (*pt_width)[b];
+                w = std::min(w, std::max(scarf_floor, 0.5f * ring_base_w[k]));
+            }
+        }
     }
 
     return spiral;
@@ -457,14 +545,19 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
 // SOLID waist (e.g. a dogbone) or a pinched/branching annular wall (a non-uniform tube
 // wall that necks off, common at fine spacing) - it ends the current chain and recurses
 // so each piece becomes its OWN chain (filled contiguously, joined by a single bridge).
+// `vanished` records, parallel to `chains`, whether each chain ended because the next
+// inward offset came up EMPTY (the band was consumed at the medial axis) - only then is
+// the leftover a measurable medial deficit the caller can close by widening beads; a
+// chain ended by a pinch or a split has material continuing elsewhere instead.
 // Returns false only for topologies we still do not model (a solid band that grows a
 // hole) or on a band/point budget overflow, so the caller can hard-stop.
 bool march_bands(ExPolygon band, coord_t spacing, bool has_hole,
-                 std::vector<std::vector<ExPolygon>> &chains, size_t &point_count)
+                 std::vector<std::vector<ExPolygon>> &chains, std::vector<char> &vanished, size_t &point_count)
 {
     constexpr size_t max_chains = 4096;
     constexpr size_t max_points = 400000;
     std::vector<ExPolygon> chain;
+    bool ended_by_vanish = false;
     for (;;) {
         // A wall band must keep exactly one hole; when it pinches we hit the medial.
         if (has_hole && band.holes.size() != 1)
@@ -481,8 +574,10 @@ bool march_bands(ExPolygon band, coord_t spacing, bool has_hole,
             return false;
 
         ExPolygons next = offset_ex(ExPolygons{ band }, -float(spacing));
-        if (next.empty())
+        if (next.empty()) {
+            ended_by_vanish = true;
             break;                           // vanished at the medial axis
+        }
         if (next.size() == 1) {              // still one piece -> keep marching
             band = std::move(next.front());
             continue;
@@ -490,15 +585,19 @@ bool march_bands(ExPolygon band, coord_t spacing, bool has_hole,
         // The chain split into several pieces (a solid waist, or a pinched annular
         // wall). End this chain and recurse into each piece as its own chain, using
         // each piece's OWN hole status (a piece may keep the bore or close up solid).
-        if (!chain.empty())
+        if (!chain.empty()) {
             chains.push_back(std::move(chain));
+            vanished.push_back(0);
+        }
         for (const ExPolygon &comp : next)
-            if (!march_bands(comp, spacing, !comp.holes.empty(), chains, point_count))
+            if (!march_bands(comp, spacing, !comp.holes.empty(), chains, vanished, point_count))
                 return false;
         return true;
     }
-    if (!chain.empty())
+    if (!chain.empty()) {
         chains.push_back(std::move(chain));
+        vanished.push_back(char(ended_by_vanish ? 1 : 0));
+    }
     return true;
 }
 
@@ -516,6 +615,11 @@ struct ContourChain {
     // dropping rings needs no parametrization - so a declined chain still prints plain
     // concentric sparse rings.
     bool     star_ok = true;
+    // Adaptive bead width (C-lite): per-ring extrusion width in mm, parallel to `loops`.
+    // Empty means every ring prints at the nominal flow width. Only chains whose medial
+    // deficit was closed (widened innermost pair) or whose sub-bead centreline was
+    // width-fitted carry explicit widths.
+    std::vector<float> ring_widths;
 };
 
 // Decompose a single connected cross-section into the concentric loop sets that fill
@@ -529,19 +633,43 @@ struct ContourChain {
 // (a cap) simply spirals inward to the centre. Where the region splits during marching
 // (a dogbone waist, or a pinched non-uniform tube wall), each piece becomes its own
 // chain so it is filled contiguously instead of interleaved with the others.
-std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &flow, size_t layer_index, const WovenInfill &woven)
+// Largest inset depth (in (0, hi]) at which `shape` still has material: bisection on
+// offset_ex. Used to measure the residual half-thickness of a vanished band (the medial
+// deficit) and the thickness of a sub-bead region. `hi` must be a known-empty depth.
+coord_t vanish_depth(const ExPolygons &shape, coord_t hi)
+{
+    coord_t lo = 0;
+    for (int it = 0; it < 4; ++it) {
+        const coord_t mid = lo + (hi - lo) / 2;
+        if (mid == lo)
+            break;
+        if (offset_ex(shape, -float(mid)).empty())
+            hi = mid;
+        else
+            lo = mid;
+    }
+    return lo + (hi - lo) / 2;
+}
+
+std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &flow, size_t layer_index, const WovenInfill &woven,
+                                         const ContinuousShellWidthLimits &limits)
 {
     const coord_t spacing = flow.scaled_spacing();
     const coord_t width   = flow.scaled_width();
     if (spacing <= 0 || width <= 0)
         return {};
 
+    // Printable-width bounds; zeros derive the Arachne defaults from the nozzle.
+    const double min_bead_width_mm   = limits.min_bead_width_mm   > 0. ? limits.min_bead_width_mm   : 0.85 * flow.nozzle_diameter();
+    const double min_feature_size_mm = limits.min_feature_size_mm > 0. ? limits.min_feature_size_mm : 0.25 * flow.nozzle_diameter();
+
     std::vector<std::vector<ExPolygon>> chains;
+    std::vector<char> vanished;
     size_t point_count = 0;
 
     ExPolygons current = offset_ex(ExPolygons{ region }, -float(width) / 2.f);
     for (const ExPolygon &seed : current)
-        if (!march_bands(seed, spacing, !seed.holes.empty(), chains, point_count))
+        if (!march_bands(seed, spacing, !seed.holes.empty(), chains, vanished, point_count))
             return {};
 
     std::vector<ContourChain> out;
@@ -558,6 +686,19 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
         // and only the in-chain positional re-anchor (spiralize_rings) can hop between
         // them along the wall - the inter-chain stitcher has no rails at sub-bead width
         // (offset_ex by -1.5 beads is empty) and would chord straight across the bore.
+        //
+        // Adaptive width (C-lite): fit the bead to the wall instead of over-extruding at
+        // nominal width. Measure the true thickness (twice the depth at which the raw
+        // region vanishes; the w/2 inset above is known empty, so bisect below it),
+        // decline outright below the minimum feature size (WideningBeadingStrategy
+        // semantics), and otherwise print the centreline at the measured thickness
+        // clamped up to the narrowest printable bead.
+        const coord_t t_scaled = 2 * vanish_depth(ExPolygons{ region }, width / 2);
+        const double  t_mm     = double(t_scaled) * SCALING_FACTOR;
+        if (t_mm < min_feature_size_mm)
+            return {};            // thinner than the minimum feature size -> decline loudly
+        const float bead_mm = float(std::clamp(t_mm, min_bead_width_mm, double(flow.width())));
+
         Polygons loops;
         Polylines centerlines = region.medial_axis(double(width) / 5., double(2 * width));
         for (const Polyline &pl : centerlines) {
@@ -573,53 +714,21 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
         }
         if (loops.empty())
             return {};
-        out.push_back({ std::move(loops), false });
+        ContourChain cc;
+        cc.loops = std::move(loops);
+        cc.ring_widths.assign(cc.loops.size(), bead_mm);
+        out.push_back(std::move(cc));
         return out;
     }
 
-    for (const auto &chain : chains) {
+    for (size_t ci = 0; ci < chains.size(); ++ci) {
+        const auto &chain = chains[ci];
         ContourChain cc;
         cc.loops.reserve(chain.size() * 2 + 1);
         // Outer contours: outer edge -> medial axis.
         for (const ExPolygon &band : chain)
             cc.loops.push_back(band.contour);
-        // Medial gap fill. Marching inward from both surfaces stops when the annular band
-        // can no longer be offset, but the last band's two fronts (its innermost outer
-        // contour and innermost bore contour) can be more than one bead-width apart -
-        // leaving an unfilled medial strip that shows up as a vertical void ring between
-        // the inner and outer walls. Offsetting the last band in by width/2 isolates that
-        // uncovered strip (empty where the wall already tiles, so this self-gates); its
-        // outer and bore contours sit just inside the two fronts and bracket the gap.
-        // Emitted here (between the outer and bore contour runs) so the path still spirals
-        // in, crosses the medial, and spirals back out. Only ONE offset is used - offsetting
-        // the already-thin strip again makes it near-degenerate and fragments into many
-        // slivers (O(n^2) blow-up), so we take the strip's own contours directly.
-        // The concentric loops emitted above are consumed by spiralize_rings as a strictly
-        // radially-nested stack: the Fermat interleave connects loop i to loop i+2 assuming
-        // each is one bead further in. A medial loop is only safe to insert if it, too, is a
-        // clean concentric annulus that brackets the SAME bore. On a uniform wall the last
-        // band's medial gap is exactly that. On a thick/non-uniform base (a flared foot) the
-        // last band is lopsided: offsetting it by width/2 fragments into off-centre blobs or
-        // opens the hole into the contour. Inserted into the radial order those blobs get
-        // bridged straight across the hollow bore (bird's-nest chords). So gate strictly:
-        // add the medial ring ONLY when the inward offset stays a single one-holed annulus.
-        if (!chain.empty() && chain.back().holes.size() == 1) {
-            // Coarsen the band before offsetting: the medial fill does not need full
-            // slice-contour precision, and offsetting the detailed contour every layer is
-            // the dominant cost (offset_ex is ~O(n^1.5) in contour points).
-            ExPolygons simplified = chain.back().simplify(double(width) / 4.);
-            if (simplified.size() == 1) {
-                ExPolygons strips = offset_ex(ExPolygons{ simplified.front() }, -float(width) / 2.f);
-                if (strips.size() == 1 && strips.front().holes.size() == 1) {
-                    const ExPolygon &strip = strips.front();
-                    if (strip.contour.points.size() >= 3 && strip.contour.length() > 4 * width)
-                        cc.loops.push_back(strip.contour);
-                    const Polygon &hole = strip.holes.front();
-                    if (hole.points.size() >= 3 && hole.length() > 4 * width)
-                        cc.loops.push_back(hole);
-                }
-            }
-        }
+        const size_t contours_n = cc.loops.size();
         // Inner (hole) contours: medial axis -> bore (innermost first), for an annular
         // chain only. A piece pinched off solid contributes none.
         for (auto it = chain.rbegin(); it != chain.rend(); ++it)
@@ -627,6 +736,43 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
                 cc.loops.push_back(it->holes.front());
                 cc.has_bore = true;
             }
+        // Medial deficit correction (adaptive bead width, C-lite). Marching stops when one
+        // more band no longer fits, leaving a residual gap between the innermost beads'
+        // edges. Measure it exactly: the last band vanished somewhere in (0, spacing], so
+        // its residual half-thickness d_res is recoverable by bisection, and the void
+        // between the innermost bead EDGES is v = 2*d_res - width. Because another band
+        // would have fitted otherwise, v <= 2*spacing - width (~0.8 beads) ALWAYS - so the
+        // gap never needs new medial rings (the old strip patch): it is closed by WIDENING
+        // the innermost ring pair by v/2 each and shifting their centrelines v/4 toward the
+        // medial, which extends each bead's inner flank by exactly v/2 (they meet at the
+        // medial) while leaving its outer flank untouched. Skipped for chains about to be
+        // sparsified (their interior is deliberately open) and for chains that ended by a
+        // pinch or split (material continues elsewhere; there is no closed deficit).
+        const bool will_decimate = woven.enabled && woven.stride > 1 &&
+            (cc.has_bore ? cc.loops.size() > 2 * woven.shell_loops + 1 : cc.loops.size() > woven.shell_loops + 1);
+        if (!will_decimate && ci < vanished.size() && vanished[ci] && !chain.empty()) {
+            const coord_t d_res = vanish_depth(ExPolygons{ chain.back() }, spacing);
+            const coord_t v     = 2 * d_res - width;
+            if (v > width / 10) {
+                const float widened = flow.width() + float(double(v) * SCALING_FACTOR) / 2.f;
+                cc.ring_widths.assign(cc.loops.size(), flow.width());
+                // Recentre the innermost ring(s) v/4 toward the medial. v/4 < d_res always,
+                // so the offset stays strictly inside the last band; if it still fragments
+                // (numeric slivers), fall back to width-only (mild outward overlap instead
+                // of a void - still strictly better than the gap).
+                ExPolygons inner = offset_ex(ExPolygons{ chain.back() }, -float(v) / 4.f);
+                const bool ok = inner.size() == 1 &&
+                    (cc.has_bore ? inner.front().holes.size() == 1 : inner.front().holes.empty());
+                if (ok) {
+                    cc.loops[contours_n - 1] = inner.front().contour;
+                    if (cc.has_bore)
+                        cc.loops[contours_n] = inner.front().holes.front();
+                }
+                cc.ring_widths[contours_n - 1] = widened;
+                if (cc.has_bore && contours_n < cc.loops.size())
+                    cc.ring_widths[contours_n] = widened;
+            }
+        }
         // Sparse WOVEN infill. Keep a solid shell of shell_loops rings on every free FACE and thin
         // the buried interior to the sparse stride, all carried by the SAME continuous bead. For a
         // SOLID chain the shell hugs the outer face and the fill thins toward the centre. For an
@@ -945,7 +1091,8 @@ bool build_serpentine_cap(const ExPolygon &region, const Flow &flow, double laye
 
 bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, const Flow &flow, double layer_height,
                                                      const PrintRegionConfig *config, ExtrusionEntityCollection &entities,
-                                                     std::string *reason, bool reverse_path, size_t layer_index, bool force_solid)
+                                                     std::string *reason, bool reverse_path, size_t layer_index, bool force_solid,
+                                                     const ContinuousShellWidthLimits &width_limits)
 {
     ExPolygons regions;
     regions.reserve(surfaces.size());
@@ -999,7 +1146,7 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     } else {
         woven = woven_infill_params(config);
     }
-    const std::vector<ContourChain> chains = contour_spiral(merged.front(), flow, layer_index, woven);
+    const std::vector<ContourChain> chains = contour_spiral(merged.front(), flow, layer_index, woven, width_limits);
     if (chains.empty()) {
         if (reason != nullptr)
             *reason = "Continuous shell mode could not construct a contour spiral.";
@@ -1043,12 +1190,18 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     const double connector_spread = (config != nullptr) ? config->continuous_shell_connector_spread.value / 100.0 : 0.0;
     const double coast_pct        = (config != nullptr) ? config->continuous_shell_seam_coast.value : 0.0;
 
+    // In-plane scarf (option A): taper the bead width across every ring-to-ring junction
+    // (see spiralize_rings). The floor is transitional, not structural - a scarf bead
+    // overlaps the junction zone - so it binds to a quarter nozzle, not min_bead_width.
+    const coord_t scarf_len   = (config != nullptr) ? coord_t(std::llround(scale_(std::max(0., config->continuous_shell_scarf_length.value)))) : 0;
+    const float   scarf_floor = 0.25f * flow.nozzle_diameter();
+
     // Fill each connected piece (chain) as its own Fermat spiral, then stitch the pieces
     // together greedily - each next piece is appended at whichever end lands nearest the
     // running tail - so a split cross-section's pieces are joined by the shortest hop
     // (along the wall) instead of long chords across the bore. A simple cross-section has
     // exactly one chain, so this is identical to a single spiral there.
-    struct Sub { Polyline pl; std::vector<char> flags; std::vector<coord_t> zoff; bool zwave = false; };
+    struct Sub { Polyline pl; std::vector<char> flags; std::vector<coord_t> zoff; std::vector<float> widths; bool zwave = false; };
     std::vector<Sub> subs;
     // Per-layer reversal exists to give SINGLE-chain solid layers short inter-layer
     // joins (core end meets core start). A stitched MULTI-chain tour instead closes
@@ -1060,14 +1213,17 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     for (const ContourChain &chain : chains) {
         std::vector<char> flags;
         std::vector<coord_t> zoff;
+        std::vector<float> widths;
         Polyline sub = spiralize_rings(chain.loops, reverse_chains, seam_step_rad, seam_jitter_rad,
                                        ring_spacing, layer_index, chain.has_bore, &flags, interlock_amp, &zoff,
                                        connector_spread, chain.woven_infill ? woven.shell_loops : 0,
-                                       &merged.front());
-        if (sub.points.size() >= 2 && sub.points.size() == flags.size() && sub.points.size() == zoff.size())
+                                       &merged.front(), &chain.ring_widths, &widths, flow.width(),
+                                       scarf_len, scarf_floor);
+        if (sub.points.size() >= 2 && sub.points.size() == flags.size() && sub.points.size() == zoff.size()
+            && sub.points.size() == widths.size())
             // A chain carries the Z-wave only when its interior was actually thinned AND its
             // rings passed the star-shape gate (angular phase is meaningless on a folded chain).
-            subs.push_back({ std::move(sub), std::move(flags), std::move(zoff),
+            subs.push_back({ std::move(sub), std::move(flags), std::move(zoff), std::move(widths),
                              chain.woven_infill && chain.star_ok });
     }
     if (subs.empty()) {
@@ -1081,17 +1237,20 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     std::vector<char> connector;        // 1 on inter-chain connector points (thinned flow)
     std::vector<char> weavable;         // 1 where the owning chain may carry the Z-wave (star gate)
     std::vector<coord_t> interlock_z;   // per-point Z offset (brick interlock), parallel to spiral.points
+    std::vector<float> pt_width;        // per-point extrusion width (adaptive bead width)
     auto append_sub = [&](Sub &s, bool rev) {
         if (rev) {
             std::reverse(s.pl.points.begin(), s.pl.points.end());
             std::reverse(s.flags.begin(), s.flags.end());
             std::reverse(s.zoff.begin(), s.zoff.end());
+            std::reverse(s.widths.begin(), s.widths.end());
         }
         spiral.points.insert(spiral.points.end(), s.pl.points.begin(), s.pl.points.end());
         internal.insert(internal.end(), s.flags.begin(), s.flags.end());
         interlock_z.insert(interlock_z.end(), s.zoff.begin(), s.zoff.end());
         connector.insert(connector.end(), s.pl.points.size(), char(0));
         weavable.insert(weavable.end(), s.pl.points.size(), char(s.zwave ? 1 : 0));
+        pt_width.insert(pt_width.end(), s.widths.begin(), s.widths.end());
     };
 
     // Inter-chain connector routing. A split cross-section's sub-chains can END deep
@@ -1182,6 +1341,7 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
             interlock_z.push_back(0);
             connector.push_back(1);
             weavable.push_back(0);
+            pt_width.push_back(flow.width());
         }
         const size_t head_idx = spiral.points.size();
         append_sub(subs[best], best_rev);
@@ -1206,12 +1366,14 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
             interlock_z.push_back(0);
             connector.push_back(1);
             weavable.push_back(0);
+            pt_width.push_back(flow.width());
         }
         spiral.points.push_back(head);
         internal.push_back(1);
         interlock_z.push_back(0);
         connector.push_back(1);
         weavable.push_back(0);
+        pt_width.push_back(flow.width());
     }
     if (spiral.points.size() < 2) {
         if (reason != nullptr)
@@ -1268,18 +1430,28 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     //   V_nominal = nominal volumetric flow (mm^3/mm) * total bead length
     //   void      = max(0, V_model - V_nominal);   budget = over_pct% * void
     //   over_mult = 1 + budget / (flow * buried bead length), plus a hard per-bead safety cap
+    // Per-point flow rate: widened beads (adaptive width) deposit more per mm, so both the
+    // nominal-volume estimate below and the emitted sub-paths must use the point's own
+    // width, not the nominal flow. Widths take only a handful of distinct values per layer,
+    // so a one-entry memo covers the lookups.
+    const bool have_widths = (pt_width.size() == spiral.points.size());
+    float  memo_w = flow.width();
+    double memo_q = flow.mm3_per_mm();
+    auto mm3_of = [&](float w) -> double {
+        if (w != memo_w) { memo_w = w; memo_q = double(flow.with_width(w).mm3_per_mm()); }
+        return memo_q;
+    };
+
     double over_mult = 1.0;
     if (over_pct > 0.0 && have_flags && !merged.empty()) {
-        double total_len = 0.0, buried_len = 0.0;
+        double v_nom = 0.0, v_buried = 0.0;
         for (size_t i = 1; i < spiral.points.size(); ++i) {
             const double seg = (spiral.points[i] - spiral.points[i - 1]).cast<double>().norm() * SCALING_FACTOR;
-            total_len += seg;
-            if (internal[i]) buried_len += seg;   // over-extrusion only lands on buried beads
+            const double q   = have_widths ? mm3_of(pt_width[i]) : flow.mm3_per_mm();
+            v_nom += q * seg;
+            if (internal[i]) v_buried += q * seg;   // over-extrusion only lands on buried beads
         }
-        const double q        = flow.mm3_per_mm();
         const double v_model  = std::abs(merged.front().area()) * SCALING_FACTOR * SCALING_FACTOR * layer_height;
-        const double v_nom    = q * total_len;
-        const double v_buried = q * buried_len;
         const double budget   = (over_pct / 100.0) * std::max(0.0, v_model - v_nom);
         if (v_buried > 1e-9)
             over_mult = std::min(1.0 + budget / v_buried, 1.5); // safety: never more than +50% on a single bead
@@ -1314,14 +1486,20 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
             if (connector[i]) fmul[i] *= connector_mult;
     }
 
-    // Emit maximal runs of equal flow multiplier as sub-paths (keyed on the segment's
-    // second point, matching the original over-extrusion convention), carrying interlock Z.
+    // Emit maximal runs of equal (flow multiplier, bead width) as sub-paths (keyed on the
+    // segment's second point, matching the original over-extrusion convention), carrying
+    // interlock Z. Each run is built with ITS OWN Flow so path.width and mm3_per_mm stay
+    // mutually consistent - path.width is what the G-code ;WIDTH: tag and the preview
+    // render, and it feeds real logic (volumetric speed caps), so it must not lie about
+    // a widened bead.
     ExtrusionMultiPath path;
     size_t start = 0;
     while (start + 1 < spiral.points.size()) {
-        const double cur = fmul[start + 1];
+        const double cur   = fmul[start + 1];
+        const float  cur_w = have_widths ? pt_width[start + 1] : flow.width();
         size_t end = start + 1;
-        while (end + 1 < spiral.points.size() && fmul[end + 1] == cur)
+        while (end + 1 < spiral.points.size() && fmul[end + 1] == cur
+               && (!have_widths || pt_width[end + 1] == cur_w))
             ++end;
         Polyline sub;
         sub.points.assign(spiral.points.begin() + start, spiral.points.begin() + end + 1);
@@ -1329,7 +1507,8 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         if (have_interlock)
             for (size_t i = 0; i < p3.points.size(); ++i)
                 p3.points[i].z() = interlock_z[start + i];
-        ExtrusionPath ep = make_path(p3, flow, layer_height);
+        const Flow run_flow = (cur_w == flow.width()) ? flow : flow.with_width(cur_w);
+        ExtrusionPath ep = make_path(p3, run_flow, layer_height);
         ep.mm3_per_mm *= cur;
         path.paths.emplace_back(std::move(ep));
         start = end;
