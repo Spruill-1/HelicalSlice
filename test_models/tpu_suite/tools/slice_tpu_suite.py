@@ -5,12 +5,20 @@ Bambu TPU 95A HF (translucent), Engineering Plate, 0.45 line width / 0.25 layer 
 """
 import json, os, subprocess, sys
 
-REPO   = r"C:\Users\david\source\HelicalSlice"
+REPO   = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 BASE   = os.path.join(REPO, "resources", "profiles", "BBL")
 SUITE  = os.path.join(REPO, "test_models", "tpu_suite")
 CFG    = os.path.join(SUITE, "config")
 OUT    = os.path.join(SUITE, "sliced")
-EXE    = os.path.join(REPO, "build-arm64", "src", "Release", "orca-slicer.exe")
+# First existing build wins; machines differ (arm64 VS build vs x64).
+_EXE_CANDIDATES = [
+    os.path.join(REPO, "build-arm64", "src", "Release", "orca-slicer.exe"),
+    os.path.join(REPO, "build", "src", "RelWithDebInfo", "orca-slicer.exe"),
+    os.path.join(REPO, "build", "src", "Release", "orca-slicer.exe"),
+]
+EXE = os.environ.get("ORCA_EXE") or next((p for p in _EXE_CANDIDATES if os.path.exists(p)), None)
+if not EXE or not os.path.exists(EXE):
+    sys.exit(f"orca-slicer.exe not found (tried {_EXE_CANDIDATES}); set ORCA_EXE or build first")
 
 os.makedirs(CFG, exist_ok=True)
 os.makedirs(OUT, exist_ok=True)
@@ -48,6 +56,15 @@ for key in ("nozzle_type",):
     if key in machine:
         v = machine[key]
         machine[key] = ["hardened_steel"] * len(v) if isinstance(v, list) else "hardened_steel"
+
+# Bambu Connect validates the nozzle flow type declared in the G-code
+# CONFIG_BLOCK against the printer and refuses on mismatch ("The nozzle flow
+# setting does not match"). Without this pin, the option's 1-element default
+# emits `; nozzle_volume_type = Standard` — one entry for a two-extruder
+# printer — which Connect rejects because the right nozzle's flow type is
+# unresolvable. Both of David's H2D hotends report 0.4 hardened steel
+# STANDARD flow; adjust if the physical hotends ever change.
+machine["nozzle_volume_type"] = ["Standard", "Standard"]
 
 common = {
     "layer_height": "0.25",

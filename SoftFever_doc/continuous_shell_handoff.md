@@ -104,7 +104,14 @@ its own deps build — build trees are not in git):
   `filament_map_mode="Manual"` (**CLI defaults to the LEFT nozzle**; David's hardened
   0.4 is on the RIGHT of the H2D); `print_sequence="by object"` (required by continuous
   shell for multi-object plates); generic-TPU temps overridden to 230C (stock profile's
-  240C exceeds the spool's 235 max).
+  240C exceeds the spool's 235 max); `nozzle_volume_type=["Standard","Standard"]`
+  (**Bambu Connect refuses files whose G-code CONFIG_BLOCK declares a nozzle flow
+  vector it can't resolve against the printer** — the option's 1-element default
+  emits `; nozzle_volume_type = Standard` for a two-extruder printer, leaving the
+  right nozzle undefined. Connect reads the CONFIG_BLOCK comments, not the 3MF
+  metadata. David's H2D hotends are both 0.4 hardened steel STANDARD flow. The
+  committed 3MFs were normalized via `patch_nozzle_flow.py`, which fixes metadata +
+  the comment line and recomputes the gcode md5).
 - `make_t5_trio.py` — multi-object plate with per-object region overrides via
   `<metadata>` on `<object>` in model_settings.config. Never edit `3D/3dmodel.model`
   build items (required `p:UUID` attrs). 60 mm objects pass sequential clearance in a

@@ -43,7 +43,26 @@ remain in `sliced/` as fallbacks. Print order is front→back.
 
 All final `.gcode.3mf` files carry the injected thumbnail set
 (plate/small/no_light/top/pick PNGs rendered from the plate layout) — headless CLI
-output omits them and Bambu Connect refuses to load such files.
+output omits them and Bambu Connect refuses to load such files. (The four
+single-tube fallbacks T1–T4 were never given thumbnails; run `inject_thumbnails.py`
+on them first if you ever need one.)
+
+**Nozzle flow declaration (2026-08-14):** Bambu Connect validates the declared
+nozzle *flow type* against the printer ("The nozzle flow setting does not
+match") — and it reads it from the **G-code CONFIG_BLOCK comments**
+(`; nozzle_volume_type = ...`), not from the 3MF metadata: patching
+slice_info.config alone, and even stripping the declaration entirely, was
+still refused. The original slice emitted a **1-element vector**
+(`; nozzle_volume_type = Standard`) for the two-extruder H2D, leaving the
+right nozzle's flow type unresolvable, so Connect refused even though the
+value matched the hardware (both of David's H2D hotends report 0.4 hardened
+steel **Standard** flow; High Flow hotends are an optional upgrade). All nine
+files were normalized in place with `tools/patch_nozzle_flow.py` to
+`Standard,Standard`: 3MF metadata + the CONFIG_BLOCK comment line + recomputed
+`.gcode.md5`. The diff against the originals is exactly that comment line plus
+metadata — no motion commands changed. `slice_tpu_suite.py` now pins
+`nozzle_volume_type = ["Standard", "Standard"]` so future re-slices declare it
+correctly from the start.
 
 Per-tube deposition predictions (at the profile's 1.24 g/cm³ — rescale to your spool;
 weigh the PlateA tubes individually after cutting them apart):
