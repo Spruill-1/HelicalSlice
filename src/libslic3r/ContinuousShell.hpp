@@ -12,13 +12,17 @@
 
 namespace Slic3r {
 
-// Printable-width bounds for the adaptive bead width (C-lite). Zero fields derive
-// Arachne-consistent defaults from the flow's nozzle diameter (85% / 25%). The caller
-// (LayerRegion) fills these from the object-scope min_bead_width / min_feature_size
-// percent options so continuous shell honours the same limits as the Arachne generator.
+// Printable-width bounds for the adaptive bead width (C-lite) and the per-angle bead
+// plan (C-full). Zero fields derive Arachne-consistent defaults from the flow's nozzle
+// diameter (85% / 25% / 100% / 25%). The caller (LayerRegion) fills these from the
+// object-scope min_bead_width / min_feature_size / wall_transition_* percent options so
+// continuous shell honours the same limits as the Arachne generator.
 struct ContinuousShellWidthLimits {
     double min_bead_width_mm   = 0.;   // narrowest printable bead
     double min_feature_size_mm = 0.;   // walls thinner than this are declined outright
+    // C-full (continuous_shell_adaptive_beading) additions:
+    double wall_transition_length_mm           = 0.;  // arc length of a ring-count transition ramp
+    double wall_transition_filter_deviation_mm = 0.;  // window keep/drop hysteresis
 };
 
 class ContinuousShellPathBuilder

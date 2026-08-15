@@ -218,6 +218,10 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
                 cs_width_limits.min_bead_width_mm = opt.value * 0.01 * min_nozzle;
             if (const auto &opt = object_config.min_feature_size)
                 cs_width_limits.min_feature_size_mm = opt.value * 0.01 * min_nozzle;
+            if (const auto &opt = object_config.wall_transition_length)
+                cs_width_limits.wall_transition_length_mm = opt.value * 0.01 * min_nozzle;
+            if (const auto &opt = object_config.wall_transition_filter_deviation)
+                cs_width_limits.wall_transition_filter_deviation_mm = opt.value * 0.01 * min_nozzle;
         }
         if (ContinuousShellPathBuilder::build_cross_section(
                 slices.surfaces, this->flow(frExternalPerimeter), this->layer()->height, &region_config,

@@ -1040,6 +1040,7 @@ static std::vector<std::string> s_Preset_print_options{
     "continuous_shell_connector_spread",
     "continuous_shell_seam_coast",
     "continuous_shell_scarf_length",
+    "continuous_shell_adaptive_beading",
     "continuous_shell_infill_density",
     "continuous_shell_infill_weave",
     "continuous_shell_infill_weave_shift",

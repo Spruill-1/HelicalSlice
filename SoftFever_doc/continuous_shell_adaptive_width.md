@@ -1,6 +1,9 @@
 # Continuous Shell: Adaptive Bead Width — Design
 
-Status: phase 1 (C-lite + prerequisites) implemented. Sequencing agreed 2026-08-12: **C-lite → A (scarf) → C-full → B (spiral)**.
+Status: C-lite, A (scarf; print-tested NEGATIVE for TPU, default stays 0 — see
+`test_models/tpu_suite/RESULTS.md`), and C-full (`continuous_shell_adaptive_beading`,
+default OFF pending print validation) implemented. Sequencing agreed 2026-08-12:
+**C-lite → A (scarf) → C-full → B (spiral)**; B remains.
 
 ## 1. What the helical seam actually is
 
@@ -104,11 +107,41 @@ Design decisions that emerged in implementation:
 - Woven chains excluded: their inter-ring diagonals are structural struts across open space.
 - `seam_coast` is superseded but kept functional (both compose; tooltip documents).
 
-### C-full — per-angle beading
+### C-full — per-angle beading (implemented, phase 3, 2026-08-15)
 
-Thickness field t(θ) from outer/bore distance; per-angle bead plan; rings become iso-index curves
-of the plan. Needs the angular transition re-derivation (§3) and inherits the star-shape gate —
-non-star chains degrade to C-lite. Absorbs non-uniform walls and B's boundary wedge.
+Implemented as `continuous_shell_adaptive_beading` (region bool, default OFF pending a T4
+re-print). Scope: dense annular star single-chain sections; everything else keeps C-lite
+bit-identically (byte-identity regression-tested). Thickness field t(θ) from 720-bin radial
+profiles with **nearest-distance** thickness (radial difference overstates 1/cos α on oblique
+walls); rings are iso-index curves placed by radial FRACTION (exact perpendicular depth on
+straight walls; single-valued r(θ) ⇒ self-intersection-free on star sections). Per-point widths
+are a function of θ evaluated at emission (`ChainBeadPlan::width_at`), so resampling can never
+desynchronize a width array. Strategy stack per §3's recipe (`build_chain_plan`), with the
+following decisions made in implementation — they refine the printed-T4/T5 brief:
+
+- **Count law** (`squeeze_biased_count`): never stretch an inner bead past **+10%** of nominal
+  spacing (T4 voided at +29%; the flip is NOT at the equidistant thickness), clamped to
+  [optimal, optimal+1] — single-step transitions by construction. The appearing bead is
+  TRANSITIONAL while narrow: its floor is w_term = max(0.30 mm, 0.6·min_bead_width) — the T5
+  die-swell floor — not the structural `min_bead_width` (else the law could not flip before
+  the stretch reached the void regime).
+- **Uniform interior distribution**: the factory gets an unbounded distribution radius — the
+  two surface beads stay pinned at nominal (Redistribute) and ALL interior beads share the
+  squeeze uniformly, the consolidation pattern of T4's squeezed band. `wall_distribution_count`
+  is deliberately not consumed.
+- **`SkeletalTrapezoidation::interpolate` is NOT reused** (its index-wise pairing would ramp the
+  bore bead and un-pin the bore surface, and it drops the appearing bead at equal thickness) —
+  `blend_ring_beadings` pairs front/back with the unpaired middle slot as the appearing bead.
+- **Width-birth transitions — no open arcs.** The plan's medial bead never terminates: through a
+  thin sector (eccentric wall) or below full blend (taper flip band, 0.25 spacings of thickness
+  ≈ 20+ layers of height) it thins to w_term as a FULL ring and its neighbours squeeze to absorb
+  the difference (exact conservation). Open coverage arcs were implemented and rejected: a young
+  arc's far tip always costs either a bore-crossing chord or a displaced layer join (measured
+  9 mm), and the printed T5 verdict says bead terminations gap — so the topology changes only at
+  the single flip layer, as a one-floor-width step. This supersedes the brief's "stagger the
+  flip plane": there is no flip plane left to stagger.
+
+B's boundary wedge remains the next consumer of the plan machinery.
 
 ### B — true interior spiral
 

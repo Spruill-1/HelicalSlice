@@ -1,11 +1,13 @@
 #include "ContinuousShell.hpp"
 
+#include "Arachne/BeadingStrategy/BeadingStrategyFactory.hpp"
 #include "ClipperUtils.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <vector>
 
 namespace Slic3r {
@@ -142,6 +144,480 @@ bool star_shaped_about(const Polygon &poly, const Vec2d &centre)
     return false;                           // centre outside the ring, or a multi-fold
 }
 
+// Per-angle mean-radius profile of a ring about a centre: NB angular bins, empty bins
+// forward-filled over a doubled sweep. One shared implementation for every angular
+// parametrization. The woven-infill shell clamps and the solid-cap stagger use
+// sample_nearest (the historical nearest-bin lookup - their output must not change);
+// the per-angle bead plan (C-full) uses sample_linear, which interpolates between bin
+// centres so ring geometry stays C0 across bin boundaries.
+struct AngularProfile {
+    std::vector<double> r;
+
+    static AngularProfile build(const Polygon &ring, const Vec2d &centre, int NB = 360)
+    {
+        AngularProfile ap;
+        ap.r.assign(NB, 0.0);
+        std::vector<int> cnt(NB, 0);
+        for (const Point &q : ring.points) {
+            const Vec2d d = q.cast<double>() - centre;
+            int b = int((std::atan2(d.y(), d.x()) + M_PI) / (2.0 * M_PI) * NB);
+            b = ((b % NB) + NB) % NB;
+            ap.r[b] += d.norm();
+            ++cnt[b];
+        }
+        for (int b = 0; b < NB; ++b)
+            if (cnt[b]) ap.r[b] /= cnt[b];
+        double last = 0.0;                        // fill empty bins from the last seen
+        for (int b = 0; b < 2 * NB; ++b) {
+            const int i = b % NB;
+            if (ap.r[i] > 0.0) last = ap.r[i]; else if (last > 0.0) ap.r[i] = last;
+        }
+        return ap;
+    }
+
+    double sample_nearest(double th) const
+    {
+        const int NB = int(r.size());
+        int b = int((th + M_PI) / (2.0 * M_PI) * NB);
+        b = ((b % NB) + NB) % NB;
+        return r[b];
+    }
+
+    double sample_linear(double th) const
+    {
+        const int NB = int(r.size());
+        const double u  = (th + M_PI) / (2.0 * M_PI) * NB - 0.5;   // bin-centre coordinates
+        const double fl = std::floor(u);
+        const double frac = u - fl;
+        int b0 = int(fl);
+        b0 = ((b0 % NB) + NB) % NB;
+        const int b1 = (b0 + 1) % NB;
+        return r[b0] * (1.0 - frac) + r[b1] * frac;
+    }
+};
+
+// ---- Per-angle bead plan (adaptive beading, C-full) ---------------------------------------------
+// For an annular star-shaped chain the ring count and per-ring widths are PLANNED from the
+// measured wall thickness per angle, via Arachne's pure/stateless BeadingStrategy stack,
+// instead of emerging from fixed-spacing band marching. Rings become iso-index curves of
+// the plan; per-point widths are evaluated as a function of angle at emission time.
+
+// Count law (squeeze bias). The printed T4 taper showed the failure regimes are asymmetric:
+// SQUEEZED beads (narrower than nominal) consolidate with only pinprick corner voids, while
+// STRETCHED beads develop a periodic void line along the medial. So the ring count is not
+// chosen at the equidistant thickness: an inner bead may never stretch past (1+eps) of the
+// nominal spacing - the count flips up early and the wall spends the transition band
+// squeezed. eps = 0.10 caps stretch at 10% (the T4 void regime began at ~29%) while a wall
+// just past an integer tiling (t = 4.05 spacings) still takes a 1% stretch instead of a
+// gratuitous 19% squeeze. Stateless (pure in t): no hysteresis, deterministic flip layers.
+// The two outermost beads are pinned at nominal by RedistributeBeadingStrategy, so the law
+// applies to the INNER region; counts <= 2 delegate to the stack (thin-wall semantics).
+// The added bead is TRANSITIONAL while narrow (it is being born; the structural
+// min_bead_width does not bind it, same philosophy as the scarf floor), so it is only
+// rejected below the termination floor w_floor_sp - otherwise the count law would be
+// unable to flip before the stretch reached the void regime it exists to prevent.
+coord_t squeeze_biased_count(coord_t t_sp, const Arachne::BeadingStrategy &strategy,
+                             coord_t w_opt_sp, coord_t w_floor_sp)
+{
+    const coord_t opt = strategy.getOptimalBeadCount(t_sp);
+    if (opt <= 2)
+        return opt;
+    constexpr double eps = 0.10;                 // max inner-bead stretch before adding a ring
+    const coord_t inner = t_sp - 2 * w_opt_sp;
+    coord_t n = 2 + coord_t(std::ceil(double(inner) / ((1.0 + eps) * double(w_opt_sp))));
+    n = std::clamp(n, opt, opt + 1);
+    while (n > opt) {
+        const Arachne::BeadingStrategy::Beading b = strategy.compute(t_sp, n);
+        coord_t narrowest = std::numeric_limits<coord_t>::max();
+        for (const coord_t w : b.bead_widths)
+            if (w > 0)
+                narrowest = std::min(narrowest, w);
+        if (b.bead_widths.size() == size_t(n) && narrowest >= w_floor_sp)
+            break;
+        --n;                                     // the extra ring would be unprintable even as a tip
+    }
+    return n;
+}
+
+// Blend two beadings of the SAME thickness across a ring-count step k-1 -> k, with
+// front/back index pairing: outer slots pair from index 0, bore slots pair from the
+// back, and the unpaired middle slot of the k-bead branch is the appearing bead, its
+// width scaled by the blend factor rho (0 = k-1 side, 1 = k side). This is what
+// SkeletalTrapezoidation::interpolate CANNOT do for a ring topology: its index-wise
+// pairing would ramp the BORE bead instead of the medial one (un-pinning the bore
+// surface) and it drops the appearing bead entirely at equal thickness. Both inputs
+// sum to the same thickness, so any convex blend conserves the covered width exactly
+// (minus the sub-floor sliver at the appearing bead's tips).
+Arachne::BeadingStrategy::Beading blend_ring_beadings(const Arachne::BeadingStrategy::Beading &lo,
+                                                      const Arachne::BeadingStrategy::Beading &hi,
+                                                      double rho, size_t mid)
+{
+    Arachne::BeadingStrategy::Beading out = hi;
+    const size_t k = hi.bead_widths.size();
+    for (size_t i = 0; i < k; ++i) {
+        if (i == mid) {
+            out.bead_widths[i] = coord_t(std::llround(rho * double(hi.bead_widths[i])));
+            continue;                              // location stays at the k-branch value
+        }
+        const size_t j = i < mid ? i : i - 1;      // paired slot in the k-1 branch
+        out.bead_widths[i] = coord_t(std::llround((1.0 - rho) * double(lo.bead_widths[j]) + rho * double(hi.bead_widths[i])));
+        out.toolpath_locations[i] = coord_t(std::llround((1.0 - rho) * double(lo.toolpath_locations[j]) + rho * double(hi.toolpath_locations[i])));
+    }
+    return out;
+}
+
+// The per-chain plan: angular radius profiles of the region's two boundaries plus, per
+// angular bin and radial slot, the planned extrusion width (mm, 0.05-bucketed; 0 = the
+// slot is absent at that angle) and the radial placement fraction of the local extent.
+// Slot 0 is the outer surface, slot n_slots-1 the bore surface. Queries interpolate
+// between bin centres so ring geometry and widths are C0 around the circumference.
+struct ChainBeadPlan {
+    Vec2d centre{0., 0.};
+    int   NB = 720;
+    AngularProfile r_out, r_bore;                 // radial profiles, scaled units
+    double edge_margin = 0.;                      // (scaled_width - scaled_spacing)/2
+    size_t n_slots = 0;
+    std::vector<std::vector<float>>  slot_width;  // [NB][n_slots], extrusion mm
+    std::vector<std::vector<double>> slot_frac;   // [NB][n_slots], fraction of radial extent
+
+    // Bin-centre linear interpolation with wraparound; shared by the queries below.
+    template<typename Table, typename Get>
+    double interp(const Table &tab, size_t slot, double th, Get get) const
+    {
+        const double u  = (th + M_PI) / (2.0 * M_PI) * NB - 0.5;
+        const double fl = std::floor(u);
+        const double f  = u - fl;
+        int b0 = int(fl);
+        b0 = ((b0 % NB) + NB) % NB;
+        const int b1 = (b0 + 1) % NB;
+        return get(tab[b0][slot]) * (1.0 - f) + get(tab[b1][slot]) * f;
+    }
+    float width_at(size_t slot, double th) const
+    {
+        const double w = interp(slot_width, slot, th, [](float v) { return double(v); });
+        return std::round(float(w) / 0.05f) * 0.05f;          // Arachne's width buckets
+    }
+    double frac_at(size_t slot, double th) const
+    {
+        return interp(slot_frac, slot, th, [](double v) { return v; });
+    }
+};
+
+// Build the plan for one annular chain, or decline (nullptr + decline_note) when the
+// section is out of the plan's scope so the caller keeps the fixed-width C-lite rings.
+// In-scope inconsistencies set *hard_fail instead: the layer must fail loudly rather
+// than silently print a wall the plan itself says is wrong.
+std::unique_ptr<ChainBeadPlan> build_chain_plan(const ExPolygon &region, const Flow &flow,
+                                                const ContinuousShellWidthLimits &limits,
+                                                size_t n_bands, double layer_height,
+                                                std::string *decline_note, std::string *hard_fail)
+{
+    const coord_t w_sp  = flow.scaled_spacing();
+    const coord_t w_ext = flow.scaled_width();
+    const double  min_bead_mm    = limits.min_bead_width_mm   > 0. ? limits.min_bead_width_mm   : 0.85 * flow.nozzle_diameter();
+    const double  min_feature_mm = limits.min_feature_size_mm > 0. ? limits.min_feature_size_mm : 0.25 * flow.nozzle_diameter();
+    const double  trans_len_mm   = limits.wall_transition_length_mm > 0. ? limits.wall_transition_length_mm : 1.0 * flow.nozzle_diameter();
+    (void) layer_height;
+
+    auto plan = std::make_unique<ChainBeadPlan>();
+    const int NB = plan->NB;
+
+    // Plan centre = centroid of the region's outer contour; every angular parametrization
+    // below requires both boundaries star-shaped about it (same gate as the weave).
+    Vec2d centre(0., 0.);
+    if (region.contour.points.empty() || region.holes.size() != 1)
+        { if (decline_note) *decline_note = "not a simple annulus"; return nullptr; }
+    for (const Point &p : region.contour.points)
+        centre += p.cast<double>();
+    centre /= double(region.contour.points.size());
+    if (!star_shaped_about(region.contour, centre) || !star_shaped_about(region.holes.front(), centre))
+        { if (decline_note) *decline_note = "section is not star-shaped"; return nullptr; }
+    plan->centre = centre;
+
+    // Radial profiles from densified copies of the boundaries (4 points per bin, so a
+    // valid star section can never leave a bin empty).
+    auto densify = [&](const Polygon &poly) -> Polygon {
+        std::vector<Point> pts = resample_closed(poly, size_t(4 * NB));
+        return pts.empty() ? poly : Polygon(Points(pts.begin(), pts.end()));
+    };
+    const Polygon outer_d = densify(region.contour);
+    const Polygon bore_d  = densify(region.holes.front());
+    plan->r_out  = AngularProfile::build(outer_d, centre, NB);
+    plan->r_bore = AngularProfile::build(bore_d, centre, NB);
+    for (int b = 0; b < NB; ++b)
+        if (!(plan->r_out.r[b] > 0.) || !(plan->r_bore.r[b] > 0.) || plan->r_out.r[b] <= plan->r_bore.r[b])
+            { if (decline_note) *decline_note = "degenerate radial profile"; return nullptr; }
+
+    // Wall thickness per bin, in the strategy's spacing domain. The thickness is the
+    // Euclidean nearest distance from the outer-boundary point to the bore boundary - a
+    // pure radial difference overstates it by 1/cos(alpha) where a ray meets the wall
+    // obliquely (+41% on a square annulus diagonal) and would plan phantom beads. Minus
+    // both half edge margins: beads are placed with the outer bead's centre a half
+    // EXTRUSION width inside each surface, but widths add up in the spacing domain.
+    plan->edge_margin = 0.5 * double(w_ext - w_sp);
+    std::vector<double> t_sp(NB, 0.);
+    for (int b = 0; b < NB; ++b) {
+        const double th = -M_PI + (double(b) + 0.5) * (2.0 * M_PI / NB);
+        const Vec2d  p  = centre + plan->r_out.r[b] * Vec2d(std::cos(th), std::sin(th));
+        double d2 = std::numeric_limits<double>::max();
+        for (const Point &q : bore_d.points)
+            d2 = std::min(d2, (q.cast<double>() - p).squaredNorm());
+        t_sp[b] = std::sqrt(d2) - 2.0 * plan->edge_margin;
+        if (t_sp[b] < scale_(min_feature_mm))
+            { if (decline_note) *decline_note = "wall below minimum feature size"; return nullptr; }
+    }
+
+    // The standalone strategy stack, mirroring WallToolPaths' construction: spacings as
+    // the preferred widths, split/add thresholds derived from the EXTRUSION width, a cap
+    // far above any real count (so LimitedBeadingStrategy's zero-width marker beads never
+    // appear). The interior distribution radius is effectively unbounded: the two surface
+    // beads stay pinned at nominal (RedistributeBeadingStrategy) and ALL interior beads
+    // share the squeeze uniformly - the consolidation pattern the printed T4 sections
+    // showed - instead of dumping it onto the medial bead alone.
+    const double split_thr = std::clamp(2. * min_bead_mm / double(flow.width()) - 1., 0.01, 0.99);
+    const double add_thr   = std::clamp(min_bead_mm / double(flow.width()), 0.01, 0.99);
+    coord_t max_beads = coord_t(2 * n_bands) + 6;
+    if (max_beads & 1)
+        ++max_beads;
+    const Arachne::BeadingStrategyPtr strategy = Arachne::BeadingStrategyFactory::makeStrategy(
+        w_sp, w_sp,
+        coord_t(std::llround(scale_(trans_len_mm))),
+        float(M_PI / 4.0) /* inert inside the strategies */,
+        /*print_thin_walls=*/true,
+        coord_t(std::llround(scale_(min_bead_mm))),
+        coord_t(std::llround(scale_(min_feature_mm))),
+        split_thr, add_thr, max_beads,
+        /*outer_wall_offset=*/0,
+        /*inward_distributed_center_wall_count=*/9999);
+
+    // Termination floor for transitional (appearing/retiring) beads, and its spacing-
+    // domain equivalent for the count law. Below ~1.2x layer height a TPU bead
+    // die-swells and gaps (the printed T5 scarf verdict), so no tip may dip under it.
+    const float   w_term      = std::max(0.30f, 0.6f * float(min_bead_mm));
+    const coord_t w_floor_sp  = std::max<coord_t>(1, coord_t(std::llround(scale_(double(w_term)))) - (w_ext - w_sp));
+
+    // Per-bin bead count.
+    std::vector<coord_t> n_bin(NB, 0);
+    coord_t n_min = std::numeric_limits<coord_t>::max(), n_max = 0;
+    for (int b = 0; b < NB; ++b) {
+        n_bin[b] = squeeze_biased_count(coord_t(std::llround(t_sp[b])), *strategy, w_sp, w_floor_sp);
+        n_min = std::min(n_min, n_bin[b]);
+        n_max = std::max(n_max, n_bin[b]);
+    }
+    if (n_min < 1)
+        { if (decline_note) *decline_note = "wall too thin for a planned bead"; return nullptr; }
+    if (n_max - n_min > 1)
+        { if (decline_note) *decline_note = "wall thickness crosses more than one bead-count threshold"; return nullptr; }
+
+    // Blend factor per bin. Where the count is uniform this is constant 1 and the medial
+    // slot is a full ring. Where t(theta) crosses a count threshold, the bins at the
+    // higher count form angular windows; each window edge gets a transition ramp of the
+    // configured arc length, anchored mostly on the squeezed (higher-count) side per the
+    // strategy's own anchor formula, and the blend inside a ramp is a smoothstep of arc
+    // position. The appearing (medial) bead is emitted only where its blended width
+    // clears the termination floor - below ~1.2x layer height a TPU bead die-swells and
+    // gaps (the printed T5 verdict), so a transitional tip must not dip that low.
+    // Two mechanisms lower the blend below 1 (a mid-blend medial bead, floored below):
+    //  * ANGULAR: t(theta) crosses a count threshold (an eccentric wall) - the bins at
+    //    the higher count form windows with ramped edges where the geometry demands the
+    //    extra bead; through the thin sector the medial thins toward the floor and its
+    //    neighbours squeeze to compensate.
+    //  * VERTICAL: t is uniform but sits just past a flip (a tapering wall) - the whole
+    //    circle blends at the coverage fraction c of the flip band (0.25 spacings of
+    //    thickness), so the newborn ring is BORN as a full thin ring at the termination
+    //    floor and WIDENS to plan width across the band's many layers, instead of two
+    //    band-derived rings appearing inside one layer. No bead ever terminates mid-air
+    //    (the printed T5 verdict: tips gap) and no chord ever crosses the bore - the
+    //    count changes topology only at the single flip layer, as a one-floor-width step.
+    //    Stateless: c is a pure function of THIS layer's thickness.
+    coord_t k = n_max;                              // slot count of the plan
+    std::vector<double> rho(NB, 1.0);
+    std::vector<char> hi;
+    if (n_min != n_max) {
+        hi.assign(NB, 0);
+        for (int b = 0; b < NB; ++b)
+            hi[b] = char(n_bin[b] == k);
+    } else if (k > 2) {
+        // Find the flip threshold just below the (uniform) thickness by bisecting the
+        // count law itself - robust to every clamp and floor inside it. Sitting more
+        // than one flip band above it means the medial is a settled full ring.
+        double t_mean = 0.;
+        for (int b = 0; b < NB; ++b)
+            t_mean += t_sp[b];
+        t_mean /= double(NB);
+        const double dt_band = 0.25 * double(w_sp);
+        const double below   = t_mean - dt_band;
+        if (below > 0 && squeeze_biased_count(coord_t(std::llround(below)), *strategy, w_sp, w_floor_sp) < k) {
+            double a = below, b2 = t_mean;          // the flip threshold sits in (a, b2]
+            for (int it = 0; it < 24; ++it) {
+                const double m = 0.5 * (a + b2);
+                if (squeeze_biased_count(coord_t(std::llround(m)), *strategy, w_sp, w_floor_sp) < k)
+                    a = m;
+                else
+                    b2 = m;
+            }
+            const double c = std::clamp((t_mean - b2) / dt_band, 0.0, 1.0);
+            if (c < 1.0)
+                std::fill(rho.begin(), rho.end(), c);
+        }
+    }
+    if (!hi.empty()) {
+        // Mean radius of the wall midline, for arc <-> angle conversion.
+        double r_mid = 0.;
+        for (int b = 0; b < NB; ++b)
+            r_mid += 0.5 * (plan->r_out.r[b] + plan->r_bore.r[b]);
+        r_mid /= double(NB);
+        const double bin_rad   = 2.0 * M_PI / NB;
+        const double L_rad     = std::min(M_PI / 2, scale_(trans_len_mm) / r_mid);
+        const double F_rad     = std::min(M_PI / 4, scale_(std::max(0., limits.wall_transition_filter_deviation_mm)) / r_mid);
+        const int    L_bins    = std::max(1, int(std::llround(L_rad / bin_rad)));
+        const int    F_bins    = int(std::llround(F_rad / bin_rad));
+        // Window hygiene on the cyclic high-count set: close gaps shorter than a ramp,
+        // then drop islands shorter than two ramps plus the filter deviation. Runs are
+        // found by linear scan with wraparound handling.
+        auto morph = [&](char target, int min_len) {
+            std::vector<char> next = hi;
+            int b = 0;
+            while (b < NB) {
+                if (hi[b] != target) { ++b; continue; }
+                int len = 1;
+                while (len < NB && hi[(b + len) % NB] == target)
+                    ++len;
+                if (len >= NB)
+                    break;                                   // uniform: nothing to do
+                if (b == 0 && hi[NB - 1] == target) { ++b; continue; }  // handled from its true start
+                if (len < min_len)
+                    for (int i = 0; i < len; ++i)
+                        next[(b + i) % NB] = char(1 - target);
+                b += len;
+            }
+            hi = std::move(next);
+        };
+        morph(0, L_bins);                                    // merge windows across short gaps
+        morph(1, 2 * L_bins + F_bins);                       // drop windows too short for a bead
+        int hi_count = 0;
+        for (int b = 0; b < NB; ++b)
+            hi_count += hi[b];
+        if (hi_count == 0) {
+            k = n_max - 1;                                   // the higher count filtered away: uniform k-1
+        } else if (hi_count < NB) {
+            // Anchor: fraction of the ramp placed on the lower-count side. With the
+            // squeeze-biased law the flip sits near the lower optimal thickness, so the
+            // anchor lands close to 1 and the ramp lives on the squeezed side.
+            const double lower_opt = double(strategy->getOptimalThickness(k - 1));
+            const double upper_opt = double(strategy->getOptimalThickness(k));
+            double t_flip = 0.;                              // mean t at the window edges
+            int    n_edges = 0;
+            for (int b = 0; b < NB; ++b)
+                if (hi[b] != hi[(b + 1) % NB])
+                    { t_flip += t_sp[b]; ++n_edges; }
+            if (n_edges > 0) t_flip /= n_edges;
+            const double anchor = std::clamp(1.0 - (t_flip - lower_opt) / std::max(1.0, upper_opt - lower_opt), 0.0, 1.0);
+            // rho from the signed bin distance to the nearest window edge: ramps rise
+            // across [edge - anchor*L, edge + (1-anchor)*L] into the window.
+            std::vector<int> dist(NB, NB);                   // +into-window bins, -outside
+            for (int b = 0; b < NB; ++b) {
+                if (!hi[b]) continue;
+                int din = NB;
+                for (int d = 0; d <= NB / 2; ++d)
+                    if (!hi[((b + d) % NB)] || !hi[((b - d % NB) + NB) % NB]) { din = d; break; }
+                dist[b] = din;
+            }
+            for (int b = 0; b < NB; ++b) {
+                if (hi[b]) continue;
+                int dout = NB;
+                for (int d = 0; d <= NB / 2; ++d)
+                    if (hi[((b + d) % NB)] || hi[((b - d % NB) + NB) % NB]) { dout = d; break; }
+                dist[b] = -dout;
+            }
+            for (int b = 0; b < NB; ++b) {
+                const double x = (double(dist[b]) + anchor * double(L_bins)) / double(L_bins);
+                const double u = std::clamp(x, 0.0, 1.0);
+                rho[b] = u * u * (3.0 - 2.0 * u);            // smoothstep
+            }
+        }
+        // else: hygiene filled the whole circle -> uniform k, rho stays 1.
+    }
+
+    // Fill the per-bin slot tables and check the plan's own invariants. These are hard
+    // failures: the stack guarantees sum(widths) + left_over == t, so a violation here
+    // means the plan and the geometry disagree and the layer must not print.
+    // The transitional (mid) bead is FLOORED at the termination width - it prints as a
+    // full thin ring rather than terminating (tips gap; the printed T5 verdict) - and
+    // the floor deficit is taken back from the interior beads so the covered thickness
+    // is conserved exactly and everything stays in the squeeze regime.
+    plan->n_slots = size_t(k);
+    const size_t mid = size_t(k / 2);                        // the appearing/retiring slot
+    plan->slot_width.assign(NB, std::vector<float>(plan->n_slots, 0.f));
+    plan->slot_frac.assign(NB, std::vector<double>(plan->n_slots, 0.));
+    const double overlap_delta_mm = double(w_ext - w_sp) * SCALING_FACTOR;
+    for (int b = 0; b < NB; ++b) {
+        const coord_t t_b = coord_t(std::llround(t_sp[b]));
+        Arachne::BeadingStrategy::Beading bd = strategy->compute(t_b, k);
+        if (bd.bead_widths.size() != plan->n_slots || bd.toolpath_locations.size() != plan->n_slots)
+            { if (hard_fail) *hard_fail = "Continuous shell adaptive beading: bead count mismatch in the plan."; return nullptr; }
+        if (rho[b] < 1.0)
+            bd = blend_ring_beadings(strategy->compute(t_b, k - 1), bd, rho[b], mid);
+        if (std::abs(double(bd.left_over)) > 0.01 * t_sp[b])
+            { if (hard_fail) *hard_fail = "Continuous shell adaptive beading: plan left uncovered wall thickness."; return nullptr; }
+        if (k > 2 && bd.bead_widths[mid] < w_floor_sp) {
+            const coord_t deficit = w_floor_sp - bd.bead_widths[mid];
+            bd.bead_widths[mid] = w_floor_sp;
+            // Take the deficit back from the interior beads (the pinned surface beads
+            // only when there is no interior, i.e. k == 3).
+            std::vector<size_t> recipients;
+            for (size_t i = 1; i + 1 < plan->n_slots; ++i)
+                if (i != mid)
+                    recipients.push_back(i);
+            if (recipients.empty())
+                for (size_t i = 0; i < plan->n_slots; ++i)
+                    if (i != mid)
+                        recipients.push_back(i);
+            const coord_t share = deficit / coord_t(recipients.size());
+            for (const size_t i : recipients)
+                bd.bead_widths[i] -= share;
+        }
+        const double t_geom = t_sp[b] + 2.0 * plan->edge_margin;
+        coord_t prev_loc = std::numeric_limits<coord_t>::min();
+        for (size_t i = 0; i < plan->n_slots; ++i) {
+            const coord_t w = bd.bead_widths[i];
+            const coord_t loc = bd.toolpath_locations[i];
+            if (w < w_floor_sp / 2 || loc <= prev_loc
+                || (prev_loc != std::numeric_limits<coord_t>::min() && loc - prev_loc < w_sp / 4))
+                { if (hard_fail) *hard_fail = "Continuous shell adaptive beading: implausible bead placement in the plan."; return nullptr; }
+            prev_loc = loc;
+            const float w_mm = float(double(w) * SCALING_FACTOR + overlap_delta_mm);
+            plan->slot_width[b][i] = std::round(w_mm / 0.05f) * 0.05f;
+            plan->slot_frac[b][i]  = (plan->edge_margin + double(loc)) / t_geom;
+        }
+    }
+    return plan;
+}
+
+// Generate the plan's rings: iso-index curves sampled at the bin centres. The radial
+// position interpolates between the boundary profiles by the slot's planned fraction,
+// which projects to the exact planned perpendicular depth on straight wall segments.
+// spiralize_rings resamples every ring to its final toolpath density afterwards.
+Polygons plan_rings(const ChainBeadPlan &plan)
+{
+    Polygons rings;
+    rings.reserve(plan.n_slots);
+    for (size_t slot = 0; slot < plan.n_slots; ++slot) {
+        Polygon ring;
+        ring.points.reserve(plan.NB);
+        for (int b = 0; b < plan.NB; ++b) {
+            const double th = -M_PI + (double(b) + 0.5) * (2.0 * M_PI / plan.NB);
+            const double ro = plan.r_out.r[b];
+            const double rb = plan.r_bore.r[b];
+            const double r  = ro - plan.slot_frac[b][slot] * (ro - rb);
+            ring.points.emplace_back(coord_t(std::llround(plan.centre.x() + r * std::cos(th))),
+                                     coord_t(std::llround(plan.centre.y() + r * std::sin(th))));
+        }
+        rings.push_back(std::move(ring));
+    }
+    return rings;
+}
+
 // Deterministic per-layer pseudo-random value in [-1, +1]. Deterministic so
 // re-slicing the same model yields identical G-code.
 double seam_jitter_unit(size_t layer_index)
@@ -197,7 +673,8 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
                          const ExPolygon *region = nullptr,
                          const std::vector<float> *ring_widths = nullptr, std::vector<float> *pt_width = nullptr,
                          float nominal_width = 0.f,
-                         coord_t scarf_len = 0, float scarf_floor = 0.f)
+                         coord_t scarf_len = 0, float scarf_floor = 0.f,
+                         const ChainBeadPlan *plan = nullptr)
 {
     Polyline spiral;
     if (rings_in.empty())
@@ -361,6 +838,16 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
         return (ring_widths != nullptr && idx < ring_widths->size()) ? (*ring_widths)[idx] : nominal_width;
     };
     auto pw = [&](float w) { if (pt_width) pt_width->push_back(w); };
+    // Per-POINT width: an adaptive bead plan supplies width as a function of the point's
+    // angle (so ring resampling can never desynchronize a width array); chains without a
+    // plan keep the per-ring width.
+    auto point_w = [&](size_t idx, const Point &p) -> float {
+        if (plan != nullptr && idx < plan->n_slots) {
+            const Vec2d d = p.cast<double>() - plan->centre;
+            return plan->width_at(idx, std::atan2(d.y(), d.x()));
+        }
+        return width_of(idx);
+    };
 
     // Brick interlock: nudge buried wall rings up/down in Z so radially-adjacent beads
     // stop sharing a Z level (a continuous horizontal interface is the wall's weak plane).
@@ -377,8 +864,8 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
     };
 
     if (grid.size() == 1) {
-        for (size_t k = 0; k < grid[0].size(); ++k) { spiral.points.push_back(grid[0][k]); flag(false); zoff(0); pw(width_of(0)); }
-        spiral.points.push_back(grid[0][0]); flag(false); zoff(0); pw(width_of(0));
+        for (size_t k = 0; k < grid[0].size(); ++k) { spiral.points.push_back(grid[0][k]); flag(false); zoff(0); pw(point_w(0, grid[0][k])); }
+        spiral.points.push_back(grid[0][0]); flag(false); zoff(0); pw(point_w(0, grid[0][0]));
         return spiral;
     }
 
@@ -464,7 +951,7 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
                     std::rotate(c.begin(), c.begin() + bestk, c.end());
             }
         }
-        for (size_t k = 0; k < c.size(); ++k) { spiral.points.push_back(c[k]); flag(internal_ring); zoff(zo); pw(width_of(idx)); }
+        for (size_t k = 0; k < c.size(); ++k) { spiral.points.push_back(c[k]); flag(internal_ring); zoff(zo); pw(point_w(idx, c[k])); }
     }
 
     // In-plane scarf (option A). Every ring-to-ring junction is a one-spacing radial step
@@ -620,6 +1107,10 @@ struct ContourChain {
     // deficit was closed (widened innermost pair) or whose sub-bead centreline was
     // width-fitted carry explicit widths.
     std::vector<float> ring_widths;
+    // Adaptive beading (C-full): when set, `loops` are the plan's iso-index rings and
+    // per-point widths come from the plan (ring_widths stays empty); the C-lite medial
+    // deficit correction is skipped - the plan covers the full wall by construction.
+    std::shared_ptr<ChainBeadPlan> plan;
 };
 
 // Decompose a single connected cross-section into the concentric loop sets that fill
@@ -652,7 +1143,8 @@ coord_t vanish_depth(const ExPolygons &shape, coord_t hi)
 }
 
 std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &flow, size_t layer_index, const WovenInfill &woven,
-                                         const ContinuousShellWidthLimits &limits)
+                                         const ContinuousShellWidthLimits &limits,
+                                         bool adaptive = false, double layer_height = 0., std::string *fail_reason = nullptr)
 {
     const coord_t spacing = flow.scaled_spacing();
     const coord_t width   = flow.scaled_width();
@@ -736,6 +1228,26 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
                 cc.loops.push_back(it->holes.front());
                 cc.has_bore = true;
             }
+        // Adaptive beading (C-full): plan the ring count and per-ring widths per angle for
+        // a simple dense annulus and replace the band-derived rings with the plan's rings.
+        // Out-of-scope sections (split chains, sparse/woven, non-star, multi-hole) decline
+        // inside build_chain_plan and keep the C-lite rings; a plan that contradicts its
+        // own invariants aborts the layer loudly instead of printing a wall it knows is
+        // wrong. force_solid layers never get here with adaptive set (caller gates).
+        if (adaptive && cc.has_bore && !woven.enabled && chains.size() == 1 && region.holes.size() == 1) {
+            std::string note, hard;
+            std::unique_ptr<ChainBeadPlan> plan =
+                build_chain_plan(region, flow, limits, chain.size(), layer_height, &note, &hard);
+            if (!hard.empty()) {
+                if (fail_reason)
+                    *fail_reason = hard;
+                return {};
+            }
+            if (plan) {
+                cc.loops = plan_rings(*plan);
+                cc.plan  = std::move(plan);
+            }
+        }
         // Medial deficit correction (adaptive bead width, C-lite). Marching stops when one
         // more band no longer fits, leaving a residual gap between the innermost beads'
         // edges. Measure it exactly: the last band vanished somewhere in (0, spacing], so
@@ -750,7 +1262,7 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
         // pinch or split (material continues elsewhere; there is no closed deficit).
         const bool will_decimate = woven.enabled && woven.stride > 1 &&
             (cc.has_bore ? cc.loops.size() > 2 * woven.shell_loops + 1 : cc.loops.size() > woven.shell_loops + 1);
-        if (!will_decimate && ci < vanished.size() && vanished[ci] && !chain.empty()) {
+        if (!cc.plan && !will_decimate && ci < vanished.size() && vanished[ci] && !chain.empty()) {
             const coord_t d_res = vanish_depth(ExPolygons{ chain.back() }, spacing);
             const coord_t v     = 2 * d_res - width;
             if (v > width / 10) {
@@ -837,28 +1349,9 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
                     // inward one would invade the bore shell. The shell rings are un-perturbed, so
                     // clamp every infill point to the shell radius AT ITS OWN ANGLE - shape-aware, so
                     // it works for non-round cross-sections too (a mean radius would flatten corners).
-                    auto build_profile = [&](const Polygon &ring) {
-                        const int NB = 360;
-                        std::vector<double> prof(NB, 0.0); std::vector<int> cnt(NB, 0);
-                        for (const Point &q : ring.points) {
-                            const Vec2d d = q.cast<double>() - centre;
-                            int b = int((std::atan2(d.y(), d.x()) + M_PI) / (2.0 * M_PI) * NB);
-                            b = ((b % NB) + NB) % NB;
-                            prof[b] += d.norm(); ++cnt[b];
-                        }
-                        for (int b = 0; b < NB; ++b) if (cnt[b]) prof[b] /= cnt[b];
-                        double last = 0.0;                                  // fill empty bins from the last seen
-                        for (int b = 0; b < 2 * NB; ++b) { int i = b % NB; if (prof[i] > 0.0) last = prof[i]; else if (last > 0.0) prof[i] = last; }
-                        return prof;
-                    };
-                    auto sample = [](const std::vector<double> &prof, double th) {
-                        const int NB = int(prof.size());
-                        int b = int((th + M_PI) / (2.0 * M_PI) * NB); b = ((b % NB) + NB) % NB;
-                        return prof[b];
-                    };
-                    const std::vector<double> outer_prof = build_profile(cc.loops[sl - 1]);                        // innermost outer-shell ring
-                    const std::vector<double> inner_prof = annular ? build_profile(cc.loops[cc.loops.size() - sl]) // outermost bore-shell ring
-                                                                   : std::vector<double>();
+                    const AngularProfile outer_prof = AngularProfile::build(cc.loops[sl - 1], centre);              // innermost outer-shell ring
+                    const AngularProfile inner_prof = annular ? AngularProfile::build(cc.loops[cc.loops.size() - sl], centre) // outermost bore-shell ring
+                                                              : AngularProfile();
                     // Per-ring anti-phase: each successive infill ring flips by pi so neighbours interlock.
                     // The per-LAYER advance (dphase) still rotates the whole lattice so stacked layers weave.
                     const double layer_phase = double(layer_index) * woven.dphase;
@@ -873,8 +1366,8 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
                             if (r < 1.0) continue;
                             const double th = std::atan2(d.y(), d.x());
                             double rr = r + amp * std::sin(woven.lobes * th + phase);
-                            rr = std::min(rr, sample(outer_prof, th));                 // never cross the outer shell
-                            if (annular) rr = std::max(rr, sample(inner_prof, th));    // never cross the bore shell
+                            rr = std::min(rr, outer_prof.sample_nearest(th));                 // never cross the outer shell
+                            if (annular) rr = std::max(rr, inner_prof.sample_nearest(th));    // never cross the bore shell
                             rr = std::max(rr, 1.0);
                             p = Point(coord_t(std::llround(centre.x() + rr * std::cos(th))),
                                       coord_t(std::llround(centre.y() + rr * std::sin(th))));
@@ -886,18 +1379,9 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
                 // inward by solid_stagger this layer; the outer wall rings (< sl) and, for a tube, the
                 // bore shell stay put. Bounded so a ring never invades the bore. The fill stays fully
                 // solid (no decimation, no infill tag) - this only nudges interior geometry per layer.
-                const int NB = 360;
-                std::vector<double> inner_prof;
-                if (annular) {                                   // per-angle bore-shell radius (shape-aware)
-                    inner_prof.assign(NB, 0.0); std::vector<int> cnt(NB, 0);
-                    for (const Point &q : cc.loops[n - sl].points) {
-                        const Vec2d d = q.cast<double>() - centre;
-                        int b = int((std::atan2(d.y(), d.x()) + M_PI) / (2.0 * M_PI) * NB); b = ((b % NB) + NB) % NB;
-                        inner_prof[b] += d.norm(); ++cnt[b];
-                    }
-                    for (int b = 0; b < NB; ++b) if (cnt[b]) inner_prof[b] /= cnt[b];
-                    double last = 0.0; for (int b = 0; b < 2 * NB; ++b) { int i = b % NB; if (inner_prof[i] > 0.0) last = inner_prof[i]; else if (last > 0.0) inner_prof[i] = last; }
-                }
+                AngularProfile inner_prof;                       // per-angle bore-shell radius (shape-aware)
+                if (annular)
+                    inner_prof = AngularProfile::build(cc.loops[n - sl], centre);
                 for (size_t j = 0; j < n; ++j) {
                     if (!is_infill(j)) continue;                 // shift interior only; shells stay put
                     for (Point &p : cc.loops[j].points) {
@@ -906,10 +1390,8 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
                         if (r < 1.0) continue;
                         const double th = std::atan2(d.y(), d.x());
                         double rr = r - woven.solid_stagger;
-                        if (annular) {
-                            int b = int((th + M_PI) / (2.0 * M_PI) * NB); b = ((b % NB) + NB) % NB;
-                            rr = std::max(rr, inner_prof[b]);
-                        }
+                        if (annular)
+                            rr = std::max(rr, inner_prof.sample_nearest(th));
                         rr = std::max(rr, 1.0);
                         p = Point(coord_t(std::llround(centre.x() + rr * std::cos(th))),
                                   coord_t(std::llround(centre.y() + rr * std::sin(th))));
@@ -1146,10 +1628,15 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     } else {
         woven = woven_infill_params(config);
     }
-    const std::vector<ContourChain> chains = contour_spiral(merged.front(), flow, layer_index, woven, width_limits);
+    // Adaptive beading (C-full) applies only to dense (non-force-solid) sections; the
+    // solid caps keep their serpentine/stagger machinery untouched.
+    const bool adaptive = config != nullptr && config->continuous_shell_adaptive_beading.value && !force_solid;
+    std::string plan_fail;
+    const std::vector<ContourChain> chains = contour_spiral(merged.front(), flow, layer_index, woven, width_limits,
+                                                            adaptive, layer_height, &plan_fail);
     if (chains.empty()) {
         if (reason != nullptr)
-            *reason = "Continuous shell mode could not construct a contour spiral.";
+            *reason = !plan_fail.empty() ? plan_fail : "Continuous shell mode could not construct a contour spiral.";
         return false;
     }
     // Was any chain actually thinned to sparse infill this layer? Only then does the Z-wave apply
@@ -1218,7 +1705,7 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
                                        ring_spacing, layer_index, chain.has_bore, &flags, interlock_amp, &zoff,
                                        connector_spread, chain.woven_infill ? woven.shell_loops : 0,
                                        &merged.front(), &chain.ring_widths, &widths, flow.width(),
-                                       scarf_len, scarf_floor);
+                                       scarf_len, scarf_floor, chain.plan.get());
         if (sub.points.size() >= 2 && sub.points.size() == flags.size() && sub.points.size() == zoff.size()
             && sub.points.size() == widths.size())
             // A chain carries the Z-wave only when its interior was actually thinned AND its

@@ -6093,6 +6093,19 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0));
 
+    def = this->add("continuous_shell_adaptive_beading", coBool);
+    def->label = L("Continuous shell adaptive beading");
+    def->category = L("Strength");
+    def->tooltip = L("Plans the continuous-shell ring count and per-ring widths per angle from the measured wall "
+                     "thickness (Arachne-style beading) instead of marching fixed-spacing rings. Ring-count "
+                     "transitions then change one ring at a time through a gradual, precessing arc instead of an "
+                     "abrupt paired flip, surface rings hold their nominal width, and flips are biased toward "
+                     "slightly narrower (better-consolidating) beads. Applies to annular (tube-wall) sections that "
+                     "are star-shaped and densely filled; other sections keep the fixed-width rings. Uses the "
+                     "wall transition length/filter, minimum wall width, and minimal feature size options.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("continuous_shell_infill_density", coPercent);
     def->label = L("Continuous shell infill density");
     def->category = L("Strength");

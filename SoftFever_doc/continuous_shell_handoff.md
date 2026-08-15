@@ -74,7 +74,16 @@ Weight targets and per-print predictions are in `test_models/tpu_suite/README.md
 > 0, seam workstream moves to C-full/B. RESULTS.md also carries the 5-point
 > C-full design brief (ring parity double-flip, squeeze-vs-stretch voids).
 
-## Next phases (agreed order: C-lite ✓ → A ✓ → C-full → B)
+> **2026-08-15 — C-full implemented** as `continuous_shell_adaptive_beading` (region bool,
+> default OFF until a T4 re-print validates it). Per-angle bead plan for dense annular star
+> sections via the standalone Arachne stack; +10%-max-stretch squeeze-biased count law;
+> single-step ring transitions via WIDTH-BIRTH (the medial ring thins to the 0.30 mm
+> transitional floor across the flip band's ~20 layers instead of terminating — open
+> coverage arcs were built and rejected: tips gap per T5, and a young arc's far tip costs a
+> bore chord or a 9 mm layer join). All out-of-scope sections keep C-lite bit-identically
+> (regression-tested). Design details in `continuous_shell_adaptive_width.md` §4.
+
+## Next phases (agreed order: C-lite ✓ → A ✓ → C-full ✓ (unprinted) → B)
 
 - **C-full**: per-angle thickness field → per-angle bead plan via Arachne's standalone
   `BeadingStrategy` stack (pure/stateless — see design doc §3 for the exact reuse recipe

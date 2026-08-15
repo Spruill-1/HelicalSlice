@@ -1185,3 +1185,371 @@ TEST_CASE("Continuous shell declines the solid-cap stagger on a non-star (cresce
     }
     REQUIRE(max_dev == 0);
 }
+
+// ---- Adaptive beading (C-full) ------------------------------------------------------------------
+
+namespace {
+// A circular annulus centred at the origin: outer radius r_out_mm, wall t_geom_mm thick.
+ExPolygon make_annulus(double r_out_mm, double t_geom_mm, int samples = 240) {
+    Polygon outer, inner;
+    for (int i = 0; i < samples; ++i) {
+        const double a = 2.0 * M_PI * i / double(samples);
+        outer.points.emplace_back(coord_t(std::llround(scale_(r_out_mm) * std::cos(a))),
+                                  coord_t(std::llround(scale_(r_out_mm) * std::sin(a))));
+        inner.points.emplace_back(coord_t(std::llround(scale_(r_out_mm - t_geom_mm) * std::cos(a))),
+                                  coord_t(std::llround(scale_(r_out_mm - t_geom_mm) * std::sin(a))));
+    }
+    ExPolygons ann = diff_ex(Polygons{outer}, Polygons{inner});
+    REQUIRE(ann.size() == 1);
+    REQUIRE(ann.front().holes.size() == 1);
+    return ann.front();
+}
+
+// Build a cross-section and return its leaf paths (owned by `e`, so `e` must outlive use).
+std::vector<ExtrusionPath *> cs_paths(const Surfaces &surfaces, const Flow &flow, PrintRegionConfig &cfg,
+                                      ExtrusionEntityCollection &e, size_t layer_index = 3, bool force_solid = false) {
+    std::string reason;
+    const bool built = ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.25, &cfg, e, &reason,
+                                                                       false, layer_index, force_solid);
+    INFO(reason);
+    REQUIRE(built);
+    std::vector<ExtrusionPath *> paths;
+    for (ExtrusionEntity *ent : e.entities)
+        ContinuousShellPathBuilder::collect_paths(ent, paths);
+    REQUIRE_FALSE(paths.empty());
+    return paths;
+}
+
+// Radius clusters of the path points inside a narrow angular wedge about the origin -
+// the ring count seen by a ray at `azimuth`, with 0.15mm cluster tolerance.
+std::vector<double> ray_ring_radii(const std::vector<ExtrusionPath *> &paths, double azimuth) {
+    std::vector<double> radii;
+    for (const ExtrusionPath *p : paths)
+        for (const Point3 &q : p->polyline.points) {
+            const double th = std::atan2(double(q.y()), double(q.x()));
+            double d = th - azimuth;
+            d = std::atan2(std::sin(d), std::cos(d));
+            if (std::abs(d) < 0.05)
+                radii.push_back(std::hypot(double(q.x()), double(q.y())) * SCALING_FACTOR);
+        }
+    std::sort(radii.begin(), radii.end());
+    std::vector<double> clusters;
+    for (const double r : radii)
+        if (clusters.empty() || r - clusters.back() > 0.15)
+            clusters.push_back(r);
+        else
+            clusters.back() = r;                       // keep the cluster's running max
+    return clusters;
+}
+
+// Full geometric signature of a built cross-section: per point (x, y, z, width, flow).
+struct CsSig { std::vector<std::tuple<coord_t, coord_t, coord_t, float, double>> pts; };
+CsSig cs_signature(const Surfaces &surfaces, const Flow &flow, PrintRegionConfig &cfg,
+                   size_t layer_index = 3, bool force_solid = false) {
+    ExtrusionEntityCollection e;
+    CsSig sig;
+    for (const ExtrusionPath *p : cs_paths(surfaces, flow, cfg, e, layer_index, force_solid))
+        for (const Point3 &q : p->polyline.points)
+            sig.pts.emplace_back(q.x(), q.y(), q.z(), p->width, double(p->mm3_per_mm));
+    return sig;
+}
+} // namespace
+
+TEST_CASE("Adaptive beading plans a concentric annulus at nominal widths", "[ContinuousShell]") {
+    // A wall that tiles exactly (6 beads: t_geom = 6*spacing + (width - spacing)) must plan
+    // 6 rings, all at nominal width, with the surface rings pinned and volume conserved -
+    // the degenerate uniform case C-lite validated, now produced by the plan.
+    Flow flow(0.5f, 0.25f, 0.5f);
+    const double sp = flow.spacing();
+    const double t_geom = 6.0 * sp + (0.5 - sp);
+    const ExPolygon ann = make_annulus(10.0, t_geom);
+    const double model_volume = ann.area() * SCALING_FACTOR * SCALING_FACTOR * 0.25;
+
+    Surfaces surfaces{ Surface(stInternal, ann) };
+    PrintRegionConfig cfg;
+    cfg.continuous_shell_adaptive_beading.value = true;
+    ExtrusionEntityCollection e;
+    const std::vector<ExtrusionPath *> paths = cs_paths(surfaces, flow, cfg, e);
+
+    double volume = 0.;
+    for (const ExtrusionPath *p : paths) {
+        // Exact tiling: every sub-path prints at nominal width (one 0.05 bucket).
+        REQUIRE_THAT(double(p->width), Catch::Matchers::WithinAbs(0.5, 0.051));
+        REQUIRE_THAT(double(p->mm3_per_mm), Catch::Matchers::WithinRel(double(flow.with_width(p->width).mm3_per_mm()), 0.001));
+        volume += p->mm3_per_mm * p->polyline.length() * SCALING_FACTOR;
+    }
+    REQUIRE_THAT(volume, Catch::Matchers::WithinRel(model_volume, 0.05));
+    for (const double az : {0.3, 1.7, 2.9, -2.1, -0.8}) {
+        const std::vector<double> rings = ray_ring_radii(paths, az);
+        REQUIRE(rings.size() == 6);
+        REQUIRE(rings.front() > 10.0 - t_geom);        // bore stays hollow
+    }
+}
+
+TEST_CASE("Adaptive beading squeeze bias adds a ring early and never stretches past 10%", "[ContinuousShell]") {
+    // The count law from the printed T4 microscopy: squeezed beads consolidate, stretched
+    // beads void along the medial - so a wall 4.7 spacings thick plans FIVE rings (interior
+    // squeezed below nominal) instead of four stretched ones, while a wall just past an
+    // integer tiling (4.05 spacings) keeps FOUR near-nominal rings (a 1% stretch beats a
+    // gratuitous squeeze). Surface rings stay pinned at nominal width in both.
+    Flow flow(0.5f, 0.25f, 0.5f);
+    const double sp = flow.spacing();
+
+    auto measure = [&](double t_sp_units) {
+        const double t_geom = t_sp_units * sp + (0.5 - sp);
+        const ExPolygon ann = make_annulus(10.0, t_geom);
+        Surfaces surfaces{ Surface(stInternal, ann) };
+        PrintRegionConfig cfg;
+        cfg.continuous_shell_adaptive_beading.value = true;
+        ExtrusionEntityCollection e;
+        const std::vector<ExtrusionPath *> paths = cs_paths(surfaces, flow, cfg, e);
+        struct M { size_t rings; float min_w = 1e9f, max_w = 0.f; double vol = 0., model = 0.; float outer_w = 0.f, bore_w = 0.f; } m;
+        m.model = ann.area() * SCALING_FACTOR * SCALING_FACTOR * 0.25;
+        m.rings = ray_ring_radii(paths, 0.3).size();
+        const double r_outer_c = 10.0 - 0.25;              // outer surface centreline
+        const double r_bore_c  = 10.0 - t_geom + 0.25;     // bore surface centreline
+        for (const ExtrusionPath *p : paths) {
+            m.min_w = std::min(m.min_w, p->width);
+            m.max_w = std::max(m.max_w, p->width);
+            m.vol  += p->mm3_per_mm * p->polyline.length() * SCALING_FACTOR;
+            REQUIRE_THAT(double(p->mm3_per_mm), Catch::Matchers::WithinRel(double(flow.with_width(p->width).mm3_per_mm()), 0.001));
+            // Classify surface sub-paths by MEAN radius (runs share endpoints, so a
+            // surface ring's run may carry one junction point from its neighbour).
+            if (p->polyline.points.size() >= 16) {
+                double mean_r = 0.;
+                for (const Point3 &q : p->polyline.points)
+                    mean_r += std::hypot(double(q.x()), double(q.y())) * SCALING_FACTOR;
+                mean_r /= double(p->polyline.points.size());
+                if (std::abs(mean_r - r_outer_c) < 0.12) m.outer_w = std::max(m.outer_w, p->width);
+                if (std::abs(mean_r - r_bore_c)  < 0.12) m.bore_w  = std::max(m.bore_w,  p->width);
+            }
+        }
+        return m;
+    };
+
+    const auto squeezed = measure(4.7);
+    REQUIRE(squeezed.rings == 5);                       // the extra ring came in EARLY...
+    REQUIRE(squeezed.min_w < 0.5f - 0.04f);             // ...so the interior runs squeezed
+    REQUIRE(squeezed.max_w < 0.5f + 0.051f);            // and nothing stretches
+    REQUIRE_THAT(double(squeezed.outer_w), Catch::Matchers::WithinAbs(0.5, 0.051));
+    REQUIRE_THAT(double(squeezed.bore_w),  Catch::Matchers::WithinAbs(0.5, 0.051));
+    REQUIRE_THAT(squeezed.vol, Catch::Matchers::WithinRel(squeezed.model, 0.05));
+
+    const auto near_tile = measure(4.05);
+    REQUIRE(near_tile.rings == 4);                      // no gratuitous densification
+    REQUIRE(near_tile.min_w > 0.5f - 0.051f);           // everything within a bucket of nominal
+    REQUIRE(near_tile.max_w < 0.5f + 0.06f);            // the 1% stretch, bucketed
+    REQUIRE_THAT(near_tile.vol, Catch::Matchers::WithinRel(near_tile.model, 0.05));
+}
+
+TEST_CASE("Adaptive beading transitions one ring through an angular window on an eccentric wall", "[ContinuousShell]") {
+    // An eccentric bore makes t(theta) cross ONE count threshold: the thick side plans
+    // five rings, the thin side four, and the fifth (medial) ring is a partial arc whose
+    // tips carry the plan's own width ramp down to the termination floor. Coverage must
+    // stay gap-free (no missing bead line where the ring retires) and volume conserved.
+    Flow flow(0.5f, 0.25f, 0.5f);
+    const double sp = flow.spacing();
+    const double t_base = 4.4 * sp + (0.5 - sp);         // mid transition band
+    const double ecc    = 0.34 * sp;                     // +-0.34 spacings of variation
+    Polygon outer, inner;
+    for (int i = 0; i < 360; ++i) {
+        const double a = 2.0 * M_PI * i / 360.0;
+        outer.points.emplace_back(coord_t(std::llround(scale_(10.0) * std::cos(a))),
+                                  coord_t(std::llround(scale_(10.0) * std::sin(a))));
+        inner.points.emplace_back(coord_t(std::llround(scale_(ecc) + scale_(10.0 - t_base) * std::cos(a))),
+                                  coord_t(std::llround(scale_(10.0 - t_base) * std::sin(a))));
+    }
+    ExPolygons ann = diff_ex(Polygons{outer}, Polygons{inner});
+    REQUIRE(ann.size() == 1);
+    REQUIRE(ann.front().holes.size() == 1);
+    const double model_volume = ann.front().area() * SCALING_FACTOR * SCALING_FACTOR * 0.25;
+
+    Surfaces surfaces{ Surface(stInternal, ann.front()) };
+    PrintRegionConfig cfg;
+    cfg.continuous_shell_adaptive_beading.value = true;
+    ExtrusionEntityCollection e;
+    const std::vector<ExtrusionPath *> paths = cs_paths(surfaces, flow, cfg, e);
+
+    double volume = 0.;
+    float  min_w = 1e9f, max_w = 0.f;
+    for (const ExtrusionPath *p : paths) {
+        min_w = std::min(min_w, p->width);
+        max_w = std::max(max_w, p->width);
+        volume += p->mm3_per_mm * p->polyline.length() * SCALING_FACTOR;
+        REQUIRE_THAT(double(p->mm3_per_mm), Catch::Matchers::WithinRel(double(flow.with_width(p->width).mm3_per_mm()), 0.001));
+    }
+    CAPTURE(min_w, max_w, paths.size());
+    REQUIRE(min_w > 0.29f);                              // nothing below the termination floor
+    REQUIRE(min_w < 0.36f);                              // ...and the floored thin medial exists
+    REQUIRE(max_w < 0.56f);                              // no stretch past ~10%, no C-lite widened medial
+    REQUIRE_THAT(volume, Catch::Matchers::WithinRel(model_volume, 0.06));
+
+    // The medial bead never terminates (tips gap - the printed T5 verdict): through the
+    // thin sector it thins to the termination floor while its neighbours squeeze to
+    // compensate, so EVERY azimuth sees five gap-free rings and the bead count changes
+    // nowhere within the layer.
+    for (int i = 0; i < 72; ++i) {
+        const double az = -M_PI + (i + 0.5) * (2.0 * M_PI / 72.0);
+        const std::vector<double> rings = ray_ring_radii(paths, az);
+        CAPTURE(az);
+        REQUIRE(rings.size() == 5);
+        for (size_t j = 1; j < rings.size(); ++j)
+            REQUIRE(rings[j] - rings[j - 1] < 1.3 * sp); // no missing-bead gap on any ray
+    }
+}
+
+TEST_CASE("Adaptive beading retires a ring gradually across a taper via a width ramp", "[ContinuousShell]") {
+    // The printed-T4 scenario: an axisymmetric wall thinning with height. The old banding
+    // flipped 6->4 rings inside one 0.25mm layer; the plan instead retires ONE ring by
+    // thinning it across the flip band (0.25 spacings of thickness, here ~30 layers):
+    // the medial ring's width ramps down to the termination floor, holds there, and the
+    // topology changes only at the single flip layer - a one-floor-width step instead of
+    // a two-full-rings step. Counts stay uniform within every layer and consecutive
+    // layers keep short joins (no bead ever terminates mid-air, so no long chords).
+    Flow flow(0.5f, 0.25f, 0.5f);
+    const double sp = flow.spacing();
+    const int    n_layers = 100;
+    auto t_sp_of = [&](int layer) { return 4.65 - 0.0075 * layer; };   // spacings; crosses the 4->5 flip at ~4.2
+
+    PrintRegionConfig cfg;
+    cfg.continuous_shell_adaptive_beading.value = true;
+
+    std::vector<size_t> counts(n_layers, 0);
+    std::vector<float>  layer_min_w(n_layers, 1e9f);
+    Point3 prev_last(0, 0, 0);
+    bool   have_prev = false;
+    for (int layer = 0; layer < n_layers; ++layer) {
+        const double t_geom = t_sp_of(layer) * sp + (0.5 - sp);
+        const ExPolygon ann = make_annulus(10.0, t_geom);
+        Surfaces surfaces{ Surface(stInternal, ann) };
+        ExtrusionEntityCollection e;
+        const std::vector<ExtrusionPath *> paths = cs_paths(surfaces, flow, cfg, e, size_t(layer));
+        for (const ExtrusionPath *p : paths)
+            layer_min_w[layer] = std::min(layer_min_w[layer], p->width);
+
+        // Ring count is uniform around the circumference on every single layer.
+        counts[layer] = ray_ring_radii(paths, 0.3).size();
+        for (const double az : {1.7, 2.9, -2.1, -0.8}) {
+            CAPTURE(layer, az);
+            REQUIRE(ray_ring_radii(paths, az).size() == counts[layer]);
+        }
+
+        // Inter-layer join: the next layer's first point must sit near this layer's last.
+        const Point3 first = paths.front()->polyline.points.front();
+        if (have_prev) {
+            const double gap = std::hypot(double(first.x() - prev_last.x()), double(first.y() - prev_last.y())) * SCALING_FACTOR;
+            REQUIRE(gap < 3.0);
+        }
+        prev_last = paths.back()->polyline.points.back();
+        have_prev = true;
+    }
+
+    // Exactly one count change over the whole taper, and it is single-step 5 -> 4.
+    REQUIRE(counts.front() == 5);
+    REQUIRE(counts.back() == 4);
+    int flip_layer = -1;
+    for (int layer = 0; layer + 1 < n_layers; ++layer)
+        if (counts[layer + 1] != counts[layer]) {
+            REQUIRE(counts[layer] == 5);
+            REQUIRE(counts[layer + 1] == 4);
+            REQUIRE(flip_layer == -1);                   // only once
+            flip_layer = layer + 1;
+        }
+    REQUIRE(flip_layer > 5);
+    REQUIRE(flip_layer < n_layers - 5);
+
+    // While five rings exist, the retiring ring's width ramps down through several
+    // buckets to the termination floor and pins there before the flip; it never dips
+    // below the floor, and the ramp spans many layers (the flip spreads over height).
+    std::set<float> buckets;
+    for (int layer = 0; layer < flip_layer; ++layer) {
+        REQUIRE(layer_min_w[layer] > 0.29f);
+        buckets.insert(std::round(layer_min_w[layer] / 0.05f) * 0.05f);
+        if (layer > 0)
+            REQUIRE(layer_min_w[layer] <= layer_min_w[layer - 1] + 0.051f);   // non-increasing (bucket slack)
+    }
+    REQUIRE(buckets.size() >= 3);
+    REQUIRE(layer_min_w[flip_layer - 1] < 0.31f);        // floor-pinned just before the flip
+    REQUIRE(layer_min_w[flip_layer] > 0.4f);             // settled four-ring layers are near nominal
+}
+
+TEST_CASE("Adaptive beading composes with the brick interlock", "[ContinuousShell]") {
+    // The interlock's Z stagger must ride on plan rings exactly as on fixed rings:
+    // XY untouched, buried rings offset within +-amp, the join/surface rings pinned flat.
+    Flow flow(0.5f, 0.25f, 0.5f);
+    const double sp = flow.spacing();
+    const ExPolygon ann = make_annulus(10.0, 6.0 * sp + (0.5 - sp));
+    Surfaces surfaces{ Surface(stInternal, ann) };
+
+    auto build = [&](double interlock_pct) {
+        PrintRegionConfig cfg;
+        cfg.continuous_shell_adaptive_beading.value = true;
+        cfg.continuous_shell_interlock.value = interlock_pct;
+        return cs_signature(surfaces, flow, cfg);
+    };
+    const CsSig flat = build(0);
+    const CsSig locked = build(100);
+    REQUIRE(flat.pts.size() == locked.pts.size());
+    const coord_t amp = coord_t(std::llround(scale_(0.25 / 4.0)));
+    bool any_offset = false;
+    for (size_t i = 0; i < flat.pts.size(); ++i) {
+        REQUIRE(std::get<0>(flat.pts[i]) == std::get<0>(locked.pts[i]));   // XY identical
+        REQUIRE(std::get<1>(flat.pts[i]) == std::get<1>(locked.pts[i]));
+        REQUIRE(std::get<2>(flat.pts[i]) == 0);
+        const coord_t z = std::get<2>(locked.pts[i]);
+        REQUIRE(std::abs(z) <= amp + 2);
+        any_offset |= z != 0;
+    }
+    REQUIRE(any_offset);
+}
+
+TEST_CASE("Adaptive beading degrades to C-lite byte-identically out of scope", "[ContinuousShell]") {
+    Flow flow(0.5f, 0.25f, 0.5f);
+
+    auto expect_identical = [&](const Surfaces &surfaces, PrintRegionConfig &cfg_on, PrintRegionConfig &cfg_off,
+                                size_t layer_index = 3, bool force_solid = false) {
+        const CsSig on  = cs_signature(surfaces, flow, cfg_on,  layer_index, force_solid);
+        const CsSig off = cs_signature(surfaces, flow, cfg_off, layer_index, force_solid);
+        REQUIRE(on.pts.size() == off.pts.size());
+        for (size_t i = 0; i < on.pts.size(); ++i)
+            REQUIRE(on.pts[i] == off.pts[i]);
+    };
+
+    SECTION("non-star annulus (offset bore) declines to C-lite") {
+        // The bore does not enclose the outer centroid, so the angular parametrization is
+        // meaningless; the plan declines and the fixed-width rings are byte-identical.
+        Polygon outer, inner;
+        for (int i = 0; i < 240; ++i) {
+            const double a = 2.0 * M_PI * i / 240.0;
+            outer.points.emplace_back(coord_t(10000000 * std::cos(a)), coord_t(10000000 * std::sin(a)));
+            inner.points.emplace_back(coord_t(5000000 + 3000000 * std::cos(a)), coord_t(3000000 * std::sin(a)));
+        }
+        ExPolygons ann = diff_ex(Polygons{outer}, Polygons{inner});
+        REQUIRE(ann.size() == 1);
+        REQUIRE(ann.front().holes.size() == 1);
+        Surfaces surfaces{ Surface(stInternal, ann.front()) };
+        PrintRegionConfig on, off;
+        on.continuous_shell_adaptive_beading.value = true;
+        expect_identical(surfaces, on, off);
+    }
+    SECTION("woven sparse annulus keeps its lattice") {
+        const ExPolygon ann = make_annulus(10.0, 4.0);
+        Surfaces surfaces{ Surface(stInternal, ann) };
+        PrintRegionConfig on, off;
+        on.continuous_shell_infill_density.value  = 30;
+        off.continuous_shell_infill_density.value = 30;
+        on.continuous_shell_adaptive_beading.value = true;
+        expect_identical(surfaces, on, off);
+    }
+    SECTION("solid disc keeps its spiral") {
+        Polygon circ;
+        for (int i = 0; i < 96; ++i) {
+            const double a = 2.0 * M_PI * i / 96.0;
+            circ.points.emplace_back(coord_t(8000000 * std::cos(a)), coord_t(8000000 * std::sin(a)));
+        }
+        Surfaces surfaces{ Surface(stInternal, ExPolygon(circ)) };
+        PrintRegionConfig on, off;
+        on.continuous_shell_adaptive_beading.value = true;
+        expect_identical(surfaces, on, off);
+    }
+}

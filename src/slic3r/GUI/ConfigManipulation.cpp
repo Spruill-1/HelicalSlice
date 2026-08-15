@@ -709,7 +709,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
     for (auto el : {"continuous_shell_seam_step", "continuous_shell_seam_jitter",
                     "continuous_shell_internal_overextrusion", "continuous_shell_interlock",
                     "continuous_shell_connector_spread", "continuous_shell_seam_coast",
-                    "continuous_shell_scarf_length",
+                    "continuous_shell_scarf_length", "continuous_shell_adaptive_beading",
                     "continuous_shell_infill_density", "continuous_shell_infill_weave",
                     "continuous_shell_infill_weave_shift"})
         toggle_line(el, has_continuous_shell);
@@ -1000,8 +1000,14 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
     toggle_line("fuzzy_skin_layers_between_ripple_offset", is_ripple && has_fuzzy_skin);
 
     bool have_arachne = config->opt_enum<PerimeterGeneratorType>("wall_generator") == PerimeterGeneratorType::Arachne;
-    for (auto el : {"wall_transition_length", "wall_transition_filter_deviation", "wall_transition_angle", "min_feature_size", "min_length_factor",
-        "min_bead_width", "wall_distribution_count", "initial_layer_min_bead_width", "wall_maximum_resolution", "wall_maximum_deviation"})
+    // The continuous-shell per-angle bead plan consumes the same width-limit and
+    // transition options as the Arachne generator, so keep them visible there too.
+    bool cs_adaptive = config->opt_bool("continuous_shell_mode") && config->opt_bool("continuous_shell_adaptive_beading");
+    for (auto el : {"wall_transition_length", "wall_transition_filter_deviation", "min_feature_size",
+        "min_bead_width"})
+        toggle_line(el, have_arachne || cs_adaptive);
+    for (auto el : {"wall_transition_angle", "min_length_factor", "wall_distribution_count",
+        "initial_layer_min_bead_width", "wall_maximum_resolution", "wall_maximum_deviation"})
         toggle_line(el, have_arachne);
     toggle_field("detect_thin_wall", !have_arachne);
 
