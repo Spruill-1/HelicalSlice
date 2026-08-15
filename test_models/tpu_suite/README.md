@@ -96,6 +96,13 @@ T4's abrupt 6->4 double flip at z~20.5mm. A/B against the printed T4: the two
 transition bands and the thin section should lose the rough band and the
 periodic medial voids (cut it at the same heights).
 
+**Interlock A/B (2026-08-15):** `sliced/T4_adaptive_interlock.gcode.3mf` = the same
+T4 adaptive slice with `continuous_shell_interlock` 100 (the suite printed T1-T4
+with it OFF to isolate width effects). Verified XY-identical point-for-point to
+T4_adaptive; only Z differs, by exactly {0, +-0.0625mm}: surfaces/join ring pinned,
+buried rings brick-staggered. Microscope question: does the corner-void array shift
+from aligned rows to a staggered/checkerboard pattern (and shrink)?
+
 ## Notes
 
 - **T2 is the C-lite money shot**: same print settings as T1, only the wall differs.
