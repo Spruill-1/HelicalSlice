@@ -6036,16 +6036,18 @@ void PrintConfigDef::init_fff_params()
     def->category = L("Strength");
     // xgettext:no-c-format, no-boost-format
     def->tooltip = L("Staggers continuous-shell wall beads in Z, like brick-laying. Each buried wall ring is nudged "
-                     "up or down (alternating by ring) so radially-adjacent beads no longer share a Z level, breaking "
-                     "up the continuous horizontal interface between them for a stronger, more isotropic wall. The bead "
+                     "up or down (alternating by ring) so radially-adjacent beads no longer share a Z level. The bead "
                      "stays fully continuous - the nudge is a gentle ramp, not a jump - and the outer and bore surfaces "
-                     "are left on the smooth spiral. 100% offsets adjacent rings by half a bead height (a full brick "
-                     "interlock); 0% disables it.");
+                     "are left on the smooth spiral. 100% offsets adjacent rings by half a bead height; 0% disables it. "
+                     "Default 0: the continuous-shell Z ramp already offsets radially-adjacent beads by a smoothly "
+                     "varying (non-periodic) amount around the circumference, and a printed A/B showed that natural "
+                     "graded nesting resists tearing BETTER than the explicit periodic stagger, which concentrates "
+                     "voids into organized rows (tear initiation sites) and telegraphs slight bumps to the surface.");
     def->sidetext = L("%");
     def->min = 0;
     def->max = 200;
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercent(100));
+    def->set_default_value(new ConfigOptionPercent(0));
 
     def = this->add("continuous_shell_connector_spread", coPercent);
     def->label = L("Continuous shell connector spread");

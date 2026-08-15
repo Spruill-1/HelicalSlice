@@ -93,6 +93,29 @@ documented. `continuous_shell_adaptive_beading` now defaults ON (C-lite remains
 available by turning it off, and is still the automatic fallback for non-star /
 sparse / solid sections).
 
+## Interlock A/B on adaptive walls (2026-08-15) — NEGATIVE, default flipped to 0
+
+`T4_adaptive_interlock` (same slice as T4_adaptive, XY-identical byte-verified,
+plus `continuous_shell_interlock` 100) vs the plain adaptive tube:
+
+- **Microscopy:** the stagger is geometrically active — corner voids become
+  3-corner TRIANGULAR (T-junction) rows, the brick signature — but misfit
+  concentrates in organized rows at the pinned/staggered ring boundaries, and
+  the exterior gains a slight regular bumpiness (offset beads overlap instead
+  of nesting; the crowding telegraphs through the pinned surface beads in TPU).
+- **Tear test:** a tear could be STARTED and propagated on the interlocked tube
+  (ductile, crack deflected across courses — not catastrophic). On the plain
+  adaptive tube a tear could NOT be started at all (scalpel required).
+
+Interpretation: the arc-length Z ramp is itself a bricklayer — radially adjacent
+rings sit at path fractions that differ around the circumference, so neighbors
+are offset in Z by a smoothly varying, NON-PERIODIC amount (graded,
+incommensurate nesting; visible in the very first T4 cuts at interlock 0). The
+explicit periodic +-h/4 stagger replaces that with coherent, repeating interface
+geometry whose boundary void rows act as tear initiation sites. Natural beats
+periodic. `continuous_shell_interlock` now defaults 0 (knob retained; n=1
+caveat, but microscopy, tear initiation, and surface all point the same way).
+
 ## C-full design brief (from this campaign)
 
 1. Retire ONE ring at a time via an angular wedge (locally odd counts) —
