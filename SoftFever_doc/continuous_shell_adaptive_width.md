@@ -107,10 +107,11 @@ Design decisions that emerged in implementation:
 - Woven chains excluded: their inter-ring diagonals are structural struts across open space.
 - `seam_coast` is superseded but kept functional (both compose; tooltip documents).
 
-### C-full — per-angle beading (implemented, phase 3, 2026-08-15)
+### C-full — per-angle beading (implemented + print-validated, phase 3, 2026-08-15)
 
-Implemented as `continuous_shell_adaptive_beading` (region bool, default OFF pending a T4
-re-print). Scope: dense annular star single-chain sections; everything else keeps C-lite
+Implemented as `continuous_shell_adaptive_beading` (region bool, **default ON** — the T4
+A/B re-print eliminated both the visible transition band and the stretched-regime medial
+void line; see `test_models/tpu_suite/RESULTS.md`). Scope: dense annular star single-chain sections; everything else keeps C-lite
 bit-identically (byte-identity regression-tested). Thickness field t(θ) from 720-bin radial
 profiles with **nearest-distance** thickness (radial difference overstates 1/cos α on oblique
 walls); rings are iso-index curves placed by radial FRACTION (exact perpendicular depth on

@@ -6102,9 +6102,11 @@ void PrintConfigDef::init_fff_params()
                      "abrupt paired flip, surface rings hold their nominal width, and flips are biased toward "
                      "slightly narrower (better-consolidating) beads. Applies to annular (tube-wall) sections that "
                      "are star-shaped and densely filled; other sections keep the fixed-width rings. Uses the "
-                     "wall transition length/filter, minimum wall width, and minimal feature size options.");
+                     "wall transition length/filter, minimum wall width, and minimal feature size options. "
+                     "Default on (print-validated 2026-08-15: eliminates the transition band and the medial "
+                     "void line of stretched walls); turn off to reproduce fixed-width ring behavior.");
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionBool(false));
+    def->set_default_value(new ConfigOptionBool(true));
 
     def = this->add("continuous_shell_infill_density", coPercent);
     def->label = L("Continuous shell infill density");

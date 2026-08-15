@@ -1508,6 +1508,10 @@ TEST_CASE("Adaptive beading degrades to C-lite byte-identically out of scope", "
 
     auto expect_identical = [&](const Surfaces &surfaces, PrintRegionConfig &cfg_on, PrintRegionConfig &cfg_off,
                                 size_t layer_index = 3, bool force_solid = false) {
+        // The option defaults ON since print validation - pin the states explicitly so
+        // this test keeps comparing the adaptive gate against genuine C-lite.
+        cfg_on.continuous_shell_adaptive_beading.value  = true;
+        cfg_off.continuous_shell_adaptive_beading.value = false;
         const CsSig on  = cs_signature(surfaces, flow, cfg_on,  layer_index, force_solid);
         const CsSig off = cs_signature(surfaces, flow, cfg_off, layer_index, force_solid);
         REQUIRE(on.pts.size() == off.pts.size());

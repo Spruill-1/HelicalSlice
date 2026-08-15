@@ -74,6 +74,25 @@ recommended for TPU. If ever revisited (rigid materials, where a ridge is a
 crack initiator), raise the taper floor to ≥0.30 mm first. The seam-quality
 workstream moves to C-full/B.
 
+## C-full A/B validation (2026-08-15) — PASSED, default flipped ON
+
+`sliced/T4_adaptive.gcode.3mf` (T4 geometry, `continuous_shell_adaptive_beading` on)
+printed at 9.2 g vs 9.39 predicted (−2%, within flow noise; slight elephant's foot
+at the base — first-layer squish, unrelated to beading). Against the original T4:
+
+- **Exterior:** no visible transition band anywhere (old tube: distinct rough band
+  at the z≈20.5 double flip and rougher thin section). The user's verdict: "no
+  noticeable seam between the thick/thin sections whatsoever."
+- **Thin-section cut:** the periodic medial void line of the stretched regime is
+  GONE — uniform pinprick corner-void array, same texture as the thick section.
+- **Transition cut:** gradual packing change; no void-rich flip plane, no notch.
+
+This confirms the mechanism chain end-to-end: squeeze-biased single-step flips +
+width-birth transitions eliminate both failure modes the original campaign
+documented. `continuous_shell_adaptive_beading` now defaults ON (C-lite remains
+available by turning it off, and is still the automatic fallback for non-star /
+sparse / solid sections).
+
 ## C-full design brief (from this campaign)
 
 1. Retire ONE ring at a time via an angular wedge (locally odd counts) —
