@@ -279,6 +279,15 @@ struct ChainBeadPlan {
     size_t n_slots = 0;
     std::vector<std::vector<float>>  slot_width;  // [NB][n_slots], extrusion mm
     std::vector<std::vector<double>> slot_frac;   // [NB][n_slots], fraction of radial extent
+    // Interior spiral (phase B): when set, the buried rings print as one double-arm
+    // spiral whose comb has the SAME bead count and pitch as ring mode (no stretch;
+    // the squeeze doctrine holds). The arm geometry - full-span tangent arms, merge-
+    // zone clearance widths, the U-turn - is evaluated analytically at generation time
+    // in spiralize_rings from the ordinary slot tables via the fractional-slot queries
+    // below. The arm phase anchors at spiral_theta0 (this layer's seam angle).
+    bool   spiral = false;
+    double spiral_theta0 = 0.;
+    float  w_term = 0.30f;                            // transitional/merge width floor, mm
 
     // Bin-centre linear interpolation with wraparound; shared by the queries below.
     template<typename Table, typename Get>
@@ -301,6 +310,28 @@ struct ChainBeadPlan {
     {
         return interp(slot_frac, slot, th, [](double v) { return v; });
     }
+    // Slot-table queries at a FRACTIONAL slot coordinate (the pairwise ring morph):
+    // lerp across adjacent slot columns as well as across angular bins.
+    double frac_at_f(double slot_coord, double th) const
+    {
+        const double fl = std::floor(slot_coord);
+        const double f  = slot_coord - fl;
+        const size_t j0 = size_t(std::clamp<double>(fl, 0., double(n_slots - 1)));
+        const size_t j1 = std::min<size_t>(j0 + 1, n_slots - 1);
+        const double a  = interp(slot_frac, j0, th, [](double v) { return v; });
+        const double b  = interp(slot_frac, j1, th, [](double v) { return v; });
+        return a * (1.0 - f) + b * f;
+    }
+    double width_at_f(double slot_coord, double th) const
+    {
+        const double fl = std::floor(slot_coord);
+        const double f  = slot_coord - fl;
+        const size_t j0 = size_t(std::clamp<double>(fl, 0., double(n_slots - 1)));
+        const size_t j1 = std::min<size_t>(j0 + 1, n_slots - 1);
+        const double a  = interp(slot_width, j0, th, [](float v) { return double(v); });
+        const double b  = interp(slot_width, j1, th, [](float v) { return double(v); });
+        return a * (1.0 - f) + b * f;
+    }
 };
 
 // Build the plan for one annular chain, or decline (nullptr + decline_note) when the
@@ -310,6 +341,7 @@ struct ChainBeadPlan {
 std::unique_ptr<ChainBeadPlan> build_chain_plan(const ExPolygon &region, const Flow &flow,
                                                 const ContinuousShellWidthLimits &limits,
                                                 size_t n_bands, double layer_height,
+                                                bool spiral_mode, double seam_theta,
                                                 std::string *decline_note, std::string *hard_fail)
 {
     const coord_t w_sp  = flow.scaled_spacing();
@@ -356,6 +388,7 @@ std::unique_ptr<ChainBeadPlan> build_chain_plan(const ExPolygon &region, const F
     // EXTRUSION width inside each surface, but widths add up in the spacing domain.
     plan->edge_margin = 0.5 * double(w_ext - w_sp);
     std::vector<double> t_sp(NB, 0.);
+    double t_sp_max = 0.;
     for (int b = 0; b < NB; ++b) {
         const double th = -M_PI + (double(b) + 0.5) * (2.0 * M_PI / NB);
         const Vec2d  p  = centre + plan->r_out.r[b] * Vec2d(std::cos(th), std::sin(th));
@@ -363,6 +396,7 @@ std::unique_ptr<ChainBeadPlan> build_chain_plan(const ExPolygon &region, const F
         for (const Point &q : bore_d.points)
             d2 = std::min(d2, (q.cast<double>() - p).squaredNorm());
         t_sp[b] = std::sqrt(d2) - 2.0 * plan->edge_margin;
+        t_sp_max = std::max(t_sp_max, t_sp[b]);
         if (t_sp[b] < scale_(min_feature_mm))
             { if (decline_note) *decline_note = "wall below minimum feature size"; return nullptr; }
     }
@@ -376,7 +410,12 @@ std::unique_ptr<ChainBeadPlan> build_chain_plan(const ExPolygon &region, const F
     // showed - instead of dumping it onto the medial bead alone.
     const double split_thr = std::clamp(2. * min_bead_mm / double(flow.width()) - 1., 0.01, 0.99);
     const double add_thr   = std::clamp(min_bead_mm / double(flow.width()), 0.01, 0.99);
-    coord_t max_beads = coord_t(2 * n_bands) + 6;
+    // Cap comfortably above any thickness the plan actually measured (the band count
+    // underestimates it on non-round sections, where diagonal thickness exceeds the
+    // marched depth), so LimitedBeadingStrategy's marker-bead machinery never engages
+    // even on count-law probes at optimal+1.
+    (void) n_bands;
+    coord_t max_beads = coord_t(std::llround(t_sp_max / double(w_sp))) + 8;
     if (max_beads & 1)
         ++max_beads;
     const Arachne::BeadingStrategyPtr strategy = Arachne::BeadingStrategyFactory::makeStrategy(
@@ -551,6 +590,27 @@ std::unique_ptr<ChainBeadPlan> build_chain_plan(const ExPolygon &region, const F
     plan->slot_width.assign(NB, std::vector<float>(plan->n_slots, 0.f));
     plan->slot_frac.assign(NB, std::vector<double>(plan->n_slots, 0.));
     const double overlap_delta_mm = double(w_ext - w_sp) * SCALING_FACTOR;
+    // Floor the transitional (mid) bead of a beading and take the deficit back from the
+    // interior beads (the pinned surfaces only when there is no interior). Shared by the
+    // ring tables and the spiral turn tables below.
+    auto floor_transitional = [&](Arachne::BeadingStrategy::Beading &bd, size_t count) {
+        const size_t midc = count / 2;
+        if (count <= 2 || bd.bead_widths[midc] >= w_floor_sp)
+            return;
+        const coord_t deficit = w_floor_sp - bd.bead_widths[midc];
+        bd.bead_widths[midc] = w_floor_sp;
+        std::vector<size_t> recipients;
+        for (size_t i = 1; i + 1 < count; ++i)
+            if (i != midc)
+                recipients.push_back(i);
+        if (recipients.empty())
+            for (size_t i = 0; i < count; ++i)
+                if (i != midc)
+                    recipients.push_back(i);
+        const coord_t share = deficit / coord_t(recipients.size());
+        for (const size_t i : recipients)
+            bd.bead_widths[i] -= share;
+    };
     for (int b = 0; b < NB; ++b) {
         const coord_t t_b = coord_t(std::llround(t_sp[b]));
         Arachne::BeadingStrategy::Beading bd = strategy->compute(t_b, k);
@@ -560,23 +620,7 @@ std::unique_ptr<ChainBeadPlan> build_chain_plan(const ExPolygon &region, const F
             bd = blend_ring_beadings(strategy->compute(t_b, k - 1), bd, rho[b], mid);
         if (std::abs(double(bd.left_over)) > 0.01 * t_sp[b])
             { if (hard_fail) *hard_fail = "Continuous shell adaptive beading: plan left uncovered wall thickness."; return nullptr; }
-        if (k > 2 && bd.bead_widths[mid] < w_floor_sp) {
-            const coord_t deficit = w_floor_sp - bd.bead_widths[mid];
-            bd.bead_widths[mid] = w_floor_sp;
-            // Take the deficit back from the interior beads (the pinned surface beads
-            // only when there is no interior, i.e. k == 3).
-            std::vector<size_t> recipients;
-            for (size_t i = 1; i + 1 < plan->n_slots; ++i)
-                if (i != mid)
-                    recipients.push_back(i);
-            if (recipients.empty())
-                for (size_t i = 0; i < plan->n_slots; ++i)
-                    if (i != mid)
-                        recipients.push_back(i);
-            const coord_t share = deficit / coord_t(recipients.size());
-            for (const size_t i : recipients)
-                bd.bead_widths[i] -= share;
-        }
+        floor_transitional(bd, plan->n_slots);
         const double t_geom = t_sp[b] + 2.0 * plan->edge_margin;
         coord_t prev_loc = std::numeric_limits<coord_t>::min();
         for (size_t i = 0; i < plan->n_slots; ++i) {
@@ -589,6 +633,25 @@ std::unique_ptr<ChainBeadPlan> build_chain_plan(const ExPolygon &region, const F
             const float w_mm = float(double(w) * SCALING_FACTOR + overlap_delta_mm);
             plan->slot_width[b][i] = std::round(w_mm / 0.05f) * 0.05f;
             plan->slot_frac[b][i]  = (plan->edge_margin + double(loc)) / t_geom;
+        }
+    }
+
+    // ---- Interior spiral (phase B) ---------------------------------------------------
+    // The buried rings become one double-arm spiral whose comb (numerically validated)
+    // has the SAME bead count and pitch as ring mode: both arms span the full interior
+    // surface-to-surface at pitch 2 per revolution with a constant one-slot offset, so
+    // internal comb gaps equal one pitch at every azimuth and the arm ends tangent-
+    // merge onto the surface rings (no terminations in air). All geometry is analytic
+    // and evaluated in spiralize_rings from the ordinary slot tables; nothing more to
+    // precompute here beyond the flag, the phase anchor, and the merge width floor.
+    if (spiral_mode) {
+        if (k < 6) {
+            if (decline_note)
+                *decline_note = "interior too thin for a spiral (needs at least 4 buried rings)";
+        } else {
+            plan->spiral        = true;
+            plan->spiral_theta0 = seam_theta;
+            plan->w_term        = w_term;
         }
     }
     return plan;
@@ -869,6 +932,90 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
         return spiral;
     }
 
+    // ---- Interior double-arm spiral assembly (phase B) ------------------------------
+    // The two grid rings are the closed surface loops; the buried interior is generated
+    // analytically from the plan. Both arms wind the same geometric direction at a
+    // constant one-slot offset (constant interleave); arm A is traversed inward (theta
+    // increasing) and arm B outward (theta decreasing) - the traversal flips at the
+    // bore. Arm tips tangent-merge onto the surface rings (no terminations in air);
+    // merge-zone widths equal the radial clearance, floored at the transitional width.
+    // The U-turn skips arm B's innermost half revolution (the s->2s wedge), closed by
+    // widening arm A's bordering turn. The whole spiral's phase advances by pi per
+    // layer so each layer's END azimuth coincides with the NEXT layer's start (short
+    // joins; the surface junctions form a two-start helix, halving per-column density).
+    if (plan != nullptr && plan->spiral && has_bore && grid.size() == 2 && plan->n_slots >= 6) {
+        const double S   = double(plan->n_slots - 1);        // slot span, surface to surface
+        const double th0 = seam_theta + M_PI * double(layer_index);   // pi/layer phase: end meets next start
+        auto sp_point = [&](double v, double th) -> Point {
+            const double ro = plan->r_out.sample_linear(th);
+            const double rb = plan->r_bore.sample_linear(th);
+            const double r  = ro - plan->frac_at_f(v, th) * (ro - rb);
+            return Point(coord_t(std::llround(plan->centre.x() + r * std::cos(th))),
+                         coord_t(std::llround(plan->centre.y() + r * std::sin(th))));
+        };
+        auto pitch_mm = [&](double th) -> double {
+            const double ro = plan->r_out.sample_linear(th);
+            const double rb = plan->r_bore.sample_linear(th);
+            return (plan->frac_at(1, th) - plan->frac_at(0, th)) * (ro - rb) * SCALING_FACTOR;
+        };
+        auto arm_width = [&](double v, double th, bool is_arm_A) -> float {
+            const double p = pitch_mm(th);
+            double w = plan->width_at_f(std::clamp(v, 1.0, S - 1.0), th);
+            const double d = std::min(v, S - v);             // slots to the nearest surface centre
+            if (d < 1.0)
+                w = std::min(w, std::max(double(plan->w_term), d * p));   // tangent-merge clearance
+            if (is_arm_A && v > S - 2.0) {
+                // Arm B's innermost crossing at this azimuth (B is capped at S-1 by the
+                // U-turn); if none sits between us and the bore, widen to cover the gap
+                // (bounded at 1.4 pitch - a safety that rarely engages with the
+                // full-span comb, whose gaps stay at one pitch).
+                const double braw = 1.0 + (th - th0) / M_PI;
+                const double vb   = (S - 1.0) - std::fmod(std::fmod((S - 1.0) - braw, 2.0) + 2.0, 2.0);
+                if (vb < v)
+                    w = std::min(1.4 * p, w + std::max(0.0, (S - v) * p - p));
+            }
+            return std::round(float(w) / 0.05f) * 0.05f;
+        };
+        // Sampling density per revolution follows the buried-ring chord policy.
+        const double r_mid = 0.5 * (plan->r_out.sample_linear(th0) + plan->r_bore.sample_linear(th0));
+        const size_t n_rev = std::clamp<size_t>(size_t(std::llround(2.0 * M_PI * r_mid / chord)), size_t(64), size_t(512));
+        const double dth   = 2.0 * M_PI / double(n_rev);
+        auto gen_arm = [&](double v_offset, double th_a, double th_b, bool is_A,
+                           std::vector<Point> &pts, std::vector<float> &ws) {
+            const int n = std::max(2, int(std::ceil((th_b - th_a) / dth)));
+            pts.reserve(size_t(n) + 1);
+            ws.reserve(size_t(n) + 1);
+            for (int i = 0; i <= n; ++i) {
+                const double th = th_a + (th_b - th_a) * double(i) / double(n);
+                const double v  = std::clamp((th - th0) / M_PI + v_offset, 0.0, S);
+                pts.push_back(sp_point(v, th));
+                ws.push_back(arm_width(v, th, is_A));
+            }
+        };
+        std::vector<Point> a_pts, b_pts;
+        std::vector<float> a_ws, b_ws;
+        gen_arm(0.0, th0, th0 + S * M_PI, true, a_pts, a_ws);                    // arm A, inward
+        gen_arm(1.0, th0 - M_PI, th0 + (S - 2.0) * M_PI, false, b_pts, b_ws);    // arm B, generated inward...
+        std::reverse(b_pts.begin(), b_pts.end());                                // ...traversed outward
+        std::reverse(b_ws.begin(), b_ws.end());
+
+        // Surface loops re-anchored to the spiral's own azimuths: ring 0 at th0 (arm A
+        // departs there), the bore at arm A's arrival azimuth. Surface widths come from
+        // the RING tables' surface columns (the truncated 2-ring grid does not index
+        // the plan's slot space directly).
+        auto surf_w = [&](size_t slot, const Point &p) -> float {
+            const Vec2d d = p.cast<double>() - plan->centre;
+            return plan->width_at(slot, std::atan2(d.y(), d.x()));
+        };
+        anchor_to_angle(grid[0], th0);
+        anchor_to_angle(grid[1], th0 + S * M_PI);
+        for (const Point &p : grid[0]) { spiral.points.push_back(p); flag(false); zoff(0); pw(surf_w(0, p)); }
+        for (size_t i = 0; i < a_pts.size(); ++i) { spiral.points.push_back(a_pts[i]); flag(true); zoff(0); pw(a_ws[i]); }
+        for (const Point &p : grid[1]) { spiral.points.push_back(p); flag(false); zoff(0); pw(surf_w(plan->n_slots - 1, p)); }
+        for (size_t i = 0; i < b_pts.size(); ++i) { spiral.points.push_back(b_pts[i]); flag(true); zoff(0); pw(b_ws[i]); }
+        return spiral;
+    }
+
     // Ordering of the nested contours into one path. The right primitive depends on
     // whether the innermost terminus is a free SURFACE or a buried core:
     //
@@ -1144,7 +1291,9 @@ coord_t vanish_depth(const ExPolygons &shape, coord_t hi)
 
 std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &flow, size_t layer_index, const WovenInfill &woven,
                                          const ContinuousShellWidthLimits &limits,
-                                         bool adaptive = false, double layer_height = 0., std::string *fail_reason = nullptr)
+                                         bool adaptive = false, double layer_height = 0.,
+                                         bool spiral_wanted = false, double seam_theta = 0.,
+                                         std::string *fail_reason = nullptr)
 {
     const coord_t spacing = flow.scaled_spacing();
     const coord_t width   = flow.scaled_width();
@@ -1237,15 +1386,21 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
         if (adaptive && cc.has_bore && !woven.enabled && chains.size() == 1 && region.holes.size() == 1) {
             std::string note, hard;
             std::unique_ptr<ChainBeadPlan> plan =
-                build_chain_plan(region, flow, limits, chain.size(), layer_height, &note, &hard);
+                build_chain_plan(region, flow, limits, chain.size(), layer_height, spiral_wanted, seam_theta, &note, &hard);
             if (!hard.empty()) {
                 if (fail_reason)
                     *fail_reason = hard;
                 return {};
             }
             if (plan) {
-                cc.loops = plan_rings(*plan);
-                cc.plan  = std::move(plan);
+                Polygons pr = plan_rings(*plan);
+                if (plan->spiral && pr.size() >= 2)
+                    // Spiral chains keep only the two closed surface rings; the buried
+                    // interior is generated as the double-arm spiral in spiralize_rings.
+                    cc.loops = Polygons{ std::move(pr.front()), std::move(pr.back()) };
+                else
+                    cc.loops = std::move(pr);
+                cc.plan = std::move(plan);
             }
         }
         // Medial deficit correction (adaptive bead width, C-lite). Marching stops when one
@@ -1629,11 +1784,21 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         woven = woven_infill_params(config);
     }
     // Adaptive beading (C-full) applies only to dense (non-force-solid) sections; the
-    // solid caps keep their serpentine/stagger machinery untouched.
+    // solid caps keep their serpentine/stagger machinery untouched. The interior
+    // spiral (phase B) additionally requires the plan and anchors its arm phase to
+    // this layer's seam angle (computed here exactly as spiralize_rings computes it,
+    // so the spiral's junctions precess with the seam).
     const bool adaptive = config != nullptr && config->continuous_shell_adaptive_beading.value && !force_solid;
+    const bool spiral_wanted = adaptive && config->continuous_shell_interior_spiral.value;
+    double cs_seam_theta = 0.0;
+    if (config != nullptr) {
+        const double step_rad   = 0.02 * (config->continuous_shell_seam_step.value / 100.0);
+        const double jitter_rad = 0.10 * (config->continuous_shell_seam_jitter.value / 100.0);
+        cs_seam_theta = double(layer_index) * step_rad + jitter_rad * seam_jitter_walk(layer_index);
+    }
     std::string plan_fail;
     const std::vector<ContourChain> chains = contour_spiral(merged.front(), flow, layer_index, woven, width_limits,
-                                                            adaptive, layer_height, &plan_fail);
+                                                            adaptive, layer_height, spiral_wanted, cs_seam_theta, &plan_fail);
     if (chains.empty()) {
         if (reason != nullptr)
             *reason = !plan_fail.empty() ? plan_fail : "Continuous shell mode could not construct a contour spiral.";

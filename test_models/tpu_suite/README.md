@@ -103,6 +103,17 @@ T4_adaptive; only Z differs, by exactly {0, +-0.0625mm}: surfaces/join ring pinn
 buried rings brick-staggered. Microscope question: does the corner-void array shift
 from aligned rows to a staggered/checkerboard pattern (and shrink)?
 
+## Phase B validation print (2026-08-15)
+
+`sliced/T5_spiral.gcode.3mf` = T5_seam re-sliced with adaptive beading + the
+interior double-arm spiral (`continuous_shell_interior_spiral`). G-code verified:
+junction census 1 radial jump per layer for the full 60 mm (ring mode: ~6-7),
+same coverage/track as ring mode, correct nozzle declaration. 16.75 g predicted.
+A/B against the printed scarf-0 T5: the helical seam column should nearly vanish
+(the spiral has no interior joins to stack); microscope the seam azimuths and the
+surface-ring merge zones (arm tips ride tangentially onto the surface rings at
+clearance widths - the new structure to inspect).
+
 ## Notes
 
 - **T2 is the C-lite money shot**: same print settings as T1, only the wall differs.

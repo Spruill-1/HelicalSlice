@@ -85,7 +85,14 @@ Weight targets and per-print predictions are in `test_models/tpu_suite/README.md
 > bore chord or a 9 mm layer join). All out-of-scope sections keep C-lite bit-identically
 > (regression-tested). Design details in `continuous_shell_adaptive_width.md` §4.
 
-## Next phases (agreed order: C-lite ✓ → A ✓ → C-full ✓ (unprinted) → B)
+> **2026-08-15 (later) — phase B implemented** as `continuous_shell_interior_spiral`
+> (region bool, default OFF pending a print; requires adaptive beading + ≥4 buried
+> rings). Full-span same-winding double-arm spiral in plan-slot space: k-bead no-stretch
+> comb, tangent merges onto the surface rings, π-per-layer phase (two-start helix seam),
+> junction census ~k → ≤1 per layer. Geometry settled numerically after hand derivation
+> failed twice — see the design doc §4-B. The roadmap is now fully implemented.
+
+## Next phases (agreed order: C-lite ✓ → A ✓ → C-full ✓ → B ✓ (unprinted))
 
 - **C-full**: per-angle thickness field → per-angle bead plan via Arachne's standalone
   `BeadingStrategy` stack (pure/stateless — see design doc §3 for the exact reuse recipe

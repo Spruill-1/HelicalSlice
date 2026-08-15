@@ -1473,6 +1473,185 @@ TEST_CASE("Adaptive beading retires a ring gradually across a taper via a width 
     REQUIRE(layer_min_w[flip_layer] > 0.4f);             // settled four-ring layers are near nominal
 }
 
+namespace {
+// Count of abrupt radial jumps along the whole path - ring-to-ring hops and junction
+// diagonals. The interior spiral's entire purpose is to make this collapse.
+size_t junction_census(const std::vector<ExtrusionPath *> &paths, double spacing_mm) {
+    size_t jumps = 0;
+    bool   have_prev = false;
+    double prev_r = 0.;
+    for (const ExtrusionPath *p : paths)
+        for (const Point3 &q : p->polyline.points) {
+            const double r = std::hypot(double(q.x()), double(q.y())) * SCALING_FACTOR;
+            if (have_prev && std::abs(r - prev_r) > 0.6 * spacing_mm)
+                ++jumps;
+            prev_r = r;
+            have_prev = true;
+        }
+    return jumps;
+}
+} // namespace
+
+TEST_CASE("Interior spiral replaces buried rings with a continuous double-arm spiral", "[ContinuousShell]") {
+    // Phase B: an 8-bead wall (2 surfaces + 6 buried) prints its interior as one
+    // double-arm spiral. The junction census (abrupt radial jumps) collapses from one
+    // per ring to almost none; coverage stays gap-free; the merge and wedge widths
+    // stay within [w_term, ~1.5 pitch]; volume and the width/flow contract hold.
+    Flow flow(0.5f, 0.25f, 0.5f);
+    const double sp = flow.spacing();
+    const ExPolygon ann = make_annulus(12.0, 8.0 * sp + (0.5 - sp));
+    const double model_volume = ann.area() * SCALING_FACTOR * SCALING_FACTOR * 0.25;
+    Surfaces surfaces{ Surface(stInternal, ann) };
+
+    auto build = [&](bool spiral_on) {
+        PrintRegionConfig cfg;
+        cfg.continuous_shell_adaptive_beading.value = true;
+        cfg.continuous_shell_interior_spiral.value  = spiral_on;
+        ExtrusionEntityCollection e;
+        struct R { size_t census; double vol = 0.; float min_w = 1e9f, max_w = 0.f; std::vector<size_t> ray_counts; double max_gap = 0.; size_t n_paths; };
+        const std::vector<ExtrusionPath *> paths = cs_paths(surfaces, flow, cfg, e);
+        R r;
+        r.n_paths = paths.size();
+        r.census = junction_census(paths, sp);
+        for (const ExtrusionPath *p : paths) {
+            r.min_w = std::min(r.min_w, p->width);
+            r.max_w = std::max(r.max_w, p->width);
+            r.vol  += p->mm3_per_mm * p->polyline.length() * SCALING_FACTOR;
+            REQUIRE_THAT(double(p->mm3_per_mm), Catch::Matchers::WithinRel(double(flow.with_width(p->width).mm3_per_mm()), 0.001));
+        }
+        for (int i = 0; i < 36; ++i) {
+            const double az = -M_PI + (i + 0.5) * (2.0 * M_PI / 36.0);
+            const std::vector<double> radii = ray_ring_radii(paths, az);
+            r.ray_counts.push_back(radii.size());
+            for (size_t j = 1; j < radii.size(); ++j)
+                r.max_gap = std::max(r.max_gap, radii[j] - radii[j - 1]);
+        }
+        return r;
+    };
+
+    const auto ring = build(false);
+    const auto spir = build(true);
+    CAPTURE(ring.census, spir.census, spir.min_w, spir.max_w, spir.max_gap, spir.n_paths);
+
+    REQUIRE(ring.census >= 6);                          // ring mode: ~one hop per ring
+    REQUIRE(spir.census <= 3);                          // spiral: tangent merges, no hops
+    REQUIRE(spir.min_w > 0.29f);                        // merge/wedge floors hold
+    REQUIRE(spir.max_w < 0.75f);                        // wedge widening bounded ~1.5 pitch
+    REQUIRE_THAT(spir.vol, Catch::Matchers::WithinRel(model_volume, 0.07));
+    REQUIRE(spir.n_paths < 1200);                       // width buckets keep runs bounded
+    for (const size_t c : spir.ray_counts) {
+        REQUIRE(c >= 5);                                // gap-free comb everywhere
+        REQUIRE(c <= 9);
+    }
+    REQUIRE(spir.max_gap < 2.4 * sp);                   // worst gap = the U-turn wedge
+}
+
+TEST_CASE("Interior spiral holds across a taper and keeps short layer joins", "[ContinuousShell]") {
+    // Across a thinning wall the spiral's slot count follows the ring plan's count law
+    // (single-step), the junction census stays collapsed on every layer, and - because
+    // the spiral phase advances by pi per layer so each layer's end azimuth meets the
+    // next layer's start - inter-layer joins stay short the whole way.
+    Flow flow(0.5f, 0.25f, 0.5f);
+    const double sp = flow.spacing();
+    PrintRegionConfig cfg;
+    cfg.continuous_shell_adaptive_beading.value = true;
+    cfg.continuous_shell_interior_spiral.value  = true;
+
+    Point3 prev_last(0, 0, 0);
+    bool   have_prev = false;
+    for (int layer = 0; layer < 40; ++layer) {
+        const double t_units = 8.4 - 0.03 * layer;           // crosses one flip band
+        const ExPolygon ann = make_annulus(12.0, t_units * sp + (0.5 - sp));
+        Surfaces surfaces{ Surface(stInternal, ann) };
+        ExtrusionEntityCollection e;
+        const std::vector<ExtrusionPath *> paths = cs_paths(surfaces, flow, cfg, e, size_t(layer));
+        CAPTURE(layer);
+        REQUIRE(junction_census(paths, sp) <= 3);
+        const Point3 first = paths.front()->polyline.points.front();
+        if (have_prev) {
+            const double gap = std::hypot(double(first.x() - prev_last.x()), double(first.y() - prev_last.y())) * SCALING_FACTOR;
+            REQUIRE(gap < 3.0);
+        }
+        prev_last = paths.back()->polyline.points.back();
+        have_prev = true;
+    }
+}
+
+TEST_CASE("Interior spiral composes with an eccentric wall and ignores the interlock", "[ContinuousShell]") {
+    Flow flow(0.5f, 0.25f, 0.5f);
+    const double sp = flow.spacing();
+
+    SECTION("eccentric wall: gap-free comb, conserved volume") {
+        const double t_base = 8.0 * sp + (0.5 - sp);
+        Polygon outer, inner;
+        for (int i = 0; i < 360; ++i) {
+            const double a = 2.0 * M_PI * i / 360.0;
+            outer.points.emplace_back(coord_t(std::llround(scale_(12.0) * std::cos(a))),
+                                      coord_t(std::llround(scale_(12.0) * std::sin(a))));
+            inner.points.emplace_back(coord_t(std::llround(scale_(0.25 * sp) + scale_(12.0 - t_base) * std::cos(a))),
+                                      coord_t(std::llround(scale_(12.0 - t_base) * std::sin(a))));
+        }
+        ExPolygons ann = diff_ex(Polygons{outer}, Polygons{inner});
+        REQUIRE(ann.size() == 1);
+        const double model_volume = ann.front().area() * SCALING_FACTOR * SCALING_FACTOR * 0.25;
+        Surfaces surfaces{ Surface(stInternal, ann.front()) };
+        PrintRegionConfig cfg;
+        cfg.continuous_shell_adaptive_beading.value = true;
+        cfg.continuous_shell_interior_spiral.value  = true;
+        ExtrusionEntityCollection e;
+        const std::vector<ExtrusionPath *> paths = cs_paths(surfaces, flow, cfg, e);
+        double volume = 0.;
+        for (const ExtrusionPath *p : paths) {
+            volume += p->mm3_per_mm * p->polyline.length() * SCALING_FACTOR;
+            REQUIRE_THAT(double(p->mm3_per_mm), Catch::Matchers::WithinRel(double(flow.with_width(p->width).mm3_per_mm()), 0.001));
+        }
+        REQUIRE_THAT(volume, Catch::Matchers::WithinRel(model_volume, 0.08));
+        REQUIRE(junction_census(paths, sp) <= 3);
+        for (int i = 0; i < 36; ++i) {
+            const double az = -M_PI + (i + 0.5) * (2.0 * M_PI / 36.0);
+            const std::vector<double> radii = ray_ring_radii(paths, az);
+            CAPTURE(az);
+            REQUIRE(radii.size() >= 5);
+            for (size_t j = 1; j < radii.size(); ++j)
+                REQUIRE(radii[j] - radii[j - 1] < 2.4 * sp);
+        }
+    }
+    SECTION("interlock has no effect on a spiral chain") {
+        const ExPolygon ann = make_annulus(12.0, 8.0 * sp + (0.5 - sp));
+        Surfaces surfaces{ Surface(stInternal, ann) };
+        auto build = [&](double interlock_pct) {
+            PrintRegionConfig cfg;
+            cfg.continuous_shell_adaptive_beading.value = true;
+            cfg.continuous_shell_interior_spiral.value  = true;
+            cfg.continuous_shell_interlock.value        = interlock_pct;
+            return cs_signature(surfaces, flow, cfg);
+        };
+        const CsSig flat = build(0), locked = build(100);
+        REQUIRE(flat.pts.size() == locked.pts.size());
+        for (size_t i = 0; i < flat.pts.size(); ++i)
+            REQUIRE(flat.pts[i] == locked.pts[i]);
+    }
+}
+
+TEST_CASE("Interior spiral declines below four buried rings", "[ContinuousShell]") {
+    // A 5-bead wall has too little interior for the double arm; the option must
+    // degrade to ring mode byte-identically.
+    Flow flow(0.5f, 0.25f, 0.5f);
+    const double sp = flow.spacing();
+    const ExPolygon ann = make_annulus(10.0, 5.0 * sp + (0.5 - sp));
+    Surfaces surfaces{ Surface(stInternal, ann) };
+    PrintRegionConfig on, off;
+    on.continuous_shell_adaptive_beading.value  = true;
+    off.continuous_shell_adaptive_beading.value = true;
+    on.continuous_shell_interior_spiral.value   = true;
+    off.continuous_shell_interior_spiral.value  = false;
+    const CsSig a = cs_signature(surfaces, flow, on);
+    const CsSig b = cs_signature(surfaces, flow, off);
+    REQUIRE(a.pts.size() == b.pts.size());
+    for (size_t i = 0; i < a.pts.size(); ++i)
+        REQUIRE(a.pts[i] == b.pts[i]);
+}
+
 TEST_CASE("Adaptive beading composes with the brick interlock", "[ContinuousShell]") {
     // The interlock's Z stagger must ride on plan rings exactly as on fixed rings:
     // XY untouched, buried rings offset within +-amp, the join/surface rings pinned flat.

@@ -6110,6 +6110,19 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(true));
 
+    def = this->add("continuous_shell_interior_spiral", coBool);
+    def->label = L("Continuous shell interior spiral");
+    def->category = L("Strength");
+    def->tooltip = L("Prints the BURIED rings of an adaptively-beaded continuous-shell wall as one continuous "
+                     "double-arm spiral instead of closed rings: the once-per-revolution radial join of every "
+                     "interior ring disappears, leaving only three junctions per layer (at the two surface rings "
+                     "and the turnaround), for the most uniform possible interior. The outer and bore surface "
+                     "rings stay closed seam-anchored loops. Requires adaptive beading and at least four buried "
+                     "rings; other sections keep closed rings. The bead widths near the surfaces vary around the "
+                     "circumference to close the spiral-to-ring boundary wedge.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("continuous_shell_infill_density", coPercent);
     def->label = L("Continuous shell infill density");
     def->category = L("Strength");

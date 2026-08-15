@@ -144,14 +144,32 @@ following decisions made in implementation — they refine the printed-T4/T5 bri
 
 B's boundary wedge remains the next consumer of the plan machinery.
 
-### B — true interior spiral
+### B — true interior spiral (implemented, phase 4, 2026-08-15)
 
-Buried rings become a continuous double-arm Fermat spiral (each arm at 2×pitch, both ends at free
-surfaces); surface rings stay closed loops with scarfed joins. Requires pairwise ring-morph
-parametrization (deliberately reintroduced; removed as vestigial in the review fixes) with
-containment checks on concave sections. **The spiral-to-loop boundary opens a wedge growing s → 2s
-over the first revolution; only C-full's distributed widths close it** — hence B last. Open
-question: whether brick interlock still earns its keep once no two layers share aligned ring circles.
+Implemented as `continuous_shell_interior_spiral` (region bool, default OFF pending a print;
+requires adaptive beading and ≥4 buried rings; everything else keeps ring mode bit-identically).
+The geometry, settled by numeric experiment (a hand-derived comb twice contradicted itself):
+
+- **Both arms wind the same geometric direction** at pitch 2/revolution with a constant one-slot
+  offset — a return arm of opposite radial sense does NOT interleave (combs align at some
+  azimuths: moiré, double-cover + 2-slot gaps). The TRAVERSAL flips at the bore: arm A is walked
+  inward (θ increasing), arm B outward (θ decreasing).
+- **Full-span tangent arms, k-bead comb**: both arms run surface-to-surface; the comb then has
+  the SAME bead count and pitch as ring mode (no stretch — the squeeze doctrine holds), internal
+  gaps exactly one pitch at every azimuth, and the anticipated s→2s boundary wedge never opens
+  (the arms' merge revolutions fill it; measured max comb gap 1.0 pitch). Arm ends tangent-merge
+  onto the closed surface rings with clearance-based widths (floored at the 0.30 transitional
+  width) — no bead ever terminates in air, and the junction census collapses from ~k radial
+  jumps per layer to ≤1 (measured).
+- **The old "pairwise ring-morph parametrization" is unnecessary**: the spiral is generated
+  analytically in plan-slot space (fractional-slot interpolation over the C-full tables —
+  `frac_at_f`/`width_at_f`), shape-following on star sections for free.
+- **π-per-layer phase**: arm B's outer tip necessarily lands π from arm A's, so the spiral's
+  phase advances by π each layer — every layer's END azimuth coincides with the NEXT layer's
+  start (short joins), and the surface junctions form a two-start helix (per-column junction
+  density halved).
+- Interlock is N/A on the spiral interior (no ring parity; ignored, and it defaults 0 anyway
+  after the print A/B). Width-birth count transitions flow through the shared tables.
 
 ## 5. Seam-impact / risk summary
 

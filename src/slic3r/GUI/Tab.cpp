@@ -2744,6 +2744,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("continuous_shell_seam_coast", "strength_settings_walls#continuous-shell-mode");
         optgroup->append_single_option_line("continuous_shell_scarf_length", "strength_settings_walls#continuous-shell-mode");
         optgroup->append_single_option_line("continuous_shell_adaptive_beading", "strength_settings_walls#continuous-shell-mode");
+        optgroup->append_single_option_line("continuous_shell_interior_spiral", "strength_settings_walls#continuous-shell-mode");
         optgroup->append_single_option_line("continuous_shell_infill_density", "strength_settings_walls#continuous-shell-mode");
         optgroup->append_single_option_line("continuous_shell_infill_weave", "strength_settings_walls#continuous-shell-mode");
         optgroup->append_single_option_line("continuous_shell_infill_weave_shift", "strength_settings_walls#continuous-shell-mode");

@@ -710,6 +710,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
                     "continuous_shell_internal_overextrusion", "continuous_shell_interlock",
                     "continuous_shell_connector_spread", "continuous_shell_seam_coast",
                     "continuous_shell_scarf_length", "continuous_shell_adaptive_beading",
+                    "continuous_shell_interior_spiral",
                     "continuous_shell_infill_density", "continuous_shell_infill_weave",
                     "continuous_shell_infill_weave_shift"})
         toggle_line(el, has_continuous_shell);
