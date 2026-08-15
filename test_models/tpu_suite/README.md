@@ -85,6 +85,17 @@ width ladder 0.225-0.4 present only in scarf6/12 (9.7 m vs 18.7 m of tapered bea
 as designed), T2's widened 0.61 medial pair, T3's 0.35 fitted bead, T4's graded
 0.49-0.61 sweep. The 0.64-0.69 widths are the layer-0 medial fix at first-layer flow.
 
+## C-full validation print (2026-08-15)
+
+`sliced/T4_adaptive.gcode.3mf` re-slices T4_taper with
+`continuous_shell_adaptive_beading` ON (same flow/temps/right nozzle as the
+suite; nozzle flow declared Standard,Standard natively). Predicted 9.39 g /
+~46 min. G-code verified: single-step ring flips 6->5 at z~16.2mm and 5->4 at
+z~32.0mm with 0.45->0.30 width ramps across each ~3.5mm band — vs the printed
+T4's abrupt 6->4 double flip at z~20.5mm. A/B against the printed T4: the two
+transition bands and the thin section should lose the rough band and the
+periodic medial voids (cut it at the same heights).
+
 ## Notes
 
 - **T2 is the C-lite money shot**: same print settings as T1, only the wall differs.

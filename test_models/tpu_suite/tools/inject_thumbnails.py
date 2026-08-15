@@ -4,14 +4,16 @@ Renders honest top-view images from Metadata/plate_1.json object bboxes:
 plate_1.png (512), plate_1_small.png (128), plate_no_light_1.png, top_1.png, pick_1.png,
 and registers them in the model_settings.config plate block.
 """
-import zipfile, json, os, re
+import sys, zipfile, json, os
 from PIL import Image, ImageDraw
 
-SLICED = r"C:\Users\david\source\HelicalSlice\test_models\tpu_suite\sliced"
+SLICED = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "sliced"))
 BED_W, BED_H = 350.0, 320.0
 SZ = 512
 
-FILES = ["PlateA_T1-T4", "T5_seam_scarf0", "T5_seam_scarf6", "T5_seam_scarf12", "T5_trio_fmb"]
+# Job names (without .gcode.3mf) on the command line override the default set.
+FILES = sys.argv[1:] if len(sys.argv) > 1 else \
+    ["PlateA_T1-T4", "T5_seam_scarf0", "T5_seam_scarf6", "T5_seam_scarf12", "T5_trio_fmb"]
 TUBE_COLORS = [(46, 134, 222), (235, 77, 75), (38, 222, 129), (247, 159, 31), (162, 155, 254)]
 
 def bed_to_px(x, y):
@@ -56,7 +58,7 @@ for name in FILES:
     zin = zipfile.ZipFile(path)
     pj = json.loads(zin.read("Metadata/plate_1.json"))
     plate, top, pick = render(pj["bbox_objects"])
-    small = plate.resize((128, 128), Image.LANCZOS)
+    small = plate.resize((128, 128), Image.Resampling.LANCZOS)   # Pillow 10+ name
 
     ms = zin.read("Metadata/model_settings.config").decode("utf-8")
     if "thumbnail_file" not in ms:
