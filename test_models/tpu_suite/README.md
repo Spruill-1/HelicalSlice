@@ -1,5 +1,9 @@
 # TPU Continuous-Shell Test Suite
 
+> **Printed and measured 2026-08-14 — see `RESULTS.md`.** C-lite validated
+> (weights within 1%, T2/T1 = 1.188 vs 1.192); scarf verdict NEGATIVE (keep
+> default 0); C-full design brief extracted.
+
 Generated 2026-08-12 for flow **0.4 nozzle / 0.45 line width / 0.25 layer height**
 (bead spacing 0.3963 mm). If the profile changes, regenerate — the wall thicknesses
 are tuned to this spacing and test nothing at a different flow.

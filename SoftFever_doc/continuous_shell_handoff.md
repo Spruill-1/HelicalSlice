@@ -67,6 +67,13 @@ engineering plate, 0.45/0.25 flow — spacing 0.3963):
 Weight targets and per-print predictions are in `test_models/tpu_suite/README.md`
 (predictions at 1.24 g/cm³; the T2/T1 ratio is density-independent).
 
+> **2026-08-14 — prints done, results in `test_models/tpu_suite/RESULTS.md`.**
+> C-lite validated on hardware (weights within 1%; T2/T1 = 1.188 vs 1.192;
+> medial closed in section). Scarf (Option A) verdict NEGATIVE in TPU: seam
+> creasing increases with scarf length, scarf-0 most isotropic — keep default
+> 0, seam workstream moves to C-full/B. RESULTS.md also carries the 5-point
+> C-full design brief (ring parity double-flip, squeeze-vs-stretch voids).
+
 ## Next phases (agreed order: C-lite ✓ → A ✓ → C-full → B)
 
 - **C-full**: per-angle thickness field → per-angle bead plan via Arachne's standalone
