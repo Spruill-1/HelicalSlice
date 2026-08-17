@@ -144,20 +144,23 @@ following decisions made in implementation — they refine the printed-T4/T5 bri
 
 B's boundary wedge remains the next consumer of the plan machinery.
 
-### B — true interior spiral (implemented, phase 4; v2 single-arm 2026-08-17)
+### B — true interior spiral (implemented, phase 4; v4 Z-wave 2026-08-17)
 
 Implemented as `continuous_shell_interior_spiral` (region bool, default OFF pending a print;
 requires adaptive beading and ≥4 buried rings; everything else keeps ring mode bit-identically).
 
-**v1 (double-arm, 2026-08-15) printed and FAILED — the failure is the doc's most important
-lesson.** The connected-Fermat double arm (both arms same winding at pitch 2/rev, one-slot
-offset, traversal flipping at the bore) delivered the seam goal — junction census ~k → ≤1 per
-layer, fingernail-flat seam on the printed tube — but every radially adjacent interior pair is
-an armA↔armB interface deposited up to half the interior apart in time. Every intra-layer radial
-weld was a COLD JOINT, and both printed tubes delaminated into two interleaved helical sheets,
-peeling from the bore. **Thermal adjacency — when the neighbouring bead was laid — is a design
-constraint co-equal with geometry.** Ring mode never shows this because ring-adjacent beads land
-within ~1-3 revolutions.
+**The print campaign's most important lesson (revised across v1→v3): radial INTERDIGITATION —
+not thermal adjacency — is the master strength variable.** v1 (double-arm) delivered the seam
+goal (junction census ~k → ≤1/layer, fingernail-flat seam) but delaminated into helical sheets;
+we first blamed the armA↔armB cold joints. v2 (single arm, warm one-revolution-apart radial
+welds) still peeled — falsifying the thermal explanation — and v3 (fixed traversal, doubling
+gone) peeled too, the unrolled peel front tracking the precessing seam helix. The real
+discriminator: ring mode's Fermat ORDER scrambles the arc-length ramp fraction across radial
+neighbours (adjacent rings sit up to ~(k−1)/k·h apart in Z, varying with angle — the graded
+incommensurate nesting the interlock A/B tear test proved tear-proofs the wall), and it holds
+even though its outer interfaces are laid up to k revolutions apart in time. A monotone spiral
+orders path position radially, so radial neighbours differ by only h/k — every interface is a
+smooth laminate cleavage plane. Thermal adjacency is demoted to a secondary weld-quality factor.
 
 **v2: a SINGLE arm at pitch one slot per revolution.** Radially adjacent turns are consecutive
 revolutions of the same arm — deposited exactly one revolution apart, warmer than ring mode's
@@ -175,8 +178,18 @@ constraint (the moiré analysis), no U-turn, no s→2s wedge, no π-per-layer ph
   seam azimuth — a single event per layer, total radial travel equal to ring mode's hops.
 - Generated analytically in plan-slot space (fractional-slot interpolation over the C-full
   tables, `frac_at_f`/`width_at_f`); the historical "pairwise ring-morph parametrization" is
-  unnecessary. Interlock is N/A on the spiral interior. Width-birth count transitions flow
-  through the shared tables.
+  unnecessary. The explicit interlock knob is N/A on the spiral interior. Width-birth count
+  transitions flow through the shared tables.
+- **v4 — the intrinsic Z-wave (2026-08-17):** buried arm points carry z = (h/4)·sin(2πg·v),
+  g the golden-ratio conjugate, v the winding coordinate — restoring the interdigitation the
+  monotone ordering removed. Radial-neighbour offsets reach ~0.47 h, graded and incommensurate
+  around the circumference (period 1/g rev), so no repeating interface geometry appears — the
+  tear-initiation failure mode of the explicit periodic interlock. Amplitude reuses the
+  interlock's print-proven quarter-layer envelope and is deliberately not a knob (the spiral has
+  no natural bricklaying to fall back on). The wave tapers to zero over one revolution before
+  each tangent merge, surfaces stay pinned to the ramp, and layer 0 is flat. XY byte-identical
+  to v3 — a single-variable print experiment: peel gone → mechanism confirmed, spiral saved;
+  peel persists → the interior spiral is retired.
 
 ## 5. Seam-impact / risk summary
 

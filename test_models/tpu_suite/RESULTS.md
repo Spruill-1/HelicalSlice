@@ -147,6 +147,54 @@ becomes one radial in-material diagonal across the wall at the precessing seam
 azimuth (single event per layer; total radial travel equal to ring mode's
 per-ring hops combined). `sliced/T5_spiral.gcode.3mf` regenerated as v3.
 
+## Phase B v3 print: peel persists - mechanism revised to laminate cleavage (2026-08-17)
+
+Two decisive results arrived together: the v2 tube DID have the bore peel after
+all (reported late), and the v3 reprint (fixed traversal, verified in the
+printed G-code: 236/237 layers run outer->bore) shows the peel AND a void
+pattern too. So the delamination survived fixing both cold arm-to-arm joints
+(v2) and reverse-join doubling (v3) - neither was the root cause. Unrolling the
+peeled wall showed the peel organized along a diagonal matching the precessing
+seam helix (0.02 rad/layer is ~36 deg from horizontal at this radius): the
+cleavage runs along helical interfaces and initiates at the seam column.
+
+REVISED MECHANISM - radial interdigitation is the master strength variable:
+
+- Ring mode's Fermat ORDER (0,2,4,...,5,3,1) scrambles the arc-length ramp
+  fraction across radial neighbours: adjacent rings sit up to ~(k-1)/k of a
+  layer apart in Z, varying with angle - the graded incommensurate nesting
+  visible in the very first T4 cuts, the thing the interlock A/B tear test
+  proved tear-proofs the wall. Those interfaces hold DESPITE being laid up to
+  k revolutions apart in time (ring mode's outer interfaces are its coldest) -
+  which is what falsifies the thermal-adjacency story.
+- Any monotone spiral orders path position radially, so radial neighbours
+  differ by only h/k (~0.04 mm): no interdigitation anywhere. Every interface
+  is a smooth laminate plane; a crack starting at the seam column propagates
+  freely around the wall. All three spiral revisions share this flaw; v1's
+  cold joints and v2's doubling were real defects stacked on top, not the root.
+- Thermal adjacency is demoted to a secondary weld-quality factor.
+
+v4 response: the spiral arm now carries an intrinsic graded Z-wave,
+z = (h/4)*sin(2*pi*g*v) with g the golden-ratio conjugate and v the winding
+coordinate - radial-neighbour offsets up to ~0.47 h, graded and incommensurate
+around the circumference so no repeating interface geometry appears (the
+tear-initiation failure of the explicit periodic interlock), tapering to zero
+at the tangent merges, surfaces and layer 0 pinned. Single-variable change vs
+v3: XY byte-identical, only buried Z moves. Prediction if the revision is
+right: the peel is gone (or dramatically harder to start) and the aligned void
+pattern breaks into ring-mode-like incommensurate nesting. If v4 still peels,
+the interior spiral is retired.
+
+A/B caveat found while regenerating v4: the committed v3 file (the tube printed
+above) was sliced by a STALE binary predating its own commit - it carries
+~63 mm/layer of ~0.5 mm-wide bead on the inner wall (radii 14.0-14.7 on this
+tube) and -3.5% total extrusion vs what the committed source produces. The v4
+file is sliced from the committed source and verified strictly Z-only against a
+pure-HEAD reslice: XY streams identical, E within rounding ulps, max |dZ| equal
+to the wave amplitude. So the v4-vs-v3 print comparison carries a small
+width-plan delta in addition to the wave; the qualitative verdict (peel gone or
+not) is robust to it. v4 predicts 17.34 g (the stale v3 build predicted 16.75 g).
+
 ## C-full design brief (from this campaign)
 
 1. Retire ONE ring at a time via an angular wedge (locally odd counts) —

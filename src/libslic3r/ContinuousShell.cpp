@@ -735,7 +735,7 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
                          const std::vector<float> *ring_widths = nullptr, std::vector<float> *pt_width = nullptr,
                          float nominal_width = 0.f,
                          coord_t scarf_len = 0, float scarf_floor = 0.f,
-                         const ChainBeadPlan *plan = nullptr)
+                         const ChainBeadPlan *plan = nullptr, coord_t spiral_wave_amp = 0)
 {
     Polyline spiral;
     if (rings_in.empty())
@@ -930,28 +930,45 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
         return spiral;
     }
 
-    // ---- Interior single-arm spiral assembly (phase B, v2) --------------------------
+    // ---- Interior single-arm spiral assembly (phase B, v4) --------------------------
     // The two grid rings are the closed surface loops; the buried interior is ONE
     // spiral arm at a pitch of one slot per revolution, generated analytically from
-    // the plan. Radially adjacent turns are consecutive revolutions of the same arm,
-    // so every intra-layer radial weld lands against a bead deposited only ONE
-    // revolution earlier - warmer than ring mode's own worst case. (The first,
-    // double-arm implementation interleaved two arms; every radial interface was then
-    // an interface between beads deposited up to half the interior apart in time, and
-    // the printed tubes delaminated into two helical sheets. Thermal adjacency is a
-    // design constraint co-equal with geometry.) Arm tips tangent-merge onto the
-    // surface rings at clearance widths floored at the transitional width - no bead
-    // terminates in air. The traversal direction is FIXED (outer -> bore, every
-    // layer): a per-layer reversal was tried and reintroduced the documented
-    // "reverse-join doubling" - under the arc-length Z ramp a reversed layer puts the
-    // same spatial bead at the opposite ramp fraction, pairing consecutive layers'
-    // beads with a two-layer void between pairs (printed as a staggered bowtie-void
-    // lattice). The inter-layer join is instead one radial diagonal across the wall,
-    // through material, at the precessing seam azimuth - a single event per layer
-    // with the same total radial travel as ring mode's per-ring hops combined.
+    // the plan. Arm tips tangent-merge onto the surface rings at clearance widths
+    // floored at the transitional width - no bead terminates in air. The traversal
+    // direction is FIXED (outer -> bore, every layer): a per-layer reversal
+    // reintroduced the documented "reverse-join doubling" (paired layers with
+    // two-layer voids). The inter-layer join is one radial diagonal across the wall,
+    // through material, at the precessing seam azimuth.
+    //
+    // v4 - the intrinsic Z-wave. Three printed revisions (double-arm, single-arm
+    // reversing, single-arm fixed) all delaminated along helical interfaces; the
+    // peel survived fixing both cold arm-to-arm joints (v2) and reverse-join
+    // doubling (v3), so neither was the root cause. What ring mode has and every
+    // spiral traversal lacks is RADIAL INTERDIGITATION: the Fermat ring ORDER
+    // scrambles the arc-length ramp fraction across radial neighbours - adjacent
+    // rings sit up to most of a layer apart in Z, varying with angle (the natural
+    // bricklaying the interlock A/B print showed tear-proofs the wall) - while a
+    // monotone spiral offsets radial neighbours by a near-constant h/k. Its
+    // interfaces are smooth laminate planes, and the printed tubes cleave along
+    // them, the peel front tracking the seam helix. The wave restores the
+    // interdigitation the monotone ordering removed: buried arm points get
+    // z = A*sin(2*pi*g*v), v the winding coordinate (one slot per revolution) and
+    // g the golden-ratio conjugate, with A a quarter layer (the brick interlock's
+    // print-proven Z envelope). Radial neighbours (v, v+1) then differ by up to
+    // ~0.47 h with the offset GRADED and INCOMMENSURATE around the circumference
+    // (period 1/g of a revolution), so no repeating interface geometry appears -
+    // the tear-initiation failure of the explicit periodic interlock. The wave
+    // tapers to zero over one revolution approaching each tangent merge (surfaces
+    // stay pinned to the ramp) and is suppressed on the first layer.
     if (plan != nullptr && plan->spiral && has_bore && grid.size() == 2 && plan->n_slots >= 6) {
         const double S   = double(plan->n_slots - 1);        // slot span, surface to surface
         const double th0 = seam_theta;                       // both junctions ride the seam column
+        const coord_t wamp = (layer_index == 0) ? 0 : spiral_wave_amp;
+        auto arm_wave = [&](double v) -> coord_t {
+            const double g_conj = 0.6180339887498949;        // golden-ratio conjugate
+            const double env    = std::clamp(std::min(v, S - v) - 1.0, 0.0, 1.0);
+            return coord_t(std::llround(double(wamp) * env * std::sin(2.0 * M_PI * g_conj * v)));
+        };
         auto sp_point = [&](double v, double th) -> Point {
             const double ro = plan->r_out.sample_linear(th);
             const double rb = plan->r_bore.sample_linear(th);
@@ -997,7 +1014,12 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
             for (const Point &p : grid[gi]) { spiral.points.push_back(p); flag(false); zoff(0); pw(surf_w(slot, p)); }
         };
         emit_ring(0, 0);                                     // outer -> in -> bore, every layer
-        for (size_t i = 0; i < arm_pts.size(); ++i) { spiral.points.push_back(arm_pts[i]); flag(true); zoff(0); pw(arm_ws[i]); }
+        for (size_t i = 0; i < arm_pts.size(); ++i) {
+            spiral.points.push_back(arm_pts[i]);
+            flag(true);
+            zoff(arm_wave(S * double(i) / double(n_arm)));
+            pw(arm_ws[i]);
+        }
         emit_ring(1, plan->n_slots - 1);
         return spiral;
     }
@@ -1827,6 +1849,12 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     const double interlock_ratio = (config != nullptr) ? config->continuous_shell_interlock.value / 100.0 : 0.0;
     const coord_t interlock_amp  = coord_t(std::llround(scale_(interlock_ratio * layer_height / 4.0)));
 
+    // Phase B v4: intrinsic spiral Z-wave amplitude - a quarter layer, the brick
+    // interlock's print-proven Z envelope (see the spiral branch of spiralize_rings).
+    // Deliberately NOT a knob: unlike ring mode, the spiral interior has no natural
+    // bricklaying, so it needs the interdigitation unconditionally.
+    const coord_t spiral_wave_amp = coord_t(std::llround(scale_(layer_height / 4.0)));
+
     // A2 - connector spread: distribute the per-ring surface<->interior handoffs around the
     // circumference instead of stacking them into one deep seam groove (passed to
     // spiralize_rings). A3 - seam coast: thin the flow across those handoffs so the residual
@@ -1862,7 +1890,7 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
                                        ring_spacing, layer_index, chain.has_bore, &flags, interlock_amp, &zoff,
                                        connector_spread, chain.woven_infill ? woven.shell_loops : 0,
                                        &merged.front(), &chain.ring_widths, &widths, flow.width(),
-                                       scarf_len, scarf_floor, chain.plan.get());
+                                       scarf_len, scarf_floor, chain.plan.get(), spiral_wave_amp);
         if (sub.points.size() >= 2 && sub.points.size() == flags.size() && sub.points.size() == zoff.size()
             && sub.points.size() == widths.size())
             // A chain carries the Z-wave only when its interior was actually thinned AND its

@@ -1653,6 +1653,103 @@ TEST_CASE("Interior spiral declines below four buried rings", "[ContinuousShell]
         REQUIRE(a.pts[i] == b.pts[i]);
 }
 
+TEST_CASE("Interior spiral carries a graded incommensurate Z-wave", "[ContinuousShell]") {
+    // v4: a monotone spiral offsets radial neighbours by only h/k (smooth laminate
+    // interfaces - three printed revisions all cleaved along them), so the buried arm
+    // carries an intrinsic Z-wave A*sin(2*pi*g*v), A = quarter layer, g = golden-ratio
+    // conjugate. Assert: (a) the wave is real and bounded to the interlock's proven
+    // envelope, (b) surfaces and the tangent-merge zones stay pinned to the ramp,
+    // (c) the wave is continuous point to point, (d) it is suppressed on layer 0,
+    // (e) along one ray the radial-neighbour offsets are GRADED - somewhere strongly
+    // staggered, somewhere near-coplanar - not a uniform periodic alternation.
+    Flow flow(0.5f, 0.25f, 0.5f);
+    const double sp = flow.spacing();
+    const double layer_height = 0.25;
+    const ExPolygon ann = make_annulus(14.0, 12.0 * sp + (0.5 - sp));   // deep wall: many buried revolutions
+    Surfaces surfaces{ Surface(stInternal, ann) };
+
+    auto build_raw_z = [&](size_t layer_idx) {
+        PrintRegionConfig cfg;
+        cfg.continuous_shell_adaptive_beading.value = true;
+        cfg.continuous_shell_interior_spiral.value  = true;
+        ExtrusionEntityCollection e;
+        std::string reason;
+        REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, layer_height, &cfg, e, &reason, false, layer_idx));
+        // apply_continuous_z NOT called: the points' Z is the raw wave alone.
+        std::vector<Point3> pts;
+        for (auto *ent : e.entities)
+            if (auto *mp = dynamic_cast<ExtrusionMultiPath *>(ent))
+                for (auto &p : mp->paths)
+                    for (auto &q : p.polyline.points)
+                        pts.push_back(q);
+        return pts;
+    };
+
+    const std::vector<Point3> pts = build_raw_z(4);
+    REQUIRE(pts.size() > 500);
+    const coord_t amp = coord_t(std::llround(scale_(layer_height / 4.0)));
+
+    // (a) real and bounded
+    coord_t z_reach = 0;
+    for (const Point3 &q : pts)
+        z_reach = std::max(z_reach, coord_t(std::abs(q.z())));
+    REQUIRE(z_reach > amp * 4 / 5);
+    REQUIRE(z_reach <= amp + 2);
+
+    // (b) surface rings and merge-adjacent radii pinned to the ramp
+    double r_min = std::numeric_limits<double>::max(), r_max = 0.;
+    for (const Point3 &q : pts) {
+        const double r = Point(q.x(), q.y()).cast<double>().norm() * SCALING_FACTOR;
+        r_min = std::min(r_min, r);
+        r_max = std::max(r_max, r);
+    }
+    for (const Point3 &q : pts) {
+        const double r = Point(q.x(), q.y()).cast<double>().norm() * SCALING_FACTOR;
+        if (r > r_max - 0.6 * sp || r < r_min + 0.6 * sp)
+            REQUIRE(q.z() == 0);
+    }
+
+    // (c) continuity: the wave never steps between consecutive points
+    coord_t max_step = 0;
+    for (size_t i = 1; i < pts.size(); ++i)
+        max_step = std::max(max_step, coord_t(std::abs(pts[i].z() - pts[i - 1].z())));
+    REQUIRE(max_step < coord_t(scale_(0.01)));
+
+    // (d) first layer flat
+    coord_t z0 = 0;
+    for (const Point3 &q : build_raw_z(0))
+        z0 = std::max(z0, coord_t(std::abs(q.z())));
+    REQUIRE(z0 == 0);
+
+    // (e) graded offsets along one ray: cluster crossings by radius, keep buried
+    // full-envelope clusters, and look at adjacent-cluster Z differences.
+    const double az = 0.7;
+    std::vector<std::pair<double, coord_t>> ray;    // (r_mm, z)
+    for (const Point3 &q : pts) {
+        const Vec2d d = Point(q.x(), q.y()).cast<double>();
+        double a = std::atan2(d.y(), d.x()) - az;
+        a = std::atan2(std::sin(a), std::cos(a));
+        if (std::abs(a) < 0.02)
+            ray.emplace_back(d.norm() * SCALING_FACTOR, q.z());
+    }
+    std::sort(ray.begin(), ray.end());
+    std::vector<coord_t> ring_z;
+    for (size_t i = 0; i < ray.size(); ++i)
+        if (i == 0 || ray[i].first - ray[i - 1].first > 0.5 * sp) {
+            if (ray[i].first > r_min + 2.5 * sp && ray[i].first < r_max - 2.5 * sp)
+                ring_z.push_back(ray[i].second);
+        }
+    REQUIRE(ring_z.size() >= 5);
+    coord_t d_max = 0, d_min = std::numeric_limits<coord_t>::max();
+    for (size_t i = 1; i < ring_z.size(); ++i) {
+        const coord_t d = coord_t(std::abs(ring_z[i] - ring_z[i - 1]));
+        d_max = std::max(d_max, d);
+        d_min = std::min(d_min, d);
+    }
+    REQUIRE(d_max > amp);            // a strongly staggered pair exists (up to ~1.86*amp)
+    REQUIRE(d_min < amp / 2);        // and a near-coplanar pair - graded, not periodic
+}
+
 TEST_CASE("Adaptive beading is safe on generic star tube shapes", "[ContinuousShell]") {
     // The adaptive plan defaults ON, so every star-shaped single-bore section now goes
     // through it (or declines to C-lite). These are INVARIANT tests - they must hold
