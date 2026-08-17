@@ -340,7 +340,7 @@ struct ChainBeadPlan {
 // than silently print a wall the plan itself says is wrong.
 std::unique_ptr<ChainBeadPlan> build_chain_plan(const ExPolygon &region, const Flow &flow,
                                                 const ContinuousShellWidthLimits &limits,
-                                                size_t n_bands, double layer_height,
+                                                double layer_height,
                                                 bool spiral_mode, double seam_theta,
                                                 std::string *decline_note, std::string *hard_fail)
 {
@@ -410,11 +410,9 @@ std::unique_ptr<ChainBeadPlan> build_chain_plan(const ExPolygon &region, const F
     // showed - instead of dumping it onto the medial bead alone.
     const double split_thr = std::clamp(2. * min_bead_mm / double(flow.width()) - 1., 0.01, 0.99);
     const double add_thr   = std::clamp(min_bead_mm / double(flow.width()), 0.01, 0.99);
-    // Cap comfortably above any thickness the plan actually measured (the band count
-    // underestimates it on non-round sections, where diagonal thickness exceeds the
-    // marched depth), so LimitedBeadingStrategy's marker-bead machinery never engages
-    // even on count-law probes at optimal+1.
-    (void) n_bands;
+    // Cap comfortably above any thickness the plan actually measured, so
+    // LimitedBeadingStrategy's marker-bead machinery never engages even on
+    // count-law probes at optimal+1.
     coord_t max_beads = coord_t(std::llround(t_sp_max / double(w_sp))) + 8;
     if (max_beads & 1)
         ++max_beads;
@@ -1299,6 +1297,38 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
     const double min_bead_width_mm   = limits.min_bead_width_mm   > 0. ? limits.min_bead_width_mm   : 0.85 * flow.nozzle_diameter();
     const double min_feature_size_mm = limits.min_feature_size_mm > 0. ? limits.min_feature_size_mm : 0.25 * flow.nozzle_diameter();
 
+    // Adaptive beading (C-full): the plan is built from the REGION directly, before and
+    // independent of band marching - the plan measures wall thickness itself and needs
+    // nothing from the bands. (An earlier gate required the marching to produce exactly
+    // one chain, which switched the plan OFF precisely where marching-based C-lite is
+    // weakest: a lumpy wall that pinches during marching fragments into chains whose
+    // deficit correction is skipped by design, underfilling the wall.) Out-of-scope
+    // sections decline inside build_chain_plan and fall through to marching + C-lite;
+    // a plan that contradicts its own invariants aborts the layer loudly.
+    if (adaptive && !woven.enabled && region.holes.size() == 1) {
+        std::string note, hard;
+        std::unique_ptr<ChainBeadPlan> plan =
+            build_chain_plan(region, flow, limits, layer_height, spiral_wanted, seam_theta, &note, &hard);
+        if (!hard.empty()) {
+            if (fail_reason)
+                *fail_reason = hard;
+            return {};
+        }
+        if (plan) {
+            ContourChain cc;
+            Polygons pr = plan_rings(*plan);
+            cc.has_bore = true;
+            if (plan->spiral && pr.size() >= 2)
+                cc.loops = Polygons{ std::move(pr.front()), std::move(pr.back()) };
+            else
+                cc.loops = std::move(pr);
+            cc.plan = std::move(plan);
+            std::vector<ContourChain> out;
+            out.push_back(std::move(cc));
+            return out;
+        }
+    }
+
     std::vector<std::vector<ExPolygon>> chains;
     std::vector<char> vanished;
     size_t point_count = 0;
@@ -1372,32 +1402,6 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
                 cc.loops.push_back(it->holes.front());
                 cc.has_bore = true;
             }
-        // Adaptive beading (C-full): plan the ring count and per-ring widths per angle for
-        // a simple dense annulus and replace the band-derived rings with the plan's rings.
-        // Out-of-scope sections (split chains, sparse/woven, non-star, multi-hole) decline
-        // inside build_chain_plan and keep the C-lite rings; a plan that contradicts its
-        // own invariants aborts the layer loudly instead of printing a wall it knows is
-        // wrong. force_solid layers never get here with adaptive set (caller gates).
-        if (adaptive && cc.has_bore && !woven.enabled && chains.size() == 1 && region.holes.size() == 1) {
-            std::string note, hard;
-            std::unique_ptr<ChainBeadPlan> plan =
-                build_chain_plan(region, flow, limits, chain.size(), layer_height, spiral_wanted, seam_theta, &note, &hard);
-            if (!hard.empty()) {
-                if (fail_reason)
-                    *fail_reason = hard;
-                return {};
-            }
-            if (plan) {
-                Polygons pr = plan_rings(*plan);
-                if (plan->spiral && pr.size() >= 2)
-                    // Spiral chains keep only the two closed surface rings; the buried
-                    // interior is generated as the double-arm spiral in spiralize_rings.
-                    cc.loops = Polygons{ std::move(pr.front()), std::move(pr.back()) };
-                else
-                    cc.loops = std::move(pr);
-                cc.plan = std::move(plan);
-            }
-        }
         // Medial deficit correction (adaptive bead width, C-lite). Marching stops when one
         // more band no longer fits, leaving a residual gap between the innermost beads'
         // edges. Measure it exactly: the last band vanished somewhere in (0, spacing], so

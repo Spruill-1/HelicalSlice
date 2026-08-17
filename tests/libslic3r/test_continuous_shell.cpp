@@ -1652,6 +1652,125 @@ TEST_CASE("Interior spiral declines below four buried rings", "[ContinuousShell]
         REQUIRE(a.pts[i] == b.pts[i]);
 }
 
+TEST_CASE("Adaptive beading is safe on generic star tube shapes", "[ContinuousShell]") {
+    // The adaptive plan defaults ON, so every star-shaped single-bore section now goes
+    // through it (or declines to C-lite). These are INVARIANT tests - they must hold
+    // whether the plan engages or declines: the layer builds (no spurious hard-fail),
+    // volume is conserved, no ray sees a coverage gap, widths honour the floors, and
+    // the width/flow contract holds. Shapes: an elliptical tube, a stadium (slot) tube,
+    // and a lumpy three-lobed tube - all star-shaped, none circular.
+    Flow flow(0.5f, 0.25f, 0.5f);
+    const double sp = flow.spacing();
+
+    auto check = [&](const ExPolygon &shape, bool spiral_on, double gap_tol_sp) {
+        const double model_volume = shape.area() * SCALING_FACTOR * SCALING_FACTOR * 0.25;
+        Surfaces surfaces{ Surface(stInternal, shape) };
+        PrintRegionConfig cfg;
+        cfg.continuous_shell_interior_spiral.value = spiral_on;   // adaptive on by default
+        ExtrusionEntityCollection e;
+        const std::vector<ExtrusionPath *> paths = cs_paths(surfaces, flow, cfg, e);
+        double volume = 0., total_len = 0.;
+        std::map<float, int> width_hist;
+        for (const ExtrusionPath *p : paths) {
+            REQUIRE(p->width > 0.29f);
+            REQUIRE(p->width < 0.80f);
+            volume += p->mm3_per_mm * p->polyline.length() * SCALING_FACTOR;
+            total_len += p->polyline.length() * SCALING_FACTOR;
+            width_hist[std::round(p->width / 0.05f) * 0.05f]++;
+            REQUIRE_THAT(double(p->mm3_per_mm), Catch::Matchers::WithinRel(double(flow.with_width(p->width).mm3_per_mm()), 0.001));
+        }
+        std::string hist;
+        for (const auto &kv : width_hist)
+            hist += std::to_string(kv.first).substr(0, 4) + "x" + std::to_string(kv.second) + " ";
+        CAPTURE(paths.size(), total_len, hist);
+        REQUIRE_THAT(volume, Catch::Matchers::WithinRel(model_volume, 0.10));
+        // Centroid-based rays: every azimuth must see a gap-free wall.
+        double cx = 0., cy = 0.;
+        size_t np = 0;
+        for (const ExtrusionPath *p : paths)
+            for (const Point3 &q : p->polyline.points) { cx += q.x(); cy += q.y(); ++np; }
+        cx /= double(np); cy /= double(np);
+        for (int i = 0; i < 48; ++i) {
+            const double az = -M_PI + (i + 0.5) * (2.0 * M_PI / 48.0);
+            std::vector<double> radii;
+            for (const ExtrusionPath *p : paths)
+                for (const Point3 &q : p->polyline.points) {
+                    const double dx = double(q.x()) - cx, dy = double(q.y()) - cy;
+                    double d = std::atan2(dy, dx) - az;
+                    d = std::atan2(std::sin(d), std::cos(d));
+                    // Narrow wedge: on non-circular shapes each ring's radius varies
+                    // with theta (dr/dtheta up to a few mm/rad), so a wide wedge smears
+                    // discrete rings into one chained cluster.
+                    if (std::abs(d) < 0.02)
+                        radii.push_back(std::hypot(dx, dy) * SCALING_FACTOR);
+                }
+            std::sort(radii.begin(), radii.end());
+            std::vector<double> clusters;
+            for (const double r : radii)
+                if (clusters.empty() || r - clusters.back() > 0.15) clusters.push_back(r);
+                else clusters.back() = r;
+            std::string cl;
+            for (const double r : clusters)
+                cl += std::to_string(r).substr(0, 5) + " ";
+            const double r_lo = radii.empty() ? 0. : radii.front();
+            const double r_hi = radii.empty() ? 0. : radii.back();
+            CAPTURE(az, clusters.size(), radii.size(), cl, r_lo, r_hi);
+            REQUIRE(clusters.size() >= 3);
+            for (size_t j = 1; j < clusters.size(); ++j)
+                REQUIRE(clusters[j] - clusters[j - 1] < gap_tol_sp * sp);
+        }
+    };
+
+    SECTION("elliptical tube") {
+        Polygon outer, inner;
+        for (int i = 0; i < 360; ++i) {
+            const double a = 2.0 * M_PI * i / 360.0;
+            outer.points.emplace_back(coord_t(std::llround(scale_(14.0) * std::cos(a))),
+                                      coord_t(std::llround(scale_(10.0) * std::sin(a))));
+            inner.points.emplace_back(coord_t(std::llround(scale_(11.8) * std::cos(a))),
+                                      coord_t(std::llround(scale_(7.8) * std::sin(a))));
+        }
+        ExPolygons ann = diff_ex(Polygons{outer}, Polygons{inner});
+        REQUIRE(ann.size() == 1);
+        check(ann.front(), false, 2.6);
+        check(ann.front(), true, 2.6);                       // and with the spiral requested
+    }
+    SECTION("stadium (slot) tube") {
+        auto stadium = [&](double half_len, double radius) {
+            Polygon p;
+            for (int i = 0; i <= 90; ++i) {                  // right cap
+                const double a = -M_PI / 2 + M_PI * i / 90.0;
+                p.points.emplace_back(coord_t(std::llround(scale_(half_len + radius * std::cos(a)))),
+                                      coord_t(std::llround(scale_(radius * std::sin(a)))));
+            }
+            for (int i = 0; i <= 90; ++i) {                  // left cap
+                const double a = M_PI / 2 + M_PI * i / 90.0;
+                p.points.emplace_back(coord_t(std::llround(scale_(-half_len + radius * std::cos(a)))),
+                                      coord_t(std::llround(scale_(radius * std::sin(a)))));
+            }
+            return p;
+        };
+        ExPolygons ann = diff_ex(Polygons{stadium(8.0, 8.0)}, Polygons{stadium(8.0, 5.8)});
+        REQUIRE(ann.size() == 1);
+        check(ann.front(), false, 2.6);
+    }
+    SECTION("lumpy three-lobed tube") {
+        Polygon outer, inner;
+        for (int i = 0; i < 480; ++i) {
+            const double a = 2.0 * M_PI * i / 480.0;
+            const double ro = 11.0 + 1.2 * std::sin(3.0 * a);
+            const double ri = ro - 2.3;
+            outer.points.emplace_back(coord_t(std::llround(scale_(ro) * std::cos(a))),
+                                      coord_t(std::llround(scale_(ro) * std::sin(a))));
+            inner.points.emplace_back(coord_t(std::llround(scale_(ri) * std::cos(a))),
+                                      coord_t(std::llround(scale_(ri) * std::sin(a))));
+        }
+        ExPolygons ann = diff_ex(Polygons{outer}, Polygons{inner});
+        REQUIRE(ann.size() == 1);
+        check(ann.front(), false, 2.8);
+    }
+}
+
 TEST_CASE("Adaptive beading composes with the brick interlock", "[ContinuousShell]") {
     // The interlock's Z stagger must ride on plan rings exactly as on fixed rings:
     // XY untouched, buried rings offset within +-amp, the join/surface rings pinned flat.
