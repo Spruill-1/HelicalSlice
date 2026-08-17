@@ -144,32 +144,36 @@ following decisions made in implementation — they refine the printed-T4/T5 bri
 
 B's boundary wedge remains the next consumer of the plan machinery.
 
-### B — true interior spiral (implemented, phase 4, 2026-08-15)
+### B — true interior spiral (implemented, phase 4; v2 single-arm 2026-08-17)
 
 Implemented as `continuous_shell_interior_spiral` (region bool, default OFF pending a print;
 requires adaptive beading and ≥4 buried rings; everything else keeps ring mode bit-identically).
-The geometry, settled by numeric experiment (a hand-derived comb twice contradicted itself):
 
-- **Both arms wind the same geometric direction** at pitch 2/revolution with a constant one-slot
-  offset — a return arm of opposite radial sense does NOT interleave (combs align at some
-  azimuths: moiré, double-cover + 2-slot gaps). The TRAVERSAL flips at the bore: arm A is walked
-  inward (θ increasing), arm B outward (θ decreasing).
-- **Full-span tangent arms, k-bead comb**: both arms run surface-to-surface; the comb then has
-  the SAME bead count and pitch as ring mode (no stretch — the squeeze doctrine holds), internal
-  gaps exactly one pitch at every azimuth, and the anticipated s→2s boundary wedge never opens
-  (the arms' merge revolutions fill it; measured max comb gap 1.0 pitch). Arm ends tangent-merge
-  onto the closed surface rings with clearance-based widths (floored at the 0.30 transitional
-  width) — no bead ever terminates in air, and the junction census collapses from ~k radial
-  jumps per layer to ≤1 (measured).
-- **The old "pairwise ring-morph parametrization" is unnecessary**: the spiral is generated
-  analytically in plan-slot space (fractional-slot interpolation over the C-full tables —
-  `frac_at_f`/`width_at_f`), shape-following on star sections for free.
-- **π-per-layer phase**: arm B's outer tip necessarily lands π from arm A's, so the spiral's
-  phase advances by π each layer — every layer's END azimuth coincides with the NEXT layer's
-  start (short joins), and the surface junctions form a two-start helix (per-column junction
-  density halved).
-- Interlock is N/A on the spiral interior (no ring parity; ignored, and it defaults 0 anyway
-  after the print A/B). Width-birth count transitions flow through the shared tables.
+**v1 (double-arm, 2026-08-15) printed and FAILED — the failure is the doc's most important
+lesson.** The connected-Fermat double arm (both arms same winding at pitch 2/rev, one-slot
+offset, traversal flipping at the bore) delivered the seam goal — junction census ~k → ≤1 per
+layer, fingernail-flat seam on the printed tube — but every radially adjacent interior pair is
+an armA↔armB interface deposited up to half the interior apart in time. Every intra-layer radial
+weld was a COLD JOINT, and both printed tubes delaminated into two interleaved helical sheets,
+peeling from the bore. **Thermal adjacency — when the neighbouring bead was laid — is a design
+constraint co-equal with geometry.** Ring mode never shows this because ring-adjacent beads land
+within ~1-3 revolutions.
+
+**v2: a SINGLE arm at pitch one slot per revolution.** Radially adjacent turns are consecutive
+revolutions of the same arm — deposited exactly one revolution apart, warmer than ring mode's
+own worst case. This also deletes the double arm's whole complexity budget: no interleave
+constraint (the moiré analysis), no U-turn, no s→2s wedge, no π-per-layer phase. What remains:
+
+- Comb has the SAME bead count and pitch as ring mode (no stretch); arm tips tangent-merge onto
+  the closed surface rings at clearance widths floored at the 0.30 transitional width — no bead
+  terminates in air; both junctions ride the (precessing) seam azimuth.
+- Both-ends-at-outer is unnecessary: the TRAVERSAL alternates per layer (even layers outer→bore,
+  odd layers bore→outer), so consecutive layers join bore-to-bore or outer-to-outer with short
+  hops — the existing reversal idea, applied inside the spiral assembly.
+- Generated analytically in plan-slot space (fractional-slot interpolation over the C-full
+  tables, `frac_at_f`/`width_at_f`); the historical "pairwise ring-morph parametrization" is
+  unnecessary. Interlock is N/A on the spiral interior. Width-birth count transitions flow
+  through the shared tables.
 
 ## 5. Seam-impact / risk summary
 

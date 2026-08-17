@@ -116,6 +116,22 @@ geometry whose boundary void rows act as tear initiation sites. Natural beats
 periodic. `continuous_shell_interlock` now defaults 0 (knob retained; n=1
 caveat, but microscopy, tear initiation, and surface all point the same way).
 
+## Phase B spiral: v1 double-arm print FAILED, v2 single-arm (2026-08-17)
+
+T5_spiral v1 (double-arm Fermat interior), two prints, pink TPU: the SEAM GOAL was
+met — the helical seam significantly shallower, barely registering on the
+fingernail — but both tubes delaminated into helical "sheets" peeling from the
+bore. Mechanism: in the double-arm interleave every radially adjacent interior
+pair is an armA/armB interface deposited up to half the interior apart in time —
+every intra-layer radial weld is a COLD JOINT. Ring mode's ~k junctions had a
+hidden virtue all along: ring-adjacent beads land within a few revolutions.
+**Thermal adjacency (when the neighbouring bead was laid) is a first-class design
+constraint, co-equal with geometry.** v2 rebuilds the interior as a SINGLE arm at
+one slot per revolution (radial neighbours = consecutive revolutions, one rev
+apart — warmer than ring mode's worst case) with per-layer traversal reversal for
+short alternating joins. Same seam benefit (2 junctions/layer), none of the
+double-arm machinery. `sliced/T5_spiral.gcode.3mf` regenerated as v2.
+
 ## C-full design brief (from this campaign)
 
 1. Retire ONE ring at a time via an angular wedge (locally odd counts) —

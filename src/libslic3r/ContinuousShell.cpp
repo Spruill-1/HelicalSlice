@@ -932,20 +932,23 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
         return spiral;
     }
 
-    // ---- Interior double-arm spiral assembly (phase B) ------------------------------
-    // The two grid rings are the closed surface loops; the buried interior is generated
-    // analytically from the plan. Both arms wind the same geometric direction at a
-    // constant one-slot offset (constant interleave); arm A is traversed inward (theta
-    // increasing) and arm B outward (theta decreasing) - the traversal flips at the
-    // bore. Arm tips tangent-merge onto the surface rings (no terminations in air);
-    // merge-zone widths equal the radial clearance, floored at the transitional width.
-    // The U-turn skips arm B's innermost half revolution (the s->2s wedge), closed by
-    // widening arm A's bordering turn. The whole spiral's phase advances by pi per
-    // layer so each layer's END azimuth coincides with the NEXT layer's start (short
-    // joins; the surface junctions form a two-start helix, halving per-column density).
+    // ---- Interior single-arm spiral assembly (phase B, v2) --------------------------
+    // The two grid rings are the closed surface loops; the buried interior is ONE
+    // spiral arm at a pitch of one slot per revolution, generated analytically from
+    // the plan. Radially adjacent turns are consecutive revolutions of the same arm,
+    // so every intra-layer radial weld lands against a bead deposited only ONE
+    // revolution earlier - warmer than ring mode's own worst case. (The first,
+    // double-arm implementation interleaved two arms; every radial interface was then
+    // an interface between beads deposited up to half the interior apart in time, and
+    // the printed tubes delaminated into two helical sheets. Thermal adjacency is a
+    // design constraint co-equal with geometry.) Arm tips tangent-merge onto the
+    // surface rings at clearance widths floored at the transitional width - no bead
+    // terminates in air. The traversal direction alternates per layer (even layers
+    // outer -> bore, odd layers bore -> outer), so consecutive layers join bore-to-
+    // bore or outer-to-outer with short hops at the (precessing) seam azimuth.
     if (plan != nullptr && plan->spiral && has_bore && grid.size() == 2 && plan->n_slots >= 6) {
         const double S   = double(plan->n_slots - 1);        // slot span, surface to surface
-        const double th0 = seam_theta + M_PI * double(layer_index);   // pi/layer phase: end meets next start
+        const double th0 = seam_theta;                       // both junctions ride the seam column
         auto sp_point = [&](double v, double th) -> Point {
             const double ro = plan->r_out.sample_linear(th);
             const double rb = plan->r_bore.sample_linear(th);
@@ -958,61 +961,53 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
             const double rb = plan->r_bore.sample_linear(th);
             return (plan->frac_at(1, th) - plan->frac_at(0, th)) * (ro - rb) * SCALING_FACTOR;
         };
-        auto arm_width = [&](double v, double th, bool is_arm_A) -> float {
-            const double p = pitch_mm(th);
+        auto arm_width = [&](double v, double th) -> float {
             double w = plan->width_at_f(std::clamp(v, 1.0, S - 1.0), th);
             const double d = std::min(v, S - v);             // slots to the nearest surface centre
             if (d < 1.0)
-                w = std::min(w, std::max(double(plan->w_term), d * p));   // tangent-merge clearance
-            if (is_arm_A && v > S - 2.0) {
-                // Arm B's innermost crossing at this azimuth (B is capped at S-1 by the
-                // U-turn); if none sits between us and the bore, widen to cover the gap
-                // (bounded at 1.4 pitch - a safety that rarely engages with the
-                // full-span comb, whose gaps stay at one pitch).
-                const double braw = 1.0 + (th - th0) / M_PI;
-                const double vb   = (S - 1.0) - std::fmod(std::fmod((S - 1.0) - braw, 2.0) + 2.0, 2.0);
-                if (vb < v)
-                    w = std::min(1.4 * p, w + std::max(0.0, (S - v) * p - p));
-            }
+                w = std::min(w, std::max(double(plan->w_term), d * pitch_mm(th)));   // tangent-merge clearance
             return std::round(float(w) / 0.05f) * 0.05f;
         };
         // Sampling density per revolution follows the buried-ring chord policy.
         const double r_mid = 0.5 * (plan->r_out.sample_linear(th0) + plan->r_bore.sample_linear(th0));
         const size_t n_rev = std::clamp<size_t>(size_t(std::llround(2.0 * M_PI * r_mid / chord)), size_t(64), size_t(512));
-        const double dth   = 2.0 * M_PI / double(n_rev);
-        auto gen_arm = [&](double v_offset, double th_a, double th_b, bool is_A,
-                           std::vector<Point> &pts, std::vector<float> &ws) {
-            const int n = std::max(2, int(std::ceil((th_b - th_a) / dth)));
-            pts.reserve(size_t(n) + 1);
-            ws.reserve(size_t(n) + 1);
-            for (int i = 0; i <= n; ++i) {
-                const double th = th_a + (th_b - th_a) * double(i) / double(n);
-                const double v  = std::clamp((th - th0) / M_PI + v_offset, 0.0, S);
-                pts.push_back(sp_point(v, th));
-                ws.push_back(arm_width(v, th, is_A));
-            }
-        };
-        std::vector<Point> a_pts, b_pts;
-        std::vector<float> a_ws, b_ws;
-        gen_arm(0.0, th0, th0 + S * M_PI, true, a_pts, a_ws);                    // arm A, inward
-        gen_arm(1.0, th0 - M_PI, th0 + (S - 2.0) * M_PI, false, b_pts, b_ws);    // arm B, generated inward...
-        std::reverse(b_pts.begin(), b_pts.end());                                // ...traversed outward
-        std::reverse(b_ws.begin(), b_ws.end());
-
-        // Surface loops re-anchored to the spiral's own azimuths: ring 0 at th0 (arm A
-        // departs there), the bore at arm A's arrival azimuth. Surface widths come from
-        // the RING tables' surface columns (the truncated 2-ring grid does not index
-        // the plan's slot space directly).
+        const int    n_arm = std::max(2, int(std::ceil(S * double(n_rev))));
+        std::vector<Point> arm_pts;
+        std::vector<float> arm_ws;
+        arm_pts.reserve(size_t(n_arm) + 1);
+        arm_ws.reserve(size_t(n_arm) + 1);
+        for (int i = 0; i <= n_arm; ++i) {
+            const double v  = S * double(i) / double(n_arm);       // one slot per revolution
+            const double th = th0 + v * 2.0 * M_PI;
+            arm_pts.push_back(sp_point(v, th));
+            arm_ws.push_back(arm_width(v, th));
+        }
+        // Surface widths come from the RING tables' surface columns (the truncated
+        // 2-ring grid does not index the plan's slot space directly).
         auto surf_w = [&](size_t slot, const Point &p) -> float {
             const Vec2d d = p.cast<double>() - plan->centre;
             return plan->width_at(slot, std::atan2(d.y(), d.x()));
         };
-        anchor_to_angle(grid[0], th0);
-        anchor_to_angle(grid[1], th0 + S * M_PI);
-        for (const Point &p : grid[0]) { spiral.points.push_back(p); flag(false); zoff(0); pw(surf_w(0, p)); }
-        for (size_t i = 0; i < a_pts.size(); ++i) { spiral.points.push_back(a_pts[i]); flag(true); zoff(0); pw(a_ws[i]); }
-        for (const Point &p : grid[1]) { spiral.points.push_back(p); flag(false); zoff(0); pw(surf_w(plan->n_slots - 1, p)); }
-        for (size_t i = 0; i < b_pts.size(); ++i) { spiral.points.push_back(b_pts[i]); flag(true); zoff(0); pw(b_ws[i]); }
+        anchor_to_angle(grid[0], th0);                       // both tips land at th0 (S integer revs)
+        anchor_to_angle(grid[1], th0);
+        auto emit_ring = [&](size_t gi, size_t slot) {
+            for (const Point &p : grid[gi]) { spiral.points.push_back(p); flag(false); zoff(0); pw(surf_w(slot, p)); }
+        };
+        auto emit_arm = [&](bool outward) {
+            if (outward)
+                for (size_t i = arm_pts.size(); i-- > 0; ) { spiral.points.push_back(arm_pts[i]); flag(true); zoff(0); pw(arm_ws[i]); }
+            else
+                for (size_t i = 0; i < arm_pts.size(); ++i) { spiral.points.push_back(arm_pts[i]); flag(true); zoff(0); pw(arm_ws[i]); }
+        };
+        if ((layer_index & 1) == 0) {
+            emit_ring(0, 0);                                 // outer -> in -> bore
+            emit_arm(false);
+            emit_ring(1, plan->n_slots - 1);
+        } else {
+            emit_ring(1, plan->n_slots - 1);                 // bore -> out -> outer
+            emit_arm(true);
+            emit_ring(0, 0);
+        }
         return spiral;
     }
 
