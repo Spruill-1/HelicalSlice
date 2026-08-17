@@ -1653,15 +1653,18 @@ TEST_CASE("Interior spiral declines below four buried rings", "[ContinuousShell]
         REQUIRE(a.pts[i] == b.pts[i]);
 }
 
-TEST_CASE("Interior spiral carries a graded incommensurate Z-wave", "[ContinuousShell]") {
-    // v4: a monotone spiral offsets radial neighbours by only h/k (smooth laminate
-    // interfaces - three printed revisions all cleaved along them), so the buried arm
-    // carries an intrinsic Z-wave A*sin(2*pi*g*v), A = quarter layer, g = golden-ratio
-    // conjugate. Assert: (a) the wave is real and bounded to the interlock's proven
-    // envelope, (b) surfaces and the tangent-merge zones stay pinned to the ramp,
-    // (c) the wave is continuous point to point, (d) it is suppressed on layer 0,
-    // (e) along one ray the radial-neighbour offsets are GRADED - somewhere strongly
-    // staggered, somewhere near-coplanar - not a uniform periodic alternation.
+TEST_CASE("Interior spiral carries a per-revolution incommensurate Z-stagger", "[ContinuousShell]") {
+    // v5: a monotone spiral offsets radial neighbours by only h/k (smooth laminate
+    // interfaces - three printed revisions all cleaved along them), so each buried
+    // revolution holds one constant Z level from the golden low-discrepancy sequence
+    // in [-h/2, h/2], stepped over a short arc past the seam azimuth. (The v4 sine
+    // printed peel-free - mechanism confirmed - but oscillating interdigitation depth
+    // left organized void rows; ring mode's interfaces hold one constant depth each.)
+    // Assert: (a) the stagger is real and bounded to half a layer, (b) surfaces and
+    // the tangent-merge zones stay pinned to the ramp, (c) it is continuous point to
+    // point, (d) it is suppressed on layer 0, (e) on rays clear of the step zone the
+    // adjacent-interface depths are the golden gaps (~0.38 h / 0.62 h - never
+    // coplanar) and (f) each interface's level is CONSTANT across those rays.
     Flow flow(0.5f, 0.25f, 0.5f);
     const double sp = flow.spacing();
     const double layer_height = 0.25;
@@ -1687,13 +1690,13 @@ TEST_CASE("Interior spiral carries a graded incommensurate Z-wave", "[Continuous
 
     const std::vector<Point3> pts = build_raw_z(4);
     REQUIRE(pts.size() > 500);
-    const coord_t amp = coord_t(std::llround(scale_(layer_height / 4.0)));
+    const coord_t amp = coord_t(std::llround(scale_(layer_height / 2.0)));
 
     // (a) real and bounded
     coord_t z_reach = 0;
     for (const Point3 &q : pts)
         z_reach = std::max(z_reach, coord_t(std::abs(q.z())));
-    REQUIRE(z_reach > amp * 4 / 5);
+    REQUIRE(z_reach > amp * 7 / 10);
     REQUIRE(z_reach <= amp + 2);
 
     // (b) surface rings and merge-adjacent radii pinned to the ramp
@@ -1721,33 +1724,54 @@ TEST_CASE("Interior spiral carries a graded incommensurate Z-wave", "[Continuous
         z0 = std::max(z0, coord_t(std::abs(q.z())));
     REQUIRE(z0 == 0);
 
-    // (e) graded offsets along one ray: cluster crossings by radius, keep buried
-    // full-envelope clusters, and look at adjacent-cluster Z differences.
-    const double az = 0.7;
-    std::vector<std::pair<double, coord_t>> ray;    // (r_mm, z)
-    for (const Point3 &q : pts) {
-        const Vec2d d = Point(q.x(), q.y()).cast<double>();
-        double a = std::atan2(d.y(), d.x()) - az;
-        a = std::atan2(std::sin(a), std::cos(a));
-        if (std::abs(a) < 0.02)
-            ray.emplace_back(d.norm() * SCALING_FACTOR, q.z());
-    }
-    std::sort(ray.begin(), ray.end());
-    std::vector<coord_t> ring_z;
-    for (size_t i = 0; i < ray.size(); ++i)
-        if (i == 0 || ray[i].first - ray[i - 1].first > 0.5 * sp) {
-            if (ray[i].first > r_min + 2.5 * sp && ray[i].first < r_max - 2.5 * sp)
-                ring_z.push_back(ray[i].second);
+    // (e)+(f) staircase structure: on several rays, cluster crossings by radius and
+    // keep buried full-envelope clusters. A ray clear of the seam step zone must see
+    // adjacent-interface depths inside the golden-gap window [0.3 h, 0.7 h] (never
+    // coplanar), and the per-interface levels must be identical across such rays
+    // (constant depth around the circumference). The step zone (0.08 of a revolution)
+    // plus ray width can spoil at most ~2 of the 6 azimuths.
+    auto ray_levels = [&](double az) {
+        std::vector<std::pair<double, coord_t>> ray;    // (r_mm, z)
+        for (const Point3 &q : pts) {
+            const Vec2d d = Point(q.x(), q.y()).cast<double>();
+            double a = std::atan2(d.y(), d.x()) - az;
+            a = std::atan2(std::sin(a), std::cos(a));
+            if (std::abs(a) < 0.02)
+                ray.emplace_back(d.norm() * SCALING_FACTOR, q.z());
         }
-    REQUIRE(ring_z.size() >= 5);
-    coord_t d_max = 0, d_min = std::numeric_limits<coord_t>::max();
-    for (size_t i = 1; i < ring_z.size(); ++i) {
-        const coord_t d = coord_t(std::abs(ring_z[i] - ring_z[i - 1]));
-        d_max = std::max(d_max, d);
-        d_min = std::min(d_min, d);
+        std::sort(ray.begin(), ray.end());
+        std::vector<std::pair<double, coord_t>> rings;  // one (r, z) per crossing
+        for (size_t i = 0; i < ray.size(); ++i)
+            if (i == 0 || ray[i].first - ray[i - 1].first > 0.5 * sp) {
+                if (ray[i].first > r_min + 2.5 * sp && ray[i].first < r_max - 2.5 * sp)
+                    rings.push_back(ray[i]);
+            }
+        return rings;
+    };
+    const coord_t gap_lo = coord_t(std::llround(scale_(0.30 * layer_height)));
+    const coord_t gap_hi = coord_t(std::llround(scale_(0.70 * layer_height)));
+    std::vector<std::vector<std::pair<double, coord_t>>> clean;
+    for (int k = 0; k < 6; ++k) {
+        std::vector<std::pair<double, coord_t>> rings = ray_levels(-M_PI + (k + 0.5) * (2.0 * M_PI / 6.0));
+        if (rings.size() < 5)
+            continue;
+        bool ok = true;
+        for (size_t i = 1; i < rings.size() && ok; ++i) {
+            const coord_t d = coord_t(std::abs(rings[i].second - rings[i - 1].second));
+            ok = d >= gap_lo && d <= gap_hi;
+        }
+        if (ok)
+            clean.push_back(std::move(rings));
     }
-    REQUIRE(d_max > amp);            // a strongly staggered pair exists (up to ~1.86*amp)
-    REQUIRE(d_min < amp / 2);        // and a near-coplanar pair - graded, not periodic
+    REQUIRE(clean.size() >= 4);                       // (e) golden gaps on rays off the step zone
+    // (f) constant per revolution: outside the short step arcs and the merge tapers
+    // the stagger holds one exact level, so the vast majority of consecutive points
+    // share their z verbatim (a sine would drift at nearly every point).
+    size_t same = 0;
+    for (size_t i = 1; i < pts.size(); ++i)
+        if (std::abs(pts[i].z() - pts[i - 1].z()) <= 2)
+            ++same;
+    REQUIRE(double(same) >= 0.70 * double(pts.size() - 1));
 }
 
 TEST_CASE("Adaptive beading is safe on generic star tube shapes", "[ContinuousShell]") {

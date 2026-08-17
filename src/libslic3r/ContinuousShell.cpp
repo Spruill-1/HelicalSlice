@@ -930,7 +930,7 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
         return spiral;
     }
 
-    // ---- Interior single-arm spiral assembly (phase B, v4) --------------------------
+    // ---- Interior single-arm spiral assembly (phase B, v5) --------------------------
     // The two grid rings are the closed surface loops; the buried interior is ONE
     // spiral arm at a pitch of one slot per revolution, generated analytically from
     // the plan. Arm tips tangent-merge onto the surface rings at clearance widths
@@ -940,34 +940,55 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
     // two-layer voids). The inter-layer join is one radial diagonal across the wall,
     // through material, at the precessing seam azimuth.
     //
-    // v4 - the intrinsic Z-wave. Three printed revisions (double-arm, single-arm
-    // reversing, single-arm fixed) all delaminated along helical interfaces; the
-    // peel survived fixing both cold arm-to-arm joints (v2) and reverse-join
-    // doubling (v3), so neither was the root cause. What ring mode has and every
-    // spiral traversal lacks is RADIAL INTERDIGITATION: the Fermat ring ORDER
-    // scrambles the arc-length ramp fraction across radial neighbours - adjacent
-    // rings sit up to most of a layer apart in Z, varying with angle (the natural
-    // bricklaying the interlock A/B print showed tear-proofs the wall) - while a
-    // monotone spiral offsets radial neighbours by a near-constant h/k. Its
-    // interfaces are smooth laminate planes, and the printed tubes cleave along
-    // them, the peel front tracking the seam helix. The wave restores the
-    // interdigitation the monotone ordering removed: buried arm points get
-    // z = A*sin(2*pi*g*v), v the winding coordinate (one slot per revolution) and
-    // g the golden-ratio conjugate, with A a quarter layer (the brick interlock's
-    // print-proven Z envelope). Radial neighbours (v, v+1) then differ by up to
-    // ~0.47 h with the offset GRADED and INCOMMENSURATE around the circumference
-    // (period 1/g of a revolution), so no repeating interface geometry appears -
-    // the tear-initiation failure of the explicit periodic interlock. The wave
-    // tapers to zero over one revolution approaching each tangent merge (surfaces
-    // stay pinned to the ramp) and is suppressed on the first layer.
+    // The intrinsic Z-stagger (v4 sine -> v5 staircase). Three printed revisions
+    // (double-arm, single-arm reversing, single-arm fixed) all delaminated along
+    // helical interfaces; the peel survived fixing both cold arm-to-arm joints
+    // (v2) and reverse-join doubling (v3), so neither was the root cause. What
+    // ring mode has and every spiral traversal lacks is RADIAL INTERDIGITATION:
+    // the Fermat ring ORDER scrambles the arc-length ramp fraction across radial
+    // neighbours (the natural bricklaying the interlock A/B print showed
+    // tear-proofs the wall), while a monotone spiral offsets radial neighbours by
+    // a near-constant h/k - smooth laminate planes the printed tubes cleaved
+    // along. v4 restored interdigitation with z = (h/4)*sin(2*pi*g*v) and the
+    // printed tube did NOT peel (mechanism confirmed), but its section showed
+    // organized void rows: a sinusoid makes the interdigitation depth OSCILLATE
+    // along each interface, so every interface sweeps through the void-producing
+    // intermediate and coplanar configurations somewhere on the circumference.
+    // Ring mode's interfaces hold one CONSTANT depth all the way around (both
+    // neighbours' ramp fractions advance together), each interface a different
+    // depth. v5 copies exactly that: each revolution holds one constant level
+    // from the golden low-discrepancy sequence in [-h/2, +h/2] (constant per
+    // interface, scattered across interfaces), stepped over a short smoothstep
+    // arc just past the seam azimuth - where ring mode's own order boundaries
+    // live. Adjacent-interface depths come out as 0.38 h or 0.62 h (golden gap
+    // sizes): never coplanar, mean ~ ring mode's own h/2. The stagger tapers to
+    // zero over one revolution approaching each tangent merge (surfaces stay
+    // pinned to the ramp) and is suppressed on the first layer.
     if (plan != nullptr && plan->spiral && has_bore && grid.size() == 2 && plan->n_slots >= 6) {
         const double S   = double(plan->n_slots - 1);        // slot span, surface to surface
         const double th0 = seam_theta;                       // both junctions ride the seam column
         const coord_t wamp = (layer_index == 0) ? 0 : spiral_wave_amp;
         auto arm_wave = [&](double v) -> coord_t {
             const double g_conj = 0.6180339887498949;        // golden-ratio conjugate
-            const double env    = std::clamp(std::min(v, S - v) - 1.0, 0.0, 1.0);
-            return coord_t(std::llround(double(wamp) * env * std::sin(2.0 * M_PI * g_conj * v)));
+            // Zero through the tangent-merge clearance zone (d < 1), full strength half a
+            // revolution later: a slower taper leaves half the interior of a 7-bead wall
+            // weakly staggered (only ~2 of 5 interior revolutions at full depth).
+            const double env    = std::clamp((std::min(v, S - v) - 1.0) * 2.0, 0.0, 1.0);
+            auto level = [&](double j) -> double {           // one constant level per revolution
+                double f = (j + 1.0) * g_conj;
+                f -= std::floor(f);
+                return 2.0 * f - 1.0;                        // low-discrepancy in [-1, 1)
+            };
+            const double j = std::floor(v);
+            const double u = v - j;                          // revolution fraction past the seam azimuth
+            constexpr double W = 0.08;                       // step ramp width, fraction of a revolution
+            double lv = level(j);
+            if (u < W) {
+                const double t = u / W;
+                const double s = t * t * (3.0 - 2.0 * t);    // smoothstep from the previous level
+                lv = level(j - 1.0) * (1.0 - s) + lv * s;
+            }
+            return coord_t(std::llround(double(wamp) * env * lv));
         };
         auto sp_point = [&](double v, double th) -> Point {
             const double ro = plan->r_out.sample_linear(th);
@@ -1849,11 +1870,12 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     const double interlock_ratio = (config != nullptr) ? config->continuous_shell_interlock.value / 100.0 : 0.0;
     const coord_t interlock_amp  = coord_t(std::llround(scale_(interlock_ratio * layer_height / 4.0)));
 
-    // Phase B v4: intrinsic spiral Z-wave amplitude - a quarter layer, the brick
-    // interlock's print-proven Z envelope (see the spiral branch of spiralize_rings).
-    // Deliberately NOT a knob: unlike ring mode, the spiral interior has no natural
-    // bricklaying, so it needs the interdigitation unconditionally.
-    const coord_t spiral_wave_amp = coord_t(std::llround(scale_(layer_height / 4.0)));
+    // Phase B: intrinsic spiral Z-stagger amplitude - half a layer, matching ring
+    // mode's own bead-Z spread (its ramp fractions span a full layer across the
+    // wall; see the spiral branch of spiralize_rings). Deliberately NOT a knob:
+    // unlike ring mode, the spiral interior has no natural bricklaying, so it
+    // needs the interdigitation unconditionally.
+    const coord_t spiral_wave_amp = coord_t(std::llround(scale_(layer_height / 2.0)));
 
     // A2 - connector spread: distribute the per-ring surface<->interior handoffs around the
     // circumference instead of stacking them into one deep seam groove (passed to

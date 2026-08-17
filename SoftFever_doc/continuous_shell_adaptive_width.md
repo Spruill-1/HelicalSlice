@@ -180,16 +180,20 @@ constraint (the moiré analysis), no U-turn, no s→2s wedge, no π-per-layer ph
   tables, `frac_at_f`/`width_at_f`); the historical "pairwise ring-morph parametrization" is
   unnecessary. The explicit interlock knob is N/A on the spiral interior. Width-birth count
   transitions flow through the shared tables.
-- **v4 — the intrinsic Z-wave (2026-08-17):** buried arm points carry z = (h/4)·sin(2πg·v),
-  g the golden-ratio conjugate, v the winding coordinate — restoring the interdigitation the
-  monotone ordering removed. Radial-neighbour offsets reach ~0.47 h, graded and incommensurate
-  around the circumference (period 1/g rev), so no repeating interface geometry appears — the
-  tear-initiation failure mode of the explicit periodic interlock. Amplitude reuses the
-  interlock's print-proven quarter-layer envelope and is deliberately not a knob (the spiral has
-  no natural bricklaying to fall back on). The wave tapers to zero over one revolution before
-  each tangent merge, surfaces stay pinned to the ramp, and layer 0 is flat. XY byte-identical
-  to v3 — a single-variable print experiment: peel gone → mechanism confirmed, spiral saved;
-  peel persists → the interior spiral is retired.
+- **v4 — the intrinsic Z-wave (2026-08-17): printed, NO PEEL — mechanism confirmed.** Buried
+  arm points carried z = (h/4)·sin(2πg·v), g the golden-ratio conjugate — a Z-only change, and
+  the tube held. But the section showed organized void rows: a sinusoid makes the
+  interdigitation depth oscillate ALONG each interface, so every interface passes through the
+  void-producing intermediate/coplanar configurations somewhere. Ring mode's interfaces hold
+  one constant depth each (both neighbours' ramp fractions advance together).
+- **v5 — the per-revolution staircase (2026-08-17):** each buried revolution holds one constant
+  Z level from the golden low-discrepancy sequence in [−h/2, +h/2] (amplitude = ring mode's own
+  bead-Z spread), stepped over a 0.08-rev smoothstep arc just past the seam azimuth — where
+  ring mode's own order boundaries live. Adjacent-interface depths are the golden gaps, always
+  0.38 h or 0.62 h: never coplanar, constant per interface, scattered across interfaces — ring
+  mode's full property set inside a spiral. Not a knob (the spiral has no natural bricklaying
+  to fall back on); tapers out over one revolution before each tangent merge; surfaces pinned;
+  layer 0 flat. Prediction: void rows collapse to ring-mode pinpricks with peel still gone.
 
 ## 5. Seam-impact / risk summary
 

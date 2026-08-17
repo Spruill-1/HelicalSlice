@@ -195,6 +195,31 @@ to the wave amplitude. So the v4-vs-v3 print comparison carries a small
 width-plan delta in addition to the wave; the qualitative verdict (peel gone or
 not) is robust to it. v4 predicts 17.34 g (the stale v3 build predicted 16.75 g).
 
+## Phase B v4 print: NO PEEL - mechanism confirmed; sine trades peel for void rows (2026-08-17)
+
+The v4 tube did not delaminate: the first spiral tube that holds together, on a
+Z-only change. The interdigitation mechanism is confirmed by construction -
+three failures and one fix all isolate the same variable. Seam stays minimal.
+
+But the section shows MORE voids than ring mode, in organized rows, and less
+visible inter-layer stagger. Diagnosis: a sinusoid makes the interdigitation
+depth OSCILLATE along each interface (period 1/g rev), so every interface
+sweeps through the void-producing intermediate and coplanar configurations
+somewhere on its circumference. Ring mode never does this: both radial
+neighbours' ramp fractions advance together, so each interface holds ONE
+constant depth all the way around, a different depth per interface. Constant
+along the interface + scattered across interfaces is the full property set;
+v4 delivered only the second half.
+
+v5 copies ring mode's structure exactly: each buried revolution holds one
+constant Z level from the golden low-discrepancy sequence in [-h/2, +h/2]
+(amplitude raised from h/4 to h/2 = ring mode's own bead-Z spread), stepped
+over a 0.08-revolution smoothstep arc just past the seam azimuth - where ring
+mode's own order boundaries live. Golden gaps make adjacent-interface depths
+always 0.38 h or 0.62 h: never coplanar, mean ~ ring parity. Prediction: void
+rows collapse to ring-mode pinpricks, no peel, seam unchanged. Still Z-only
+(XY identical to v3/v4 slices).
+
 ## C-full design brief (from this campaign)
 
 1. Retire ONE ring at a time via an angular wedge (locally odd counts) —
