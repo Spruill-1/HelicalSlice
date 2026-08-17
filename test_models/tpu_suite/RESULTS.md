@@ -132,6 +132,21 @@ apart — warmer than ring mode's worst case) with per-layer traversal reversal 
 short alternating joins. Same seam benefit (2 junctions/layer), none of the
 double-arm machinery. `sliced/T5_spiral.gcode.3mf` regenerated as v2.
 
+## Phase B v2 print: seam goal held, reverse-join doubling struck (2026-08-17)
+
+The single-arm v2 tube printed with the same excellent shallow seam, but the
+cross-section showed LARGE staggered bowtie voids in a brick lattice. Mechanism:
+v2 alternated the traversal direction per layer for short joins - and under the
+arc-length Z ramp a reversed layer puts the same spatial bead at the OPPOSITE
+ramp fraction, so consecutive layers' beads pair up with a two-layer void
+between pairs, the pairing phase shifting with radius (the staggered lattice).
+This is the codebase's own documented "reverse-join doubling" - the reason
+annular ring mode never reverses - reintroduced by the spiral's reversal. v3
+fixes the traversal direction (outer->bore every layer); the inter-layer join
+becomes one radial in-material diagonal across the wall at the precessing seam
+azimuth (single event per layer; total radial travel equal to ring mode's
+per-ring hops combined). `sliced/T5_spiral.gcode.3mf` regenerated as v3.
+
 ## C-full design brief (from this campaign)
 
 1. Retire ONE ring at a time via an angular wedge (locally odd counts) —

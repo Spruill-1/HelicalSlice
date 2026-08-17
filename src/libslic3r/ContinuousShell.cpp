@@ -941,9 +941,14 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
     // the printed tubes delaminated into two helical sheets. Thermal adjacency is a
     // design constraint co-equal with geometry.) Arm tips tangent-merge onto the
     // surface rings at clearance widths floored at the transitional width - no bead
-    // terminates in air. The traversal direction alternates per layer (even layers
-    // outer -> bore, odd layers bore -> outer), so consecutive layers join bore-to-
-    // bore or outer-to-outer with short hops at the (precessing) seam azimuth.
+    // terminates in air. The traversal direction is FIXED (outer -> bore, every
+    // layer): a per-layer reversal was tried and reintroduced the documented
+    // "reverse-join doubling" - under the arc-length Z ramp a reversed layer puts the
+    // same spatial bead at the opposite ramp fraction, pairing consecutive layers'
+    // beads with a two-layer void between pairs (printed as a staggered bowtie-void
+    // lattice). The inter-layer join is instead one radial diagonal across the wall,
+    // through material, at the precessing seam azimuth - a single event per layer
+    // with the same total radial travel as ring mode's per-ring hops combined.
     if (plan != nullptr && plan->spiral && has_bore && grid.size() == 2 && plan->n_slots >= 6) {
         const double S   = double(plan->n_slots - 1);        // slot span, surface to surface
         const double th0 = seam_theta;                       // both junctions ride the seam column
@@ -991,21 +996,9 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
         auto emit_ring = [&](size_t gi, size_t slot) {
             for (const Point &p : grid[gi]) { spiral.points.push_back(p); flag(false); zoff(0); pw(surf_w(slot, p)); }
         };
-        auto emit_arm = [&](bool outward) {
-            if (outward)
-                for (size_t i = arm_pts.size(); i-- > 0; ) { spiral.points.push_back(arm_pts[i]); flag(true); zoff(0); pw(arm_ws[i]); }
-            else
-                for (size_t i = 0; i < arm_pts.size(); ++i) { spiral.points.push_back(arm_pts[i]); flag(true); zoff(0); pw(arm_ws[i]); }
-        };
-        if ((layer_index & 1) == 0) {
-            emit_ring(0, 0);                                 // outer -> in -> bore
-            emit_arm(false);
-            emit_ring(1, plan->n_slots - 1);
-        } else {
-            emit_ring(1, plan->n_slots - 1);                 // bore -> out -> outer
-            emit_arm(true);
-            emit_ring(0, 0);
-        }
+        emit_ring(0, 0);                                     // outer -> in -> bore, every layer
+        for (size_t i = 0; i < arm_pts.size(); ++i) { spiral.points.push_back(arm_pts[i]); flag(true); zoff(0); pw(arm_ws[i]); }
+        emit_ring(1, plan->n_slots - 1);
         return spiral;
     }
 

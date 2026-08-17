@@ -167,9 +167,12 @@ constraint (the moiré analysis), no U-turn, no s→2s wedge, no π-per-layer ph
 - Comb has the SAME bead count and pitch as ring mode (no stretch); arm tips tangent-merge onto
   the closed surface rings at clearance widths floored at the 0.30 transitional width — no bead
   terminates in air; both junctions ride the (precessing) seam azimuth.
-- Both-ends-at-outer is unnecessary: the TRAVERSAL alternates per layer (even layers outer→bore,
-  odd layers bore→outer), so consecutive layers join bore-to-bore or outer-to-outer with short
-  hops — the existing reversal idea, applied inside the spiral assembly.
+- Traversal is FIXED outer→bore every layer (v3, 2026-08-17): the v2 per-layer reversal printed
+  a staggered bowtie-void lattice — reverse-join doubling, the codebase's own documented reason
+  annular ring mode never reverses (a reversed layer puts each spatial bead at the opposite
+  arc-ramp fraction, pairing consecutive layers' beads with a two-layer void between pairs).
+  The inter-layer join is one radial in-material diagonal across the wall at the precessing
+  seam azimuth — a single event per layer, total radial travel equal to ring mode's hops.
 - Generated analytically in plan-slot space (fractional-slot interpolation over the C-full
   tables, `frac_at_f`/`width_at_f`); the historical "pairwise ring-morph parametrization" is
   unnecessary. Interlock is N/A on the spiral interior. Width-birth count transitions flow

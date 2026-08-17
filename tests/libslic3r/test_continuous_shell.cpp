@@ -1548,9 +1548,10 @@ TEST_CASE("Interior spiral replaces buried rings with a continuous double-arm sp
 
 TEST_CASE("Interior spiral holds across a taper and keeps short layer joins", "[ContinuousShell]") {
     // Across a thinning wall the spiral's slot count follows the ring plan's count law
-    // (single-step), the junction census stays collapsed on every layer, and - because
-    // the spiral phase advances by pi per layer so each layer's end azimuth meets the
-    // next layer's start - inter-layer joins stay short the whole way.
+    // (single-step) and the junction census stays collapsed on every layer. The
+    // traversal is fixed outer->bore (reversal causes reverse-join doubling), so the
+    // inter-layer join is a radial in-material crossing of the wall: bounded by the
+    // wall thickness plus the seam's angular drift.
     Flow flow(0.5f, 0.25f, 0.5f);
     const double sp = flow.spacing();
     PrintRegionConfig cfg;
@@ -1570,7 +1571,7 @@ TEST_CASE("Interior spiral holds across a taper and keeps short layer joins", "[
         const Point3 first = paths.front()->polyline.points.front();
         if (have_prev) {
             const double gap = std::hypot(double(first.x() - prev_last.x()), double(first.y() - prev_last.y())) * SCALING_FACTOR;
-            REQUIRE(gap < 3.0);
+            REQUIRE(gap < t_units * sp + 1.0);       // one radial wall crossing, plus drift
         }
         prev_last = paths.back()->polyline.points.back();
         have_prev = true;
