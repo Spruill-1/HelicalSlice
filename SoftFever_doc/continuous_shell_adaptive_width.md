@@ -186,14 +186,23 @@ constraint (the moiré analysis), no U-turn, no s→2s wedge, no π-per-layer ph
   interdigitation depth oscillate ALONG each interface, so every interface passes through the
   void-producing intermediate/coplanar configurations somewhere. Ring mode's interfaces hold
   one constant depth each (both neighbours' ramp fractions advance together).
-- **v5 — the per-revolution staircase (2026-08-17):** each buried revolution holds one constant
-  Z level from the golden low-discrepancy sequence in [−h/2, +h/2] (amplitude = ring mode's own
-  bead-Z spread), stepped over a 0.08-rev smoothstep arc just past the seam azimuth — where
-  ring mode's own order boundaries live. Adjacent-interface depths are the golden gaps, always
-  0.38 h or 0.62 h: never coplanar, constant per interface, scattered across interfaces — ring
-  mode's full property set inside a spiral. Not a knob (the spiral has no natural bricklaying
-  to fall back on); tapers out over one revolution before each tangent merge; surfaces pinned;
-  layer 0 flat. Prediction: void rows collapse to ring-mode pinpricks with peel still gone.
+- **v5 — the per-revolution staircase (2026-08-17): printed MIXED.** Constant golden levels per
+  revolution brought ring-mode pinpricks back in part of the section — the constant-depth
+  principle is right — but the wall still split along some interfaces. The flaw was
+  quantitative: levels were designed on the staircase alone, and the ramp's own ~0.13 h/rev
+  tilt shifted every designed 0.38/0.62 h gap to an effective ~0.25 h — uniformly T-junction
+  grade, the interlock's documented tear geometry.
+- **v6 — total-offset design (2026-08-17):** golden level targets are specified on the TOTAL
+  radial-neighbour offset; the emitted staircase subtracts the accumulated ramp tilt (per-rev
+  estimate from plan radii) and wraps mod h (offsets are nest-equivalent mod h), so every
+  physical gap is a true golden gap — effective 0.38 h from coplanar, verified at 98% of
+  measured gaps in the emitted G-code (0.096 mm at h = 0.25). Envelope tightened to a quarter
+  revolution of the merges. Steps stay simultaneous at the seam — scattering was analyzed and
+  rejected: on one continuous arm a revolution holds its predecessor's level until its own
+  step, so scattered steps make whole arcs of every interface exactly coplanar. Residual
+  defect: a short zero-crossing ribbon inside the 0.08-rev step window at the seam column
+  (already sacrificial; far milder than ring mode's k-junction column). Still Z-only — XY
+  identical across the whole v3→v6 chain.
 
 ## 5. Seam-impact / risk summary
 

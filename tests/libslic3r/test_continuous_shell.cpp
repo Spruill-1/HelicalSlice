@@ -1708,8 +1708,8 @@ TEST_CASE("Interior spiral carries a per-revolution incommensurate Z-stagger", "
     }
     for (const Point3 &q : pts) {
         const double r = Point(q.x(), q.y()).cast<double>().norm() * SCALING_FACTOR;
-        if (r > r_max - 0.6 * sp || r < r_min + 0.6 * sp)
-            REQUIRE(q.z() == 0);
+        if (r > r_max - 0.15 * sp || r < r_min + 0.15 * sp)
+            REQUIRE(std::abs(q.z()) <= 2);
     }
 
     // (c) continuity: the wave never steps between consecutive points

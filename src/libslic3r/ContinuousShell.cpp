@@ -956,39 +956,67 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
     // intermediate and coplanar configurations somewhere on the circumference.
     // Ring mode's interfaces hold one CONSTANT depth all the way around (both
     // neighbours' ramp fractions advance together), each interface a different
-    // depth. v5 copies exactly that: each revolution holds one constant level
-    // from the golden low-discrepancy sequence in [-h/2, +h/2] (constant per
-    // interface, scattered across interfaces), stepped over a short smoothstep
-    // arc just past the seam azimuth - where ring mode's own order boundaries
-    // live. Adjacent-interface depths come out as 0.38 h or 0.62 h (golden gap
-    // sizes): never coplanar, mean ~ ring mode's own h/2. The stagger tapers to
-    // zero over one revolution approaching each tangent merge (surfaces stay
-    // pinned to the ramp) and is suppressed on the first layer.
+    // depth. v5 held one golden level per revolution and printed with pinprick
+    // packing in part - but split along remaining weak interfaces, because the
+    // levels were designed on the staircase ALONE. The physical offset between
+    // adjacent revolutions is staircase PLUS the arc-length ramp's own tilt
+    // (~0.13 h per revolution), which shifted every designed 0.38/0.62 h gap to
+    // an effective ~0.25 h: uniformly T-junction grade, the explicit interlock's
+    // documented tear geometry. v6 designs the TOTAL offset instead:
+    //  * Level targets follow the golden low-discrepancy sequence in total
+    //    offset; the emitted staircase subtracts the accumulated ramp tilt
+    //    (estimated per revolution from the plan radii) and wraps modulo one
+    //    layer height - offsets are nest-equivalent mod h - so every physical
+    //    gap is a true golden gap, effective 0.38 h from coplanar.
+    //  * Steps stay SIMULTANEOUS at the seam azimuth. (Scattering them per
+    //    revolution was considered and is wrong: on a single continuous arm,
+    //    revolution j+1 before its own step still holds revolution j's level,
+    //    so scattered steps make every interface exactly coplanar along the
+    //    whole arc between the two step azimuths.) The cost of simultaneity is
+    //    that an opposite-sign gap pair interpolates through zero inside the
+    //    0.08-revolution step window - a short coplanar ribbon at the seam
+    //    column, the already-sacrificial line, far milder than ring mode's own
+    //    k-junction column which the wall demonstrably tolerates.
+    //  * The stagger tapers out only within a quarter revolution of each
+    //    tangent merge (surfaces stay pinned to the ramp); layer 0 is flat.
     if (plan != nullptr && plan->spiral && has_bore && grid.size() == 2 && plan->n_slots >= 6) {
         const double S   = double(plan->n_slots - 1);        // slot span, surface to surface
         const double th0 = seam_theta;                       // both junctions ride the seam column
         const coord_t wamp = (layer_index == 0) ? 0 : spiral_wave_amp;
-        auto arm_wave = [&](double v) -> coord_t {
-            const double g_conj = 0.6180339887498949;        // golden-ratio conjugate
-            // Zero through the tangent-merge clearance zone (d < 1), full strength half a
-            // revolution later: a slower taper leaves half the interior of a 7-bead wall
-            // weakly staggered (only ~2 of 5 interior revolutions at full depth).
-            const double env    = std::clamp((std::min(v, S - v) - 1.0) * 2.0, 0.0, 1.0);
-            auto level = [&](double j) -> double {           // one constant level per revolution
-                double f = (j + 1.0) * g_conj;
-                f -= std::floor(f);
-                return 2.0 * f - 1.0;                        // low-discrepancy in [-1, 1)
-            };
-            const double j = std::floor(v);
-            const double u = v - j;                          // revolution fraction past the seam azimuth
-            constexpr double W = 0.08;                       // step ramp width, fraction of a revolution
-            double lv = level(j);
-            if (u < W) {
-                const double t = u / W;
-                const double s = t * t * (3.0 - 2.0 * t);    // smoothstep from the previous level
-                lv = level(j - 1.0) * (1.0 - s) + lv * s;
+        const double g_conj = 0.6180339887498949;            // golden-ratio conjugate
+        const int    n_revs = int(S);                        // n_slots is integral, so S is too
+        std::vector<double> lvl(size_t(n_revs) + 1, 0.0);    // staircase level per revolution (scaled)
+        if (wamp > 0) {
+            const double h_sp = 2.0 * double(wamp);          // one layer height, scaled
+            const double ro   = plan->r_out.sample_linear(th0);
+            const double rb   = plan->r_bore.sample_linear(th0);
+            double L_est = 2.0 * M_PI * (ro + rb);           // the two surface rings...
+            std::vector<double> rev_len(size_t(n_revs), 0.0);
+            for (int j = 0; j < n_revs; ++j) {               // ...plus each arm revolution
+                const double r = ro - plan->frac_at_f(std::min(double(j) + 0.5, S), th0) * (ro - rb);
+                rev_len[size_t(j)] = 2.0 * M_PI * r;
+                L_est += rev_len[size_t(j)];
             }
-            return coord_t(std::llround(double(wamp) * env * lv));
+            double tilt = 0.0;                               // accumulated ramp rise, rev 0 to rev j
+            for (int j = 0; j <= n_revs; ++j) {
+                double f = (double(j) + 1.0) * g_conj;
+                f -= std::floor(f);
+                const double target = (2.0 * f - 1.0) * double(wamp);      // TOTAL offset target
+                const double x      = target - tilt;
+                lvl[size_t(j)]  = x - h_sp * std::floor(x / h_sp + 0.5);   // wrap to [-h/2, h/2)
+                if (j < n_revs)
+                    tilt += h_sp * rev_len[size_t(j)] / L_est;
+            }
+        }
+        auto arm_wave = [&](double v) -> coord_t {
+            const double env = std::clamp((std::min(v, S - v) - 0.25) * 2.0, 0.0, 1.0);
+            const int    j   = std::clamp(int(std::floor(v)), 0, n_revs);
+            const double u   = v - std::floor(v);            // revolution fraction past the seam azimuth
+            constexpr double W = 0.08;                       // step ramp width, fraction of a revolution
+            const double prev = (j > 0) ? lvl[size_t(j) - 1] : lvl[0];
+            const double t    = std::clamp(u / W, 0.0, 1.0);
+            const double s    = t * t * (3.0 - 2.0 * t);     // smoothstep into this revolution's level
+            return coord_t(std::llround(env * (prev + (lvl[size_t(j)] - prev) * s)));
         };
         auto sp_point = [&](double v, double th) -> Point {
             const double ro = plan->r_out.sample_linear(th);

@@ -220,6 +220,40 @@ always 0.38 h or 0.62 h: never coplanar, mean ~ ring parity. Prediction: void
 rows collapse to ring-mode pinpricks, no peel, seam unchanged. Still Z-only
 (XY identical to v3/v4 slices).
 
+## Phase B v5 print: mixed - pinpricks return, but XY-plane splits at weak interfaces (2026-08-17)
+
+The staircase tube shows ring-mode pinprick packing in part of the section - the
+constant-depth-per-interface principle is right - but the wall still SPLIT along
+some radial interfaces (two sections separated in the cut, triangular void rows
+on the split faces). Diagnosis is quantitative: the v5 levels were designed on
+the staircase ALONE, but the physical offset between adjacent revolutions is
+staircase PLUS the arc-length ramp's own tilt (~0.13 h per revolution - the
+inner neighbour is one revolution later in path). Adding that tilt to the
+designed -0.38h/+0.62h golden gaps gives -0.25h/+0.75h: EVERY interface at an
+effective ~0.25 h from coplanar - uniformly T-junction grade, the explicit
+interlock's documented tear geometry. Secondary defects: simultaneous level
+steps at the seam let opposite-sign gap pairs sweep through zero mid-step (a
+short coplanar ribbon at the seam column), and the envelope taper left the
+surface-adjacent interfaces barely staggered.
+
+v6 designs the TOTAL offset: golden targets, accumulated ramp tilt subtracted
+(estimated per revolution from plan radii), wrapped mod h (offsets are
+nest-equivalent mod h) - every physical gap a true golden gap. Envelope
+tightened to a quarter revolution of the merges. Steps stay simultaneous at
+the seam: scattering them was worked through and rejected (on a single
+continuous arm, a revolution holds its predecessor's level until its own step,
+so scattered steps make whole arcs of every interface exactly coplanar); the
+residual ribbon is confined to the 0.08-rev window on the already-sacrificial
+seam column, far milder than ring mode's k-junction column.
+
+Verified in the emitted G-code: XY identical to the whole v3-v6 chain (Z-only
+throughout), and 98% of physically-measured adjacent-interface gaps folded mod
+h land at 0.096-0.098 mm = 0.385 h, the designed golden depth (the v5 file
+measures ~0.065 there). Prediction: pinpricks everywhere, no splits, seam
+unchanged. This is the staircase concept at full strength - if interfaces
+still split, the deficit is not geometric stagger depth and the spiral's
+remaining gap to ring mode is something else (deposition order/thermal).
+
 ## C-full design brief (from this campaign)
 
 1. Retire ONE ring at a time via an angular wedge (locally odd counts) —
