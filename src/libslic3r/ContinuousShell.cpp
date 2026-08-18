@@ -279,14 +279,19 @@ struct ChainBeadPlan {
     size_t n_slots = 0;
     std::vector<std::vector<float>>  slot_width;  // [NB][n_slots], extrusion mm
     std::vector<std::vector<double>> slot_frac;   // [NB][n_slots], fraction of radial extent
-    // Interior spiral (phase B): when set, the buried rings print as one double-arm
-    // spiral whose comb has the SAME bead count and pitch as ring mode (no stretch;
-    // the squeeze doctrine holds). The arm geometry - full-span tangent arms, merge-
-    // zone clearance widths, the U-turn - is evaluated analytically at generation time
-    // in spiralize_rings from the ordinary slot tables via the fractional-slot queries
-    // below. The arm phase anchors at spiral_theta0 (this layer's seam angle).
+    // Interior spiral (phase B): when set, the buried rings print as one continuous
+    // migrating arm whose comb has the SAME bead count and pitch as ring mode (no
+    // stretch; the squeeze doctrine holds). The arm geometry - tangent merges onto the
+    // surface rings, merge-zone clearance widths - is evaluated analytically at
+    // generation time in spiralize_rings from the ordinary slot tables via the
+    // fractional-slot queries below. The arm phase anchors at spiral_theta0 (this
+    // layer's seam angle). ramp_frac is the fraction of each revolution spent migrating
+    // between columns: 1 = a pure helical thread, lower values hold each column at a
+    // constant radius and concentrate the migration into one short ramp (see
+    // spiralize_rings for why this is the ring<->spiral continuum).
     bool   spiral = false;
     double spiral_theta0 = 0.;
+    double ramp_frac = 1.0;
     float  w_term = 0.30f;                            // transitional/merge width floor, mm
 
     // Bin-centre linear interpolation with wraparound; shared by the queries below.
@@ -341,7 +346,7 @@ struct ChainBeadPlan {
 std::unique_ptr<ChainBeadPlan> build_chain_plan(const ExPolygon &region, const Flow &flow,
                                                 const ContinuousShellWidthLimits &limits,
                                                 double layer_height,
-                                                bool spiral_mode, double seam_theta,
+                                                bool spiral_mode, double junction_ramp, double seam_theta,
                                                 std::string *decline_note, std::string *hard_fail)
 {
     const coord_t w_sp  = flow.scaled_spacing();
@@ -649,6 +654,7 @@ std::unique_ptr<ChainBeadPlan> build_chain_plan(const ExPolygon &region, const F
         } else {
             plan->spiral        = true;
             plan->spiral_theta0 = seam_theta;
+            plan->ramp_frac     = std::clamp(junction_ramp, 0.05, 1.0);
             plan->w_term        = w_term;
         }
     }
@@ -1037,19 +1043,72 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
                 w = std::min(w, std::max(double(plan->w_term), d * pitch_mm(th)));   // tangent-merge clearance
             return std::round(float(w) / 0.05f) * 0.05f;
         };
-        // Sampling density per revolution follows the buried-ring chord policy.
+        // ---- Column schedule: the ring <-> spiral continuum -------------------------
+        // tau is the revolution counter (angle / 2pi); v is the fractional slot the arm
+        // occupies. A PURE SPIRAL sets v = tau: the arm migrates continuously, so every
+        // element of the interior sits at a different radius from its neighbour along
+        // the path and the whole thread can UNWIND - printed tubes peel radially apart
+        // (v1-v6). A RAMPED schedule instead holds v at a whole slot for most of a
+        // revolution and concentrates the migration into one short ramp of `ramp_frac`:
+        // each column is then a constant-radius arc of (1 - ramp_frac) of a turn, well
+        // past a half turn, so it cannot be pulled out radially without breaking - ring
+        // mode's topological blocking - while the join ridge is spread over the ramp arc
+        // instead of stacking into a seam column.
+        //
+        // Ramp azimuths MUST advance monotonically with the slot index. They are spread
+        // evenly across one full turn from the first buried column to the last (so the
+        // ramps disperse instead of stacking). If they were scattered non-monotonically,
+        // two revolutions could occupy the SAME slot at one azimuth while the next slot
+        // went uncovered - a void. Monotone, exactly one slot is doubled at any azimuth
+        // (the junction overfill, as in ring mode) and no slot is ever empty.
+        // The arm sweeps slot 0 to slot S (outer surface to bore) in S revolutions either
+        // way; that full sweep is what covers every buried column - dropping a revolution
+        // to "avoid retracing the surfaces" measured 5 crossings instead of 6, with 0.9 mm
+        // gaps. What the ramp changes is WHERE the radial migration happens. Ramp azimuths
+        // advance monotonically by (1-f)/(S-1) per column so the transition arcs of
+        // consecutive columns tile the circle: monotone, exactly one column is in transit
+        // at any azimuth. If they were scattered non-monotonically, two revolutions could
+        // occupy the SAME slot at one azimuth while the next slot went uncovered.
+        const bool   ramped = plan->ramp_frac < 0.999;
+        const double f      = std::clamp(plan->ramp_frac, 0.05, 1.0);
+        auto v_of_tau = [&](double tau) -> double {
+            if (!ramped)
+                return tau;
+            const int    j = std::clamp(int(std::floor(tau)), 0, n_revs - 1);
+            const double u = tau - double(j);                  // position within revolution j
+            const double c = 0.5 * f + (1.0 - f) * (n_revs > 1 ? double(j) / double(n_revs - 1) : 0.0);
+            const double t = std::clamp((u - (c - 0.5 * f)) / f, 0.0, 1.0);
+            return double(j) + t * t * (3.0 - 2.0 * t);        // smoothstep across the ramp
+        };
+        // The Z stagger follows the SAME schedule: interpolating the per-column levels at
+        // fractional v means radius and height step together, in one localized event per
+        // column, instead of the pure spiral's separate step window.
+        auto ramp_wave = [&](double v) -> coord_t {
+            const double env = std::clamp((std::min(v, S - v) - 0.25) * 2.0, 0.0, 1.0);
+            const int    j   = std::clamp(int(std::floor(v)), 0, n_revs - 1);
+            const double q   = std::clamp(v - double(j), 0.0, 1.0);
+            return coord_t(std::llround(env * (lvl[size_t(j)] + (lvl[size_t(j) + 1] - lvl[size_t(j)]) * q)));
+        };
+        // Sampling density per revolution follows the buried-ring chord policy; a short
+        // ramp needs enough samples of its own to stay smooth.
         const double r_mid = 0.5 * (plan->r_out.sample_linear(th0) + plan->r_bore.sample_linear(th0));
-        const size_t n_rev = std::clamp<size_t>(size_t(std::llround(2.0 * M_PI * r_mid / chord)), size_t(64), size_t(512));
+        size_t n_rev = std::clamp<size_t>(size_t(std::llround(2.0 * M_PI * r_mid / chord)), size_t(64), size_t(512));
+        if (ramped)
+            n_rev = std::max(n_rev, size_t(std::ceil(24.0 / f)));
         const int    n_arm = std::max(2, int(std::ceil(S * double(n_rev))));
-        std::vector<Point> arm_pts;
-        std::vector<float> arm_ws;
+        std::vector<Point>   arm_pts;
+        std::vector<float>   arm_ws;
+        std::vector<coord_t> arm_z;
         arm_pts.reserve(size_t(n_arm) + 1);
         arm_ws.reserve(size_t(n_arm) + 1);
+        arm_z.reserve(size_t(n_arm) + 1);
         for (int i = 0; i <= n_arm; ++i) {
-            const double v  = S * double(i) / double(n_arm);       // one slot per revolution
-            const double th = th0 + v * 2.0 * M_PI;
+            const double tau = S * double(i) / double(n_arm);   // one revolution per slot
+            const double v   = v_of_tau(tau);
+            const double th  = th0 + tau * 2.0 * M_PI;
             arm_pts.push_back(sp_point(v, th));
             arm_ws.push_back(arm_width(v, th));
+            arm_z.push_back(ramped ? ramp_wave(v) : arm_wave(v));
         }
         // Surface widths come from the RING tables' surface columns (the truncated
         // 2-ring grid does not index the plan's slot space directly).
@@ -1059,6 +1118,51 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
         };
         anchor_to_angle(grid[0], th0);                       // both tips land at th0 (S integer revs)
         anchor_to_angle(grid[1], th0);
+
+        // Volume conservation for a ramped arm. A pure spiral migrates while it travels,
+        // so its path covers the wall exactly once. A ramp instead holds each column for
+        // most of a turn and then crosses the interstice between columns - and that
+        // crossing arc is REDUNDANT material, laid where the neighbouring columns' beads
+        // already reach. It costs roughly the ramp fraction (measured +14% extrusion at
+        // 20% ramp, against ring mode on the same tube). The cross-section is fixed, so
+        // the fix is to thin the arm to fit: scale the planned widths by whatever the
+        // layer's own area leaves once the two surface rings are paid for. The scale is
+        // uniform, so the plan's per-angle width variation is preserved, and it is floored
+        // at the transitional width so no bead thins into a scarf-like weak band.
+        if (ramped) {
+            // Target = what the SAME plan deposits over the buried columns as closed rings.
+            // Calibrating against the plan itself (rather than the cross-section area)
+            // avoids having to model how much neighbouring bead widths overlap.
+            const size_t NB_ = plan->r_out.r.size();
+            const double dth = 2.0 * M_PI / double(NB_);
+            double target = 0.;
+            for (size_t b = 0; b < NB_; ++b) {
+                const double th = -M_PI + (double(b) + 0.5) * dth;
+                const double ro = plan->r_out.sample_linear(th);
+                const double rb = plan->r_bore.sample_linear(th);
+                for (size_t slot = 1; slot + 1 < plan->n_slots; ++slot) {
+                    const double rs = (ro - plan->frac_at(slot, th) * (ro - rb)) * SCALING_FACTOR;
+                    target += double(plan->width_at(slot, th)) * rs * dth;
+                }
+            }
+            auto arm_deposit = [&]() {
+                double a = 0.;
+                for (size_t i = 1; i < arm_pts.size(); ++i)
+                    a += 0.5 * double(arm_ws[i] + arm_ws[i - 1])
+                       * (arm_pts[i] - arm_pts[i - 1]).cast<double>().norm() * SCALING_FACTOR;
+                return a;
+            };
+            // Two passes: quantizing widths to the 0.05 mm buckets the emitter uses biases
+            // the first correction, so re-measure and correct the remainder.
+            for (int pass = 0; pass < 2 && target > 0.; ++pass) {
+                const double have = arm_deposit();
+                if (have <= 0.)
+                    break;
+                const double scale = std::clamp(target / have, 0.7, 1.15);
+                for (float &w : arm_ws)
+                    w = float(std::round(std::max(double(plan->w_term), double(w) * scale) / 0.05) * 0.05);
+            }
+        }
         auto emit_ring = [&](size_t gi, size_t slot) {
             for (const Point &p : grid[gi]) { spiral.points.push_back(p); flag(false); zoff(0); pw(surf_w(slot, p)); }
         };
@@ -1066,7 +1170,7 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
         for (size_t i = 0; i < arm_pts.size(); ++i) {
             spiral.points.push_back(arm_pts[i]);
             flag(true);
-            zoff(arm_wave(S * double(i) / double(n_arm)));
+            zoff(arm_z[i]);
             pw(arm_ws[i]);
         }
         emit_ring(1, plan->n_slots - 1);
@@ -1349,7 +1453,7 @@ coord_t vanish_depth(const ExPolygons &shape, coord_t hi)
 std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &flow, size_t layer_index, const WovenInfill &woven,
                                          const ContinuousShellWidthLimits &limits,
                                          bool adaptive = false, double layer_height = 0.,
-                                         bool spiral_wanted = false, double seam_theta = 0.,
+                                         bool spiral_wanted = false, double junction_ramp = 1., double seam_theta = 0.,
                                          std::string *fail_reason = nullptr)
 {
     const coord_t spacing = flow.scaled_spacing();
@@ -1372,7 +1476,7 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
     if (adaptive && !woven.enabled && region.holes.size() == 1) {
         std::string note, hard;
         std::unique_ptr<ChainBeadPlan> plan =
-            build_chain_plan(region, flow, limits, layer_height, spiral_wanted, seam_theta, &note, &hard);
+            build_chain_plan(region, flow, limits, layer_height, spiral_wanted, junction_ramp, seam_theta, &note, &hard);
         if (!hard.empty()) {
             if (fail_reason)
                 *fail_reason = hard;
@@ -1852,7 +1956,9 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     // this layer's seam angle (computed here exactly as spiralize_rings computes it,
     // so the spiral's junctions precess with the seam).
     const bool adaptive = config != nullptr && config->continuous_shell_adaptive_beading.value && !force_solid;
-    const bool spiral_wanted = adaptive && config->continuous_shell_interior_spiral.value;
+    const bool   spiral_wanted = adaptive && config->continuous_shell_interior_spiral.value;
+    const double junction_ramp = (config != nullptr)
+                               ? std::clamp(config->continuous_shell_junction_ramp.value / 100.0, 0.05, 1.0) : 1.0;
     double cs_seam_theta = 0.0;
     if (config != nullptr) {
         const double step_rad   = 0.02 * (config->continuous_shell_seam_step.value / 100.0);
@@ -1861,7 +1967,7 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     }
     std::string plan_fail;
     const std::vector<ContourChain> chains = contour_spiral(merged.front(), flow, layer_index, woven, width_limits,
-                                                            adaptive, layer_height, spiral_wanted, cs_seam_theta, &plan_fail);
+                                                            adaptive, layer_height, spiral_wanted, junction_ramp, cs_seam_theta, &plan_fail);
     if (chains.empty()) {
         if (reason != nullptr)
             *reason = !plan_fail.empty() ? plan_fail : "Continuous shell mode could not construct a contour spiral.";

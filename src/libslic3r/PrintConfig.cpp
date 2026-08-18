@@ -6114,14 +6114,34 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Continuous shell interior spiral");
     def->category = L("Strength");
     def->tooltip = L("Prints the BURIED rings of an adaptively-beaded continuous-shell wall as one continuous "
-                     "double-arm spiral instead of closed rings: the once-per-revolution radial join of every "
-                     "interior ring disappears, leaving only three junctions per layer (at the two surface rings "
-                     "and the turnaround), for the most uniform possible interior. The outer and bore surface "
+                     "migrating arm instead of closed rings, so the once-per-revolution radial join of every "
+                     "interior ring disappears and the helical seam nearly vanishes. The outer and bore surface "
                      "rings stay closed seam-anchored loops. Requires adaptive beading and at least four buried "
-                     "rings; other sections keep closed rings. The bead widths near the surfaces vary around the "
-                     "circumference to close the spiral-to-ring boundary wedge.");
+                     "rings; other sections keep closed rings.\n\n"
+                     "STRENGTH WARNING: at the default junction ramp of 100% the interior is a single helical "
+                     "thread, and a thread can unwind - printed tubes delaminate radially far more easily than "
+                     "closed rings do. Lower the junction ramp to keep most of each bead column at a constant "
+                     "radius. Off by default.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("continuous_shell_junction_ramp", coPercent);
+    def->label = L("Continuous shell junction ramp");
+    def->category = L("Strength");
+    def->tooltip = L("How much of each revolution the interior arm spends migrating from one bead column to the "
+                     "next (only used when the interior spiral is on). This is the whole continuum between "
+                     "closed rings and a spiral: at 100% the arm migrates continuously and the interior is one "
+                     "helical thread - the smoothest seam, but the thread can unwind and the wall peels apart "
+                     "radially. Lower values hold each column at a CONSTANT RADIUS for most of a revolution and "
+                     "concentrate the migration into one short, steep ramp per column - so each column still "
+                     "wraps well past a half turn and cannot be pulled out radially, while the join ridges stay "
+                     "spread out and staggered around the circumference instead of stacking into a seam. "
+                     "Around 15-25% keeps roughly 80% of every column at constant radius.");
+    def->sidetext = L("%");
+    def->min = 5;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(100));
 
     def = this->add("continuous_shell_infill_density", coPercent);
     def->label = L("Continuous shell infill density");

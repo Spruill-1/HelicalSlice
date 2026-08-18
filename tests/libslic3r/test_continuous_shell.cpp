@@ -1774,6 +1774,122 @@ TEST_CASE("Interior spiral carries a per-revolution incommensurate Z-stagger", "
     REQUIRE(double(same) >= 0.70 * double(pts.size() - 1));
 }
 
+TEST_CASE("Junction ramp holds columns at constant radius between short migrations", "[ContinuousShell]") {
+    // The ring <-> spiral continuum. A pure spiral (ramp 100%) migrates continuously, so
+    // the interior is one helical thread that can unwind - the printed peel failure. A
+    // ramped schedule holds each column at a CONSTANT RADIUS for (1 - ramp) of a turn and
+    // concentrates the migration into one short ramp, so each column wraps well past a
+    // half turn and is topologically blocked from radial extraction, while the join
+    // ridges stay dispersed. Assert on the emitted arm: (a) the migrating fraction of the
+    // path tracks the knob, (b) columns hold a constant radius over >180 degrees,
+    // (c) coverage stays gap-free (monotone ramp azimuths - non-monotone would double one
+    // slot and leave the next empty), and (d) volume is conserved.
+    Flow flow(0.5f, 0.25f, 0.5f);
+    const double sp = flow.spacing();
+    const ExPolygon ann = make_annulus(14.0, 10.0 * sp + (0.5 - sp));
+    Surfaces surfaces{ Surface(stInternal, ann) };
+    const double model_volume = ann.area() * SCALING_FACTOR * SCALING_FACTOR * 0.25;
+
+    // Longest run of consecutive arm points whose radius stays within a quarter spacing,
+    // expressed as a fraction of a full turn, plus the fraction of arm length that migrates.
+    struct ArmStats { double hold_turn; double migrating; };
+    auto arm_stats = [&](int ramp_pct) {
+        PrintRegionConfig cfg;
+        cfg.continuous_shell_adaptive_beading.value = true;
+        cfg.continuous_shell_interior_spiral.value  = true;
+        cfg.continuous_shell_junction_ramp.value    = ramp_pct;
+        ExtrusionEntityCollection e;
+        const std::vector<ExtrusionPath *> paths = cs_paths(surfaces, flow, cfg, e);
+        std::vector<Point> pts;
+        for (const ExtrusionPath *p : paths)
+            for (const Point3 &q : p->polyline.points)
+                pts.emplace_back(q.x(), q.y());
+        REQUIRE(pts.size() > 500);
+        Vec2d c(0., 0.);
+        for (const Point &p : pts) c += p.cast<double>();
+        c /= double(pts.size());
+        // Radius and swept angle per step; the two closed surface rings are excluded by
+        // dropping steps whose radius sits at the extremes.
+        std::vector<double> r(pts.size()), th(pts.size());
+        for (size_t i = 0; i < pts.size(); ++i) {
+            const Vec2d d = pts[i].cast<double>() - c;
+            r[i]  = d.norm() * SCALING_FACTOR;
+            th[i] = std::atan2(d.y(), d.x());
+        }
+        const double r_lo = *std::min_element(r.begin(), r.end());
+        const double r_hi = *std::max_element(r.begin(), r.end());
+        double best_turn = 0., run_turn = 0., tot_len = 0.;
+        double run_r = r[0];
+        std::vector<std::pair<double, double>> steps;   // (radial rate |dr|/dl, dl)
+        double tot_dr = 0.;
+        for (size_t i = 1; i < pts.size(); ++i) {
+            if (r[i] > r_hi - 0.35 * sp || r[i] < r_lo + 0.35 * sp) { run_turn = 0.; run_r = r[i]; continue; }
+            double da = th[i] - th[i - 1];
+            da = std::atan2(std::sin(da), std::cos(da));
+            const double dl = (pts[i] - pts[i - 1]).cast<double>().norm() * SCALING_FACTOR;
+            // A column must sweep CONTIGUOUSLY: reject hops and any angular skip, so two
+            // separate arcs that merely share a radius (the path is split into sub-paths
+            // at every width change) can never be counted as one run.
+            if (dl > 0.5 || dl <= 0. || std::abs(da) > 0.15) { run_turn = 0.; run_r = r[i]; continue; }
+            const double dr = std::abs(r[i] - r[i - 1]);
+            tot_len += dl;
+            tot_dr  += dr;
+            steps.emplace_back(dr / dl, dl);
+            if (std::abs(r[i] - run_r) < 0.25 * sp) {
+                run_turn += std::abs(da);
+                best_turn = std::max(best_turn, run_turn);
+            } else {
+                run_turn = 0.;
+                run_r    = r[i];
+            }
+        }
+        // Migration concentration, scale-free: the smallest fraction of arm LENGTH that
+        // carries 80% of the total radial migration. A pure spiral migrates uniformly, so
+        // it needs ~80% of its length; a ramp of f needs only ~f of it.
+        std::sort(steps.begin(), steps.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+        double acc_dr = 0., acc_len = 0.;
+        for (const auto &[rate, dl] : steps) {
+            if (acc_dr >= 0.8 * tot_dr) break;
+            acc_dr  += rate * dl;
+            acc_len += dl;
+        }
+        const double mig_len = acc_len;
+        double volume = 0.;
+        for (const ExtrusionPath *p : paths)
+            volume += p->mm3_per_mm * p->polyline.length() * SCALING_FACTOR;
+        REQUIRE_THAT(volume, Catch::Matchers::WithinRel(model_volume, 0.10));   // (d)
+        return ArmStats{ best_turn / (2.0 * M_PI), tot_len > 0. ? mig_len / tot_len : 1. };
+    };
+
+    const ArmStats spiral = arm_stats(100);
+    const ArmStats ramped = arm_stats(20);
+
+    // (a) the knob concentrates the migration
+    CAPTURE(spiral.migrating, ramped.migrating, spiral.hold_turn, ramped.hold_turn);
+    REQUIRE(ramped.migrating < 0.9 * spiral.migrating);
+    // (b) THE topological property: a ramped column wraps past a half turn - it cannot be
+    // pulled out radially without breaking - where a spiral's "column" is a migrating
+    // thread that never holds one radius for anything like that long.
+    REQUIRE(ramped.hold_turn > 0.75);
+    REQUIRE(ramped.hold_turn > 1.5 * spiral.hold_turn);
+
+    // (c) coverage: every ray still crosses every column, no gap opened by the ramps
+    PrintRegionConfig cfg;
+    cfg.continuous_shell_adaptive_beading.value = true;
+    cfg.continuous_shell_interior_spiral.value  = true;
+    cfg.continuous_shell_junction_ramp.value    = 20;
+    ExtrusionEntityCollection e;
+    const std::vector<ExtrusionPath *> paths = cs_paths(surfaces, flow, cfg, e);
+    for (int i = 0; i < 24; ++i) {
+        const double az = -M_PI + (i + 0.5) * (2.0 * M_PI / 24.0);
+        const std::vector<double> radii = ray_ring_radii(paths, az);
+        CAPTURE(az);
+        REQUIRE(radii.size() >= 6);
+        for (size_t j = 1; j < radii.size(); ++j)
+            REQUIRE(radii[j] - radii[j - 1] < 2.4 * sp);
+    }
+}
+
 TEST_CASE("Adaptive beading is safe on generic star tube shapes", "[ContinuousShell]") {
     // The adaptive plan defaults ON, so every star-shaped single-bore section now goes
     // through it (or declines to C-lite). These are INVARIANT tests - they must hold

@@ -215,9 +215,23 @@ constraint (the moiré analysis), no U-turn, no s→2s wedge, no π-per-layer ph
   peel strength; default stays OFF.** Corollary measured the same day: `connector_spread` is
   nearly inert on a thin tube (junction dispersion 0.07 at 100%, clamped to keep hops out of
   the bore), so dispersing junctions on an annulus requires radial migration along the path —
-  ring mode and the interior spiral are the two ends of one continuum. The unexplored middle is
-  a RAMPED junction (migrate each transition over an arc; columns still span >180°, so radial
-  extraction stays blocked) — a new feature, not a spiral revision; not implemented.
+  ring mode and the interior spiral are the two ends of one continuum.
+- **The middle: `continuous_shell_junction_ramp` (2026-08-18, default 100 = pure spiral).**
+  The fraction of each revolution the arm spends migrating between columns. Below 100 the arm
+  holds each column at a constant radius for (1−ramp) of a turn — measured 1.10 turn at ramp 20
+  versus 0.45 for the spiral — so a column wraps past a half turn and cannot be extracted
+  radially, while the migration is concentrated into one short ramp instead of being smeared
+  over the whole wall. Ramp azimuths advance monotonically so the transition arcs tile the
+  circle (non-monotone scattering doubles one slot and empties the next). Two measured
+  constraints shape it: (a) a junction spread over an arc lays REDUNDANT material in the
+  interstice between columns, linearly in the arc — +14% uncompensated at ramp 20 — so the arm's
+  widths are scaled to the deposit the same plan would lay over those columns as closed rings;
+  (b) the arm must still sweep slot 0→S, because dropping the apparently-redundant revolution
+  reads as a near-perfect weight (16.40 g) while actually being a void (5 crossings per ray
+  instead of 6, 0.91 mm gaps) — weight cannot distinguish correct fill from underfill.
+  The bulk of a ramped wall is measurably more regular than a spiral's, which carries its
+  boundary wedge at every azimuth. Print validation pending; the candidate runs ~5% light
+  against ring mode (the compensation targets ideal columns, not resampled rings plus hops).
 
 ## 5. Seam-impact / risk summary
 

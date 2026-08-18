@@ -297,6 +297,50 @@ keeping hops out of the bore) while each column still spans >180 degrees, so
 radial extraction stays blocked. That is a new feature, not a spiral revision;
 it is not implemented.
 
+## Ramped junction implemented - the middle of the continuum (2026-08-18)
+
+`continuous_shell_junction_ramp` (percent, default 100 = the pure spiral, so nothing
+changes by default) sets how much of each revolution the interior arm spends
+migrating between bead columns. Below 100 the arm HOLDS each column at a constant
+radius for (1 - ramp) of a turn and concentrates the migration into one short ramp.
+Measured on the T5 tube at ramp 20 against ramp 100:
+
+| | pure spiral (100) | ramped (20) | ring mode |
+|---|---|---|---|
+| longest constant-radius run | 0.45 turn | **1.10 turn** | closed ring |
+| migration concentrated in | 52% of arm | 42% of arm | n/a (hops) |
+| crossings per ray | 6-7 (wedge) | 6 (13/16 rays) | 6 |
+| worst radial gap | 0.55 mm | 0.54 mm | - |
+| predicted weight | 17.34 g | 15.67 g | 16.55 g |
+
+Two findings came out of building it, both measured, both non-obvious:
+
+1. **A junction spread over an arc costs REDUNDANT material, linearly in the arc.**
+   The transit arc lies in the interstice between two columns, where the neighbouring
+   beads already reach - unlike ring mode's hop, which is ~1 pitch long. Uncompensated,
+   ramp 20 came out at 18.87 g, +14% against ring mode. The fix is to pay for it in
+   width: the arm is scaled (uniformly, preserving the plan's per-angle variation,
+   floored at the transitional width) to the deposit the same plan would lay over those
+   columns as closed rings. This is the same trade the scarf makes, but at ~12% instead
+   of the scarf's 50% thinning, and spread over an arc rather than a junction.
+2. **The arm must still sweep slot 0 to slot S.** Dropping the "extra" revolution to
+   avoid retracing the surface rings looked right on the scale (16.40 g, near-perfect)
+   and was actually a VOID: 5 crossings per ray instead of 6, worst gap 0.91 mm. Weight
+   alone cannot distinguish correct fill from underfill - always check the ray crossings.
+
+Ramp azimuths advance monotonically across the wall so the transition arcs tile the
+circle; non-monotone scattering would let two revolutions occupy one slot at an azimuth
+while the next slot went empty. The bulk of a ramped wall is measurably MORE regular
+than a spiral's: uniform 0.40/0.41 mm gaps everywhere except the one column in transit,
+where the spiral carries its boundary wedge at every azimuth (inner gap sweeping
+0.33-0.53, outer 0.17-0.40).
+
+`sliced/T5_ramp20.gcode.3mf` is the print candidate (ramp 20, adaptive on, v6 Z-stagger
+retained). Open calibration caveat: it predicts 15.67 g against ring mode's 16.55 g
+(-5%), because the compensation targets the plan's ideal columns rather than ring mode's
+resampled rings plus hops. WEIGH THE TUBE - if it lands ~5% light, the target needs that
+factor before any strength conclusion is drawn from it.
+
 ## C-full design brief (from this campaign)
 
 1. Retire ONE ring at a time via an angular wedge (locally odd counts) —
