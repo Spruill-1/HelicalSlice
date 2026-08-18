@@ -254,6 +254,49 @@ unchanged. This is the staircase concept at full strength - if interfaces
 still split, the deficit is not geometric stagger depth and the spiral's
 remaining gap to ring mode is something else (deposition order/thermal).
 
+## Phase B v6 print: mostly solid, residual splits - the limit is TOPOLOGY (2026-08-17)
+
+The ramp-compensated staircase printed mostly solid with pinprick packing - the
+best spiral wall of the campaign - but some radial interfaces still split. The
+stagger is now provably at its designed depth (98% of gaps measured 0.385 h in
+the emitted G-code), so the geometric variable is exhausted. It bought the
+progression full peel -> no peel -> mixed -> mostly solid and then stopped.
+
+WHY IT STOPS - the columns' topology, not their nesting:
+
+- In ring mode each bead column is a CLOSED CIRCLE joined to its neighbours by
+  ~k-1 short, steep radial hops (measured: 6 per layer on this 7-bead wall).
+  A closed circle cannot be pulled out radially without breaking it, and the
+  hops staple the interfaces on top of that.
+- The spiral's interior is ONE HELICAL THREAD. Its "columns" are turns of that
+  thread, and a helix CAN unwind: a crack along an interface separates a
+  helical strip without breaking anything. That is exactly the "sheet peeling
+  from the bore" of v1-v3, and the peel front bounded by the seam helix in the
+  unrolled photo is the single ligament line (1 steep crossing per layer, at
+  the layer join) holding the strip on.
+- Z-stagger raises the interfacial bond and mechanical interlock - which is why
+  v4-v6 improved so much - but it cannot remove a failure MODE that needs no
+  material to break. No stagger depth closes a topological gap.
+
+This unifies all six prints under one mechanism, including v1's two interleaved
+sheets (the double arm's A/B interface had ~2 ligaments per layer, the fewest
+of any revision, and failed the worst).
+
+Also measured while looking for a ring-mode seam route: `connector_spread` is
+nearly INERT on a thin tube. At 100% the junction azimuths disperse only 0.07
+(circular dispersion; 0.00 at spread 0), because the radius-aware clamp must
+stop each hop's chord from crossing the bore void. Dispersing junctions on an
+annulus requires migrating radially ALONG the path, which is what the spiral
+does - the two knobs are the ends of one continuum.
+
+Standing recommendation: `continuous_shell_interior_spiral` stays default OFF
+and is documented as a seam-only option that trades radial peel strength. The
+open design between the ends of the continuum is a RAMPED junction - migrate
+each ring-to-ring transition over an arc (spreading the overfill ridge and
+keeping hops out of the bore) while each column still spans >180 degrees, so
+radial extraction stays blocked. That is a new feature, not a spiral revision;
+it is not implemented.
+
 ## C-full design brief (from this campaign)
 
 1. Retire ONE ring at a time via an angular wedge (locally odd counts) —

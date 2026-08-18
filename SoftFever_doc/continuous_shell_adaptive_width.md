@@ -203,6 +203,21 @@ constraint (the moiré analysis), no U-turn, no s→2s wedge, no π-per-layer ph
   defect: a short zero-crossing ribbon inside the 0.08-rev step window at the seam column
   (already sacrificial; far milder than ring mode's k-junction column). Still Z-only — XY
   identical across the whole v3→v6 chain.
+- **v6 printed: mostly solid, residual splits — the limit is TOPOLOGY.** With the stagger
+  verified at its designed depth, the geometric variable is exhausted. Ring mode's columns are
+  CLOSED CIRCLES stapled by ~k−1 steep hops per layer (6 measured here); a closed circle cannot
+  be extracted radially without breaking. The spiral interior is ONE HELICAL THREAD whose turns
+  can UNWIND — a crack separates a helical strip without breaking material, which is precisely
+  the v1–v3 peel, and the unrolled peel front bounded by the seam helix is the single ligament
+  (one steep crossing per layer, the layer join) holding the strip on. Stagger strengthens the
+  bond but cannot delete a failure mode that needs nothing to break.
+  **Conclusion: `continuous_shell_interior_spiral` is a seam-only option that trades radial
+  peel strength; default stays OFF.** Corollary measured the same day: `connector_spread` is
+  nearly inert on a thin tube (junction dispersion 0.07 at 100%, clamped to keep hops out of
+  the bore), so dispersing junctions on an annulus requires radial migration along the path —
+  ring mode and the interior spiral are the two ends of one continuum. The unexplored middle is
+  a RAMPED junction (migrate each transition over an arc; columns still span >180°, so radial
+  extraction stays blocked) — a new feature, not a spiral revision; not implemented.
 
 ## 5. Seam-impact / risk summary
 
