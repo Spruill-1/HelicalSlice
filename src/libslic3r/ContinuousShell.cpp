@@ -1061,24 +1061,35 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
         // two revolutions could occupy the SAME slot at one azimuth while the next slot
         // went uncovered - a void. Monotone, exactly one slot is doubled at any azimuth
         // (the junction overfill, as in ring mode) and no slot is ever empty.
-        // The arm sweeps slot 0 to slot S (outer surface to bore) in S revolutions either
-        // way; that full sweep is what covers every buried column - dropping a revolution
-        // to "avoid retracing the surfaces" measured 5 crossings instead of 6, with 0.9 mm
-        // gaps. What the ramp changes is WHERE the radial migration happens. Ramp azimuths
-        // advance monotonically by (1-f)/(S-1) per column so the transition arcs of
-        // consecutive columns tile the circle: monotone, exactly one column is in transit
-        // at any azimuth. If they were scattered non-monotonically, two revolutions could
-        // occupy the SAME slot at one azimuth while the next slot went uncovered.
+        // Where the transitions sit is not a free parameter: DISPERSING them costs material,
+        // one revolution per full turn of dispersion, because a column held from one
+        // transition to the next spans 1 + (delta azimuth) turns. Measured, dispersed over
+        // the whole circle: +15% extrusion against ring mode at ramp 6, 12 AND 20 alike -
+        // flat in the ramp fraction, which is the signature of a structural extra
+        // revolution rather than the transit arcs. Paying for it by thinning the arm was
+        // printed and made the peel WORSE (thinner beads = less contact between columns,
+        // worst at the bore where the merge clearance thins the arm too).
+        //
+        // So the transitions are ALIGNED at the seam azimuth, which makes the schedule
+        // volumetrically exact: one revolution per buried column, two surface rings, the
+        // same bead count ring mode lays. The arm therefore covers the BURIED columns only
+        // (slots 1 .. S-1) and reaches the surfaces by a one-pitch hop at the seam, and
+        // each column holds a constant radius for (1 - ramp) of a turn before handing off.
+        // All the columns hand off inside the same narrow azimuth band - the seam column,
+        // which is already the sacrificial line - so what the ramp buys over ring mode is a
+        // junction spread into a shallow ramp instead of an abrupt radial jump.
         const bool   ramped = plan->ramp_frac < 0.999;
         const double f      = std::clamp(plan->ramp_frac, 0.05, 1.0);
+        const int    n_col  = std::max(1, n_revs - 1);         // buried columns, slots 1 .. S-1
         auto v_of_tau = [&](double tau) -> double {
             if (!ramped)
                 return tau;
-            const int    j = std::clamp(int(std::floor(tau)), 0, n_revs - 1);
+            const int    j = std::clamp(int(std::floor(tau)), 0, n_col - 1);
             const double u = tau - double(j);                  // position within revolution j
-            const double c = 0.5 * f + (1.0 - f) * (n_revs > 1 ? double(j) / double(n_revs - 1) : 0.0);
-            const double t = std::clamp((u - (c - 0.5 * f)) / f, 0.0, 1.0);
-            return double(j) + t * t * (3.0 - 2.0 * t);        // smoothstep across the ramp
+            if (j >= n_col - 1)
+                return 1.0 + double(j);                        // innermost column: hold, then hop to the bore
+            const double t = std::clamp((u - (1.0 - f)) / f, 0.0, 1.0);
+            return 1.0 + double(j) + t * t * (3.0 - 2.0 * t);  // hold, then hand off at the seam
         };
         // The Z stagger follows the SAME schedule: interpolating the per-column levels at
         // fractional v means radius and height step together, in one localized event per
@@ -1095,7 +1106,8 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
         size_t n_rev = std::clamp<size_t>(size_t(std::llround(2.0 * M_PI * r_mid / chord)), size_t(64), size_t(512));
         if (ramped)
             n_rev = std::max(n_rev, size_t(std::ceil(24.0 / f)));
-        const int    n_arm = std::max(2, int(std::ceil(S * double(n_rev))));
+        const double tau_end = ramped ? double(n_col) : S;     // ramped: one turn per buried column
+        const int    n_arm   = std::max(2, int(std::ceil(tau_end * double(n_rev))));
         std::vector<Point>   arm_pts;
         std::vector<float>   arm_ws;
         std::vector<coord_t> arm_z;
@@ -1103,7 +1115,7 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
         arm_ws.reserve(size_t(n_arm) + 1);
         arm_z.reserve(size_t(n_arm) + 1);
         for (int i = 0; i <= n_arm; ++i) {
-            const double tau = S * double(i) / double(n_arm);   // one revolution per slot
+            const double tau = tau_end * double(i) / double(n_arm);
             const double v   = v_of_tau(tau);
             const double th  = th0 + tau * 2.0 * M_PI;
             arm_pts.push_back(sp_point(v, th));
@@ -1119,50 +1131,17 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
         anchor_to_angle(grid[0], th0);                       // both tips land at th0 (S integer revs)
         anchor_to_angle(grid[1], th0);
 
-        // Volume conservation for a ramped arm. A pure spiral migrates while it travels,
-        // so its path covers the wall exactly once. A ramp instead holds each column for
-        // most of a turn and then crosses the interstice between columns - and that
-        // crossing arc is REDUNDANT material, laid where the neighbouring columns' beads
-        // already reach. It costs roughly the ramp fraction (measured +14% extrusion at
-        // 20% ramp, against ring mode on the same tube). The cross-section is fixed, so
-        // the fix is to thin the arm to fit: scale the planned widths by whatever the
-        // layer's own area leaves once the two surface rings are paid for. The scale is
-        // uniform, so the plan's per-angle width variation is preserved, and it is floored
-        // at the transitional width so no bead thins into a scarf-like weak band.
-        if (ramped) {
-            // Target = what the SAME plan deposits over the buried columns as closed rings.
-            // Calibrating against the plan itself (rather than the cross-section area)
-            // avoids having to model how much neighbouring bead widths overlap.
-            const size_t NB_ = plan->r_out.r.size();
-            const double dth = 2.0 * M_PI / double(NB_);
-            double target = 0.;
-            for (size_t b = 0; b < NB_; ++b) {
-                const double th = -M_PI + (double(b) + 0.5) * dth;
-                const double ro = plan->r_out.sample_linear(th);
-                const double rb = plan->r_bore.sample_linear(th);
-                for (size_t slot = 1; slot + 1 < plan->n_slots; ++slot) {
-                    const double rs = (ro - plan->frac_at(slot, th) * (ro - rb)) * SCALING_FACTOR;
-                    target += double(plan->width_at(slot, th)) * rs * dth;
-                }
-            }
-            auto arm_deposit = [&]() {
-                double a = 0.;
-                for (size_t i = 1; i < arm_pts.size(); ++i)
-                    a += 0.5 * double(arm_ws[i] + arm_ws[i - 1])
-                       * (arm_pts[i] - arm_pts[i - 1]).cast<double>().norm() * SCALING_FACTOR;
-                return a;
-            };
-            // Two passes: quantizing widths to the 0.05 mm buckets the emitter uses biases
-            // the first correction, so re-measure and correct the remainder.
-            for (int pass = 0; pass < 2 && target > 0.; ++pass) {
-                const double have = arm_deposit();
-                if (have <= 0.)
-                    break;
-                const double scale = std::clamp(target / have, 0.7, 1.15);
-                for (float &w : arm_ws)
-                    w = float(std::round(std::max(double(plan->w_term), double(w) * scale) / 0.05) * 0.05);
-            }
-        }
+        // No width compensation for the ramp's redundant material. A ramp lays extra
+        // material in the interstice between columns, costing roughly the ramp fraction
+        // (+14% extrusion at ramp 20 against ring mode). Scaling the arm's widths down to
+        // pay for it was TRIED AND PRINTED: thinning every buried bead ~15% shrinks the
+        // contact between neighbouring columns, and the tube peeled WORSE than the pure
+        // spiral - worst at the bore-adjacent interface, where the merge clearance already
+        // thins the arm, so the two reductions compound. Interface contact is the thing
+        // this whole workstream is trying to buy; trading it for volume is backwards.
+        // Keep the planned widths and keep the ramp SHORT instead: redundancy scales with
+        // the ramp arc, so a small ramp holds each column for most of a turn (the
+        // topological property) at a few percent of extra material.
         auto emit_ring = [&](size_t gi, size_t slot) {
             for (const Point &p : grid[gi]) { spiral.points.push_back(p); flag(false); zoff(0); pw(surf_w(slot, p)); }
         };

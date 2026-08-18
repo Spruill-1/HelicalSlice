@@ -223,15 +223,26 @@ constraint (the moiré analysis), no U-turn, no s→2s wedge, no π-per-layer ph
   radially, while the migration is concentrated into one short ramp instead of being smeared
   over the whole wall. Ramp azimuths advance monotonically so the transition arcs tile the
   circle (non-monotone scattering doubles one slot and empties the next). Two measured
-  constraints shape it: (a) a junction spread over an arc lays REDUNDANT material in the
-  interstice between columns, linearly in the arc — +14% uncompensated at ramp 20 — so the arm's
-  widths are scaled to the deposit the same plan would lay over those columns as closed rings;
-  (b) the arm must still sweep slot 0→S, because dropping the apparently-redundant revolution
-  reads as a near-perfect weight (16.40 g) while actually being a void (5 crossings per ray
-  instead of 6, 0.91 mm gaps) — weight cannot distinguish correct fill from underfill.
-  The bulk of a ramped wall is measurably more regular than a spiral's, which carries its
-  boundary wedge at every azimuth. Print validation pending; the candidate runs ~5% light
-  against ring mode (the compensation targets ideal columns, not resampled rings plus hops).
+  constraints, both established by print and by measurement, shape it:
+  (a) **Never pay for a path-length surplus by thinning buried beads.** The first version
+  scaled the arm's widths to conserve volume; the printed tube peeled WORSE than any spiral
+  revision, at the bore-adjacent interface, because ~15% thinner beads make less contact
+  between columns and the bore-side bead is thinned twice (the merge clearance tapers it too).
+  Contact is the quantity being bought; volume must not be paid for with it.
+  (b) **Dispersing junctions on an annulus costs material, in proportion to the dispersion.**
+  A column held from one transition to the next spans 1 + (Δazimuth) turns, so dispersing the
+  handoffs over the full circle buys exactly one extra revolution — measured +15% at ramp 6, 12
+  and 20 alike, flat in the ramp fraction, which is the signature of a structural extra
+  revolution rather than the transit arcs. Ring mode stacks its junctions at one azimuth and is
+  volumetrically exact; the spiral disperses fully and pays (absorbing it by thinning both tips
+  over a revolution each, +4.8%).
+  So the handoffs are ALIGNED at the seam and the arm covers the buried columns only, reaching
+  the surfaces by a one-pitch hop: 16.50 g against ring mode's 16.55 g at full planned widths,
+  each column holding a constant radius for 1.01 turns, one narrow azimuth band where the
+  columns hand off. Note the trap found on the way: dropping the "redundant" revolution with the
+  handoffs still dispersed weighed almost perfectly (16.40 g) while being a VOID — 5 crossings
+  per ray instead of 6, 0.91 mm gaps. Weight cannot distinguish correct fill from underfill;
+  always check ray crossings. Print validation pending (`sliced/T5_ramp12.gcode.3mf`).
 
 ## 5. Seam-impact / risk summary
 

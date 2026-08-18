@@ -335,11 +335,47 @@ than a spiral's: uniform 0.40/0.41 mm gaps everywhere except the one column in t
 where the spiral carries its boundary wedge at every azimuth (inner gap sweeping
 0.33-0.53, outer 0.17-0.40).
 
-`sliced/T5_ramp20.gcode.3mf` is the print candidate (ramp 20, adaptive on, v6 Z-stagger
-retained). Open calibration caveat: it predicts 15.67 g against ring mode's 16.55 g
-(-5%), because the compensation targets the plan's ideal columns rather than ring mode's
-resampled rings plus hops. WEIGH THE TUBE - if it lands ~5% light, the target needs that
-factor before any strength conclusion is drawn from it.
+## Ramp 20 (width-compensated) PRINTED: peel WORSE - never buy volume with contact (2026-08-18)
+
+The compensated tube peeled worse than any spiral revision, and specifically at the
+BORE-ADJACENT interface. Cause is the compensation itself: paying for the ramp's extra
+material by scaling arm widths thinned every buried bead ~15% (0.40 -> ~0.34 mm), which
+shrinks the contact between neighbouring columns - and the bore-side bead is thinned
+TWICE, since the merge clearance already tapers the arm there. Interface contact is the
+quantity this entire workstream is trying to buy; trading it for volume conservation is
+backwards. **Design rule: never pay for a path-length surplus by thinning buried beads.**
+
+Then the ramp sweep falsified the model the compensation rested on. Uncompensated
+weights at ramp 6 / 12 / 20: 19.11 / 19.01 / 18.87 g - all ~+15% against ring mode and
+FLAT in the ramp fraction. So the surplus is not the transit arcs (which would scale with
+the arc); it is one structural extra revolution. Two facts explain it:
+
+- The arm sweeps slot 0 to slot S, i.e. S revolutions of path serving S-1 buried columns,
+  plus the two surface rings. The pure spiral absorbs that surplus by thinning both tips
+  over a full revolution each (its merge clearance), landing at +4.8%; a ramped arm
+  crosses the clearance zones quickly, so it pays the whole +15%.
+- DISPERSING the handoffs is what costs the revolution: a column held from one transition
+  to the next spans 1 + (delta azimuth) turns, so dispersion over the full circle buys
+  exactly one extra revolution of material. Ring mode stacks its junctions at one azimuth
+  and is volumetrically exact; the spiral disperses fully and pays. **Dispersing junctions
+  on an annulus is not free - it costs material in proportion to the dispersion.**
+
+Final configuration (aligned handoffs, buried columns only, no width compensation):
+
+| | ring mode | aligned ramp 12 | ramp 20 dispersed | pure spiral |
+|---|---|---|---|---|
+| predicted weight | 16.55 g | **16.50 g** | 18.87 g | 17.34 g |
+| constant-radius run | closed ring | **1.01 turn** | 1.10 turn | 0.45 turn |
+| bead widths | planned | **planned** | planned | planned |
+| rays at full crossing count | all | 15/16 | 13/16 | 13/16 (wedge) |
+
+That is volumetric parity with ring mode at full planned widths, with each column holding
+a constant radius for a full turn, and one narrow azimuth band - the seam, already the
+sacrificial line - where the columns hand off. What the ramp buys over ring mode is a
+junction spread into a shallow ramp instead of an abrupt radial jump.
+
+`sliced/T5_ramp12.gcode.3mf` is the print candidate. Predicted 16.50 g; a tube that
+weighs right AND peels would mean the ramp itself is not the answer either.
 
 ## C-full design brief (from this campaign)
 
