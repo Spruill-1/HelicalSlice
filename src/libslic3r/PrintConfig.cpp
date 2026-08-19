@@ -6128,15 +6128,17 @@ void PrintConfigDef::init_fff_params()
     def = this->add("continuous_shell_junction_ramp", coPercent);
     def->label = L("Continuous shell junction ramp");
     def->category = L("Strength");
-    def->tooltip = L("How much of each revolution the interior arm spends migrating from one bead column to the "
-                     "next (only used when the interior spiral is on). This is the whole continuum between "
-                     "closed rings and a spiral: at 100% the arm migrates continuously and the interior is one "
-                     "helical thread - the smoothest seam, but the thread can unwind and the wall peels apart "
-                     "radially. Lower values hold each column at a CONSTANT RADIUS for most of a revolution and "
-                     "concentrate the migration into one short, steep ramp per column - so each column still "
-                     "wraps well past a half turn and cannot be pulled out radially, while the join ridges stay "
-                     "spread out and staggered around the circumference instead of stacking into a seam. "
-                     "Around 15-25% keeps roughly 80% of every column at constant radius.");
+    def->tooltip = L("How much of each revolution the interior arm spends handing off from one bead column to the "
+                     "next (only used when the interior spiral is on). This is the whole continuum between closed "
+                     "rings and a spiral: at 100% the arm migrates continuously and the interior is one helical "
+                     "thread - the smoothest seam, but a thread can unwind, and printed tubes peel apart radially. "
+                     "Below 100 each column instead holds a CONSTANT RADIUS for a full turn and hands off in one "
+                     "short ramp at the seam, so a column cannot be pulled out radially and the wall lays exactly "
+                     "the material closed rings would.\n\n"
+                     "The setting trades seam softness against the width of the handoff band, where the whole wall "
+                     "is briefly in transit and is measurably weaker: on a 32 mm tube the band runs about 3 mm at "
+                     "5%, 4.5 mm at 8% and 7 mm at 12%, and a printed tube peeled along it at 12%. Prefer the "
+                     "smallest value that still softens the seam.");
     def->sidetext = L("%");
     def->min = 5;
     def->max = 100;

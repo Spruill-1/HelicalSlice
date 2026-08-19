@@ -374,8 +374,38 @@ a constant radius for a full turn, and one narrow azimuth band - the seam, alrea
 sacrificial line - where the columns hand off. What the ramp buys over ring mode is a
 junction spread into a shallow ramp instead of an abrupt radial jump.
 
-`sliced/T5_ramp12.gcode.3mf` is the print candidate. Predicted 16.50 g; a tube that
-weighs right AND peels would mean the ramp itself is not the answer either.
+## Aligned ramp 12 PRINTED: "significantly better", residual peel IS the handoff band (2026-08-19)
+
+The volume-parity tube is much better than every compensated/dispersed predecessor - no
+general delamination - but a ~6 mm peel band remains immediately next to the seam. That
+is the design's own handoff band, and the agreement is quantitative: measuring the
+azimuths whose crossing set deviates from the modal spacing gives a disturbed band of
+**7.0 mm at ramp 12**, against the ~6 mm peel observed. The metric predicts the defect.
+
+Mechanism: with the handoffs ALIGNED, every column transits within the same azimuth
+window, so that window is the one place where the entire wall thickness is simultaneously
+out of register - a through-thickness cleavage plane with no column left in normal
+register to arrest a crack. The band scales linearly with the ramp and costs nothing to
+shrink (aligned handoffs are volumetrically exact at any ramp):
+
+| ramp | disturbed band | weight | constant-radius run |
+|---|---|---|---|
+| 12% | 7.0 mm | 16.50 g | 1.01 turn |
+| 8% | 4.6 mm | 16.51 g | 1.01 turn |
+| **5%** | **3.1 mm** | **16.51 g** | 1.01 turn |
+
+Why narrowing (rather than dispersing) is the right move: ring mode ALSO stacks its
+junctions at essentially one azimuth and does not peel, so a stacked through-thickness
+disturbance is tolerable when it is narrow - ring mode's own junction footprint is
+~1-2 mm. Dispersing instead would cost material in proportion to the dispersion (the law
+measured above) for a defect that ring mode shows is survivable when short.
+
+`sliced/T5_ramp5.gcode.3mf` is the print candidate: 3.1 mm band, 16.51 g, columns still
+holding a full turn. If the peel disappears, the ramp is viable and the band width is the
+governing parameter. If a ~3 mm band still peels while ring mode's ~1-2 mm one never has,
+then any spread handoff is a liability, the abrupt junction is what holds a
+continuous-shell wall together, and the interior-spiral line should be retired rather
+than tuned further.
 
 ## C-full design brief (from this campaign)
 
