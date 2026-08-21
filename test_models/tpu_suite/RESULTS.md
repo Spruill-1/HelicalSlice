@@ -407,6 +407,51 @@ then any spread handoff is a liability, the abrupt junction is what holds a
 continuous-shell wall together, and the interior-spiral line should be retired rather
 than tuned further.
 
+## Ramp 5 PRINTED: THE PEEL IS GONE (2026-08-21)
+
+`T5_ramp5` printed with no delamination anywhere - the first continuous-shell tube with
+a spiral-derived interior that holds together. The section shows the regular triangular
+corner-void lattice (the same T-junction packing ring mode produces), and the handoff
+band reads as a clean diagonal line on the outside rather than a cleavage plane. Seven
+revisions to isolate it; the chain that got here:
+
+| rev | change | print result |
+|---|---|---|
+| v1 | double-arm spiral | peeled into two helical sheets |
+| v2 | single arm (warm radial welds) | still peeled - falsified the thermal story |
+| v3 | fixed traversal | still peeled - falsified reverse-join doubling |
+| v4 | sine Z-stagger | NO PEEL - interdigitation confirmed, but void rows |
+| v5 | golden staircase | mixed: pinpricks in part, splits elsewhere |
+| v6 | ramp-tilt compensation | mostly solid, residual splits |
+| ramp 12 | ring-like columns, aligned handoffs | much better; ~6 mm peel in the handoff band |
+| **ramp 5** | **3.1 mm handoff band** | **no peel** |
+
+Standing verdict on the mechanism: radial integrity comes from COLUMN TOPOLOGY (a column
+that wraps past a half turn cannot be pulled out radially) plus a NARROW handoff band.
+Interdigitation depth and thermal adjacency are secondary; both were falsified as primary
+causes along the way.
+
+Residual observation from the print: slightly less column-to-column bonding than wanted.
+That is the Z-stagger's amplitude - at half a layer, adjacent columns overlap only half
+their height. With ring-like columns the topology carries the anti-cleavage load that
+half a layer was buying, so the amplitude drops to a QUARTER layer (the brick interlock's
+proven envelope, and what the first peel-free spiral used). Measured on the re-slice:
+adjacent-column offsets now cluster at 0.17-0.20 of a layer, mean overlap 72% of bead
+height (was ~62%), still 16.51 g. One interface per ray still sits near 0.48 - a
+systematic feature of the golden level sequence worth watching in the section.
+
+Two real bugs fixed at the same time, both found by the suite once the ramped path became
+the default: the arm left the outer ring at FULL stagger (a 0.12 mm vertical step at the
+entry hop - the stagger now tapers to zero at the arm's own ends), and the ramp-tilt
+compensation used the spiral's mid-slot radius per revolution, which mis-estimates the
+rise for a ramped arm that sits ON its column's radius - leaving the interdigitation
+depths off target, the very quantity that sets overlap.
+
+`continuous_shell_junction_ramp` now DEFAULTS TO 5 rather than 100: defaulting to the
+pure spiral meant defaulting to the one configuration print-proven to peel.
+`sliced/T5_ramp5b.gcode.3mf` is the next candidate (quarter-layer stagger + both fixes);
+`sliced/T5_ramp5.gcode.3mf` is retained as the validated peel-free reference.
+
 ## C-full design brief (from this campaign)
 
 1. Retire ONE ring at a time via an angular wedge (locally odd counts) —

@@ -741,7 +741,7 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
                          const std::vector<float> *ring_widths = nullptr, std::vector<float> *pt_width = nullptr,
                          float nominal_width = 0.f,
                          coord_t scarf_len = 0, float scarf_floor = 0.f,
-                         const ChainBeadPlan *plan = nullptr, coord_t spiral_wave_amp = 0)
+                         const ChainBeadPlan *plan = nullptr, coord_t layer_h_scaled = 0)
 {
     Polyline spiral;
     if (rings_in.empty())
@@ -988,30 +988,46 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
     if (plan != nullptr && plan->spiral && has_bore && grid.size() == 2 && plan->n_slots >= 6) {
         const double S   = double(plan->n_slots - 1);        // slot span, surface to surface
         const double th0 = seam_theta;                       // both junctions ride the seam column
-        const coord_t wamp = (layer_index == 0) ? 0 : spiral_wave_amp;
+        // Stagger amplitude: a quarter layer (see the caller). The wrap modulus below is
+        // one full LAYER, not twice the amplitude - offsets are nest-equivalent mod the
+        // layer height, whatever amplitude the stagger happens to use.
+        const coord_t wamp = (layer_index == 0) ? 0 : coord_t(layer_h_scaled / 4);
         const double g_conj = 0.6180339887498949;            // golden-ratio conjugate
         const int    n_revs = int(S);                        // n_slots is integral, so S is too
+        const bool   ramped = plan->ramp_frac < 0.999;
+        const double f      = std::clamp(plan->ramp_frac, 0.05, 1.0);
+        const int    n_col  = std::max(1, n_revs - 1);       // buried columns, slots 1 .. S-1
+        const int    n_arm_rev = ramped ? n_col : n_revs;    // revolutions the arm actually makes
         std::vector<double> lvl(size_t(n_revs) + 1, 0.0);    // staircase level per revolution (scaled)
         if (wamp > 0) {
-            const double h_sp = 2.0 * double(wamp);          // one layer height, scaled
+            const double h_sp = double(layer_h_scaled);      // one layer height, scaled
             const double ro   = plan->r_out.sample_linear(th0);
             const double rb   = plan->r_bore.sample_linear(th0);
             double L_est = 2.0 * M_PI * (ro + rb);           // the two surface rings...
-            std::vector<double> rev_len(size_t(n_revs), 0.0);
-            for (int j = 0; j < n_revs; ++j) {               // ...plus each arm revolution
-                const double r = ro - plan->frac_at_f(std::min(double(j) + 0.5, S), th0) * (ro - rb);
+            std::vector<double> rev_len(size_t(n_arm_rev), 0.0);
+            for (int j = 0; j < n_arm_rev; ++j) {            // ...plus each arm revolution
+                // A ramped revolution sits ON its column's radius; a spiral revolution
+                // sweeps between two, so its mean radius is the midpoint. Getting this
+                // wrong mis-estimates the arc-length ramp's rise per revolution, and the
+                // tilt compensation then leaves the interdigitation depths off target -
+                // which is exactly the quantity that sets column-to-column overlap.
+                const double vq = ramped ? (1.0 + double(j)) : (double(j) + 0.5);
+                const double r  = ro - plan->frac_at_f(std::min(vq, S), th0) * (ro - rb);
                 rev_len[size_t(j)] = 2.0 * M_PI * r;
                 L_est += rev_len[size_t(j)];
             }
-            double tilt = 0.0;                               // accumulated ramp rise, rev 0 to rev j
+            double tilt = 0.0;                               // accumulated ramp rise up to level j
             for (int j = 0; j <= n_revs; ++j) {
-                double f = (double(j) + 1.0) * g_conj;
-                f -= std::floor(f);
-                const double target = (2.0 * f - 1.0) * double(wamp);      // TOTAL offset target
+                double fr = (double(j) + 1.0) * g_conj;
+                fr -= std::floor(fr);
+                const double target = (2.0 * fr - 1.0) * double(wamp);     // TOTAL offset target
                 const double x      = target - tilt;
                 lvl[size_t(j)]  = x - h_sp * std::floor(x / h_sp + 0.5);   // wrap to [-h/2, h/2)
-                if (j < n_revs)
-                    tilt += h_sp * rev_len[size_t(j)] / L_est;
+                // Level j is worn by the revolution that follows it: revolution j for the
+                // spiral, revolution j-1 for a ramped arm (whose levels index columns 1..n).
+                const int ri = ramped ? (j - 1) : j;
+                if (ri >= 0 && ri < n_arm_rev)
+                    tilt += h_sp * rev_len[size_t(ri)] / L_est;
             }
         }
         auto arm_wave = [&](double v) -> coord_t {
@@ -1078,9 +1094,6 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
         // All the columns hand off inside the same narrow azimuth band - the seam column,
         // which is already the sacrificial line - so what the ramp buys over ring mode is a
         // junction spread into a shallow ramp instead of an abrupt radial jump.
-        const bool   ramped = plan->ramp_frac < 0.999;
-        const double f      = std::clamp(plan->ramp_frac, 0.05, 1.0);
-        const int    n_col  = std::max(1, n_revs - 1);         // buried columns, slots 1 .. S-1
         auto v_of_tau = [&](double tau) -> double {
             if (!ramped)
                 return tau;
@@ -1095,9 +1108,15 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
         // fractional v means radius and height step together, in one localized event per
         // column, instead of the pure spiral's separate step window.
         auto ramp_wave = [&](double v) -> coord_t {
-            const double env = std::clamp((std::min(v, S - v) - 0.25) * 2.0, 0.0, 1.0);
-            const int    j   = std::clamp(int(std::floor(v)), 0, n_revs - 1);
-            const double q   = std::clamp(v - double(j), 0.0, 1.0);
+            // Two envelopes: away from the surfaces (as the spiral uses), and away from the
+            // ARM'S OWN ENDS. A ramped arm starts at slot 1, a full pitch clear of the
+            // surface, so the surface envelope alone would have it leave the outer ring at
+            // full stagger - a 0.12 mm vertical step at the entry hop.
+            const double env_s = std::clamp((std::min(v, S - v) - 0.25) * 2.0, 0.0, 1.0);
+            const double env_e = std::clamp(std::min(v - 1.0, double(n_col) - v) * 2.0, 0.0, 1.0);
+            const double env   = std::min(env_s, env_e);
+            const int    j     = std::clamp(int(std::floor(v)), 0, n_revs - 1);
+            const double q     = std::clamp(v - double(j), 0.0, 1.0);
             return coord_t(std::llround(env * (lvl[size_t(j)] + (lvl[size_t(j) + 1] - lvl[size_t(j)]) * q)));
         };
         // Sampling density per revolution follows the buried-ring chord policy; a short
@@ -1983,12 +2002,17 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     const double interlock_ratio = (config != nullptr) ? config->continuous_shell_interlock.value / 100.0 : 0.0;
     const coord_t interlock_amp  = coord_t(std::llround(scale_(interlock_ratio * layer_height / 4.0)));
 
-    // Phase B: intrinsic spiral Z-stagger amplitude - half a layer, matching ring
-    // mode's own bead-Z spread (its ramp fractions span a full layer across the
-    // wall; see the spiral branch of spiralize_rings). Deliberately NOT a knob:
-    // unlike ring mode, the spiral interior has no natural bricklaying, so it
-    // needs the interdigitation unconditionally.
-    const coord_t spiral_wave_amp = coord_t(std::llround(scale_(layer_height / 2.0)));
+    // Layer height for the interior arm's intrinsic Z-stagger (it takes a quarter of
+    // this as its amplitude, and wraps its ramp-tilt compensation modulo the whole
+    // layer). Half a layer of stagger was needed while the interior was a pure helical
+    // thread, whose only defence against radial cleavage was interdigitation. Once the
+    // arm holds ring-like columns (a junction ramp below 100) the topology carries that
+    // load, and half a layer starts costing what it was buying: adjacent columns then
+    // overlap only half their height, which reads in the section as reduced
+    // column-to-column bonding. A quarter layer - the brick interlock's print-proven
+    // envelope, and what the first peel-free spiral used - keeps the interdigitation
+    // while restoring three quarters of the overlap.
+    const coord_t cs_layer_h_scaled = coord_t(std::llround(scale_(layer_height)));
 
     // A2 - connector spread: distribute the per-ring surface<->interior handoffs around the
     // circumference instead of stacking them into one deep seam groove (passed to
@@ -2025,7 +2049,7 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
                                        ring_spacing, layer_index, chain.has_bore, &flags, interlock_amp, &zoff,
                                        connector_spread, chain.woven_infill ? woven.shell_loops : 0,
                                        &merged.front(), &chain.ring_widths, &widths, flow.width(),
-                                       scarf_len, scarf_floor, chain.plan.get(), spiral_wave_amp);
+                                       scarf_len, scarf_floor, chain.plan.get(), cs_layer_h_scaled);
         if (sub.points.size() >= 2 && sub.points.size() == flags.size() && sub.points.size() == zoff.size()
             && sub.points.size() == widths.size())
             // A chain carries the Z-wave only when its interior was actually thinned AND its

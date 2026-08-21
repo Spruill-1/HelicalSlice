@@ -6138,12 +6138,13 @@ void PrintConfigDef::init_fff_params()
                      "The setting trades seam softness against the width of the handoff band, where the whole wall "
                      "is briefly in transit and is measurably weaker: on a 32 mm tube the band runs about 3 mm at "
                      "5%, 4.5 mm at 8% and 7 mm at 12%, and a printed tube peeled along it at 12%. Prefer the "
-                     "smallest value that still softens the seam.");
+                     "smallest value that still softens the seam: the default of 5% printed with no delamination "
+                     "at all, while 100% (the pure spiral) is kept only for comparison and is known to peel.");
     def->sidetext = L("%");
     def->min = 5;
     def->max = 100;
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionPercent(100));
+    def->set_default_value(new ConfigOptionPercent(5));
 
     def = this->add("continuous_shell_infill_density", coPercent);
     def->label = L("Continuous shell infill density");

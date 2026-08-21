@@ -1690,14 +1690,18 @@ TEST_CASE("Interior spiral carries a per-revolution incommensurate Z-stagger", "
 
     const std::vector<Point3> pts = build_raw_z(4);
     REQUIRE(pts.size() > 500);
-    const coord_t amp = coord_t(std::llround(scale_(layer_height / 2.0)));
+    const coord_t amp = coord_t(std::llround(scale_(layer_height / 4.0)));
 
-    // (a) real and bounded
+    // (a) real, and bounded by the WRAP range rather than the amplitude: levels are
+    // nest-equivalent modulo a layer, so ramp-tilt compensation may legitimately place a
+    // column anywhere within half a layer of nominal. The amplitude governs the gaps
+    // BETWEEN columns (checked below), which is what sets how much they overlap.
+    const coord_t wrap = coord_t(std::llround(scale_(layer_height / 2.0)));
     coord_t z_reach = 0;
     for (const Point3 &q : pts)
         z_reach = std::max(z_reach, coord_t(std::abs(q.z())));
     REQUIRE(z_reach > amp * 7 / 10);
-    REQUIRE(z_reach <= amp + 2);
+    REQUIRE(z_reach <= wrap + 2);
 
     // (b) surface rings and merge-adjacent radii pinned to the ramp
     double r_min = std::numeric_limits<double>::max(), r_max = 0.;
@@ -1712,11 +1716,13 @@ TEST_CASE("Interior spiral carries a per-revolution incommensurate Z-stagger", "
             REQUIRE(std::abs(q.z()) <= 2);
     }
 
-    // (c) continuity: the wave never steps between consecutive points
+    // (c) continuity: no jump between consecutive points. A ramped handoff concentrates
+    // the level change into a short arc by design, so the bound is a tenth of a layer per
+    // segment (a few percent of slope) rather than the pure spiral's gentler drift.
     coord_t max_step = 0;
     for (size_t i = 1; i < pts.size(); ++i)
         max_step = std::max(max_step, coord_t(std::abs(pts[i].z() - pts[i - 1].z())));
-    REQUIRE(max_step < coord_t(scale_(0.01)));
+    REQUIRE(max_step < coord_t(std::llround(scale_(0.1 * layer_height))));
 
     // (d) first layer flat
     coord_t z0 = 0;
@@ -1724,46 +1730,76 @@ TEST_CASE("Interior spiral carries a per-revolution incommensurate Z-stagger", "
         z0 = std::max(z0, coord_t(std::abs(q.z())));
     REQUIRE(z0 == 0);
 
-    // (e)+(f) staircase structure: on several rays, cluster crossings by radius and
-    // keep buried full-envelope clusters. A ray clear of the seam step zone must see
-    // adjacent-interface depths inside the golden-gap window [0.3 h, 0.7 h] (never
-    // coplanar), and the per-interface levels must be identical across such rays
-    // (constant depth around the circumference). The step zone (0.08 of a revolution)
-    // plus ray width can spoil at most ~2 of the 6 azimuths.
-    auto ray_levels = [&](double az) {
-        std::vector<std::pair<double, coord_t>> ray;    // (r_mm, z)
-        for (const Point3 &q : pts) {
+    // (e) THE quantity that matters: the PHYSICAL height offset between radially adjacent
+    // columns, which is the stagger plus the arc-length ramp's own rise (neighbours are a
+    // revolution apart in path), folded modulo a layer because offsets are nest-equivalent
+    // mod h. That offset sets how much two columns overlap - too little and the interfaces
+    // are coplanar cleavage planes, too much and the columns barely touch. The design puts
+    // it on the golden gaps, so every adjacent pair should land in a band around them and
+    // none should be near coplanar. Measured on the FINAL Z (ramp applied), unlike the raw
+    // stagger checked above.
+    auto build_final_z = [&](size_t layer_idx) {
+        PrintRegionConfig cfg;
+        cfg.continuous_shell_adaptive_beading.value = true;
+        cfg.continuous_shell_interior_spiral.value  = true;
+        ExtrusionEntityCollection e;
+        std::string reason;
+        REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, layer_height, &cfg, e, &reason, false, layer_idx));
+        ContinuousShellPathBuilder::apply_continuous_z(&e, layer_height);
+        std::vector<Point3> out;
+        for (auto *ent : e.entities)
+            if (auto *mp = dynamic_cast<ExtrusionMultiPath *>(ent))
+                for (auto &p : mp->paths)
+                    for (auto &q : p.polyline.points)
+                        out.push_back(q);
+        return out;
+    };
+    const std::vector<Point3> fpts = build_final_z(4);
+    auto ray_offsets = [&](double az) {
+        std::vector<std::pair<double, double>> ray;     // (r_mm, z_mm)
+        for (const Point3 &q : fpts) {
             const Vec2d d = Point(q.x(), q.y()).cast<double>();
             double a = std::atan2(d.y(), d.x()) - az;
             a = std::atan2(std::sin(a), std::cos(a));
             if (std::abs(a) < 0.02)
-                ray.emplace_back(d.norm() * SCALING_FACTOR, q.z());
+                ray.emplace_back(d.norm() * SCALING_FACTOR, double(q.z()) * SCALING_FACTOR);
         }
         std::sort(ray.begin(), ray.end());
-        std::vector<std::pair<double, coord_t>> rings;  // one (r, z) per crossing
-        for (size_t i = 0; i < ray.size(); ++i)
-            if (i == 0 || ray[i].first - ray[i - 1].first > 0.5 * sp) {
-                if (ray[i].first > r_min + 2.5 * sp && ray[i].first < r_max - 2.5 * sp)
-                    rings.push_back(ray[i]);
+        std::vector<double> offs;
+        double prev_z = 0.;
+        bool   have   = false;
+        for (size_t i = 0; i < ray.size(); ++i) {
+            if (i > 0 && ray[i].first - ray[i - 1].first <= 0.5 * sp)
+                continue;                               // same crossing
+            if (ray[i].first <= r_min + 2.5 * sp || ray[i].first >= r_max - 2.5 * sp) {
+                have = false;                           // skip the merge-tapered ends
+                continue;
             }
-        return rings;
-    };
-    const coord_t gap_lo = coord_t(std::llround(scale_(0.30 * layer_height)));
-    const coord_t gap_hi = coord_t(std::llround(scale_(0.70 * layer_height)));
-    std::vector<std::vector<std::pair<double, coord_t>>> clean;
-    for (int k = 0; k < 6; ++k) {
-        std::vector<std::pair<double, coord_t>> rings = ray_levels(-M_PI + (k + 0.5) * (2.0 * M_PI / 6.0));
-        if (rings.size() < 5)
-            continue;
-        bool ok = true;
-        for (size_t i = 1; i < rings.size() && ok; ++i) {
-            const coord_t d = coord_t(std::abs(rings[i].second - rings[i - 1].second));
-            ok = d >= gap_lo && d <= gap_hi;
+            if (have) {
+                const double d = std::abs(ray[i].second - prev_z);
+                const double m = d - layer_height * std::floor(d / layer_height);
+                offs.push_back(std::min(m, layer_height - m));
+            }
+            prev_z = ray[i].second;
+            have   = true;
         }
+        return offs;
+    };
+    int good_rays = 0, rays = 0;
+    for (int k = 0; k < 8; ++k) {
+        const std::vector<double> offs = ray_offsets(-M_PI + (k + 0.5) * (2.0 * M_PI / 8.0));
+        if (offs.size() < 3)
+            continue;
+        ++rays;
+        bool ok = true;
+        for (double o : offs)
+            if (o < 0.10 * layer_height || o > 0.42 * layer_height)
+                ok = false;
         if (ok)
-            clean.push_back(std::move(rings));
+            ++good_rays;
     }
-    REQUIRE(clean.size() >= 4);                       // (e) golden gaps on rays off the step zone
+    REQUIRE(rays >= 6);
+    REQUIRE(good_rays >= rays - 2);                   // the handoff band may spoil a ray or two
     // (f) constant per revolution: outside the short step arcs and the merge tapers
     // the stagger holds one exact level, so the vast majority of consecutive points
     // share their z verbatim (a sine would drift at nearly every point).
