@@ -449,8 +449,34 @@ depths off target, the very quantity that sets overlap.
 
 `continuous_shell_junction_ramp` now DEFAULTS TO 5 rather than 100: defaulting to the
 pure spiral meant defaulting to the one configuration print-proven to peel.
-`sliced/T5_ramp5b.gcode.3mf` is the next candidate (quarter-layer stagger + both fixes);
 `sliced/T5_ramp5.gcode.3mf` is retained as the validated peel-free reference.
+
+## Quarter-stagger PRINTED: outer columns better, one dedicated mid-wall void (2026-08-21)
+
+Halving the stagger did improve the outer columns' bonding, and it exposed the defect the
+re-slice measurement had already flagged and I had not chased: ONE interface per ray sat
+at ~0.48 of a layer while the rest sat at 0.19. At a fixed radius that prints as a
+continuous void line, which is what the section shows mid-wall.
+
+Cause was the end-taper added in the same commit. It tapered the stagger envelope in the
+SLOT coordinate v - but during a hold v is CONSTANT at that column's slot, so the taper
+never eases in: it zeroed the stagger for the whole of the first and last buried column
+while their neighbours kept theirs, leaving those interfaces at a mismatched offset.
+**A quantity that is constant during a hold cannot be used to taper anything along a
+ramped arm.** The taper now runs along the PATH (tau) over a quarter revolution, which
+still removes the vertical step at the entry and exit hops without flattening a column.
+
+Measured per-interface offsets after the fix (fraction of a layer, folded mod h):
+
+| | interface 1 | interface 2 | interface 3 | mean overlap | weight |
+|---|---|---|---|---|---|
+| half stagger | 0.38-ish | 0.38-ish | 0.38-ish | ~62% | 16.51 g |
+| quarter, v-taper | 0.19 | 0.19 | **0.48** | 72% | 16.51 g |
+| **quarter, path-taper** | **0.19** | **0.19** | **0.31** | **77%** | 16.51 g |
+
+0.19 / 0.19 / 0.31 are exactly the golden gaps the level sequence is designed to produce,
+so the interdigitation is now on target at every interface with no outlier.
+`sliced/T5_ramp5b.gcode.3mf` is the candidate.
 
 ## C-full design brief (from this campaign)
 

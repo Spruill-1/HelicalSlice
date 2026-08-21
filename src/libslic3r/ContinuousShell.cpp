@@ -1107,13 +1107,17 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
         // The Z stagger follows the SAME schedule: interpolating the per-column levels at
         // fractional v means radius and height step together, in one localized event per
         // column, instead of the pure spiral's separate step window.
-        auto ramp_wave = [&](double v) -> coord_t {
-            // Two envelopes: away from the surfaces (as the spiral uses), and away from the
-            // ARM'S OWN ENDS. A ramped arm starts at slot 1, a full pitch clear of the
-            // surface, so the surface envelope alone would have it leave the outer ring at
-            // full stagger - a 0.12 mm vertical step at the entry hop.
+        auto ramp_wave = [&](double v, double tau) -> coord_t {
+            // The end taper must run along the PATH (tau), not along the slot coordinate.
+            // During a hold v is constant at the column's own slot, so a v-based taper does
+            // not ease in at all - it zeroes the stagger for the WHOLE of the first and last
+            // buried column, while their neighbours keep theirs. That leaves those two
+            // interfaces at a mismatched offset (measured ~0.48 of a layer, barely half
+            // overlapping) at one fixed radius, which prints as a continuous void line.
+            // Tapering over a quarter revolution of path still kills the vertical step at
+            // the entry and exit hops, without flattening a whole column.
             const double env_s = std::clamp((std::min(v, S - v) - 0.25) * 2.0, 0.0, 1.0);
-            const double env_e = std::clamp(std::min(v - 1.0, double(n_col) - v) * 2.0, 0.0, 1.0);
+            const double env_e = std::clamp(std::min(tau, double(n_col) - tau) / 0.25, 0.0, 1.0);
             const double env   = std::min(env_s, env_e);
             const int    j     = std::clamp(int(std::floor(v)), 0, n_revs - 1);
             const double q     = std::clamp(v - double(j), 0.0, 1.0);
@@ -1139,7 +1143,7 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
             const double th  = th0 + tau * 2.0 * M_PI;
             arm_pts.push_back(sp_point(v, th));
             arm_ws.push_back(arm_width(v, th));
-            arm_z.push_back(ramped ? ramp_wave(v) : arm_wave(v));
+            arm_z.push_back(ramped ? ramp_wave(v, tau) : arm_wave(v));
         }
         // Surface widths come from the RING tables' surface columns (the truncated
         // 2-ring grid does not index the plan's slot space directly).
