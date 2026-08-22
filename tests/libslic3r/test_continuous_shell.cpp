@@ -1617,20 +1617,38 @@ TEST_CASE("Interior spiral composes with an eccentric wall and ignores the inter
                 REQUIRE(radii[j] - radii[j - 1] < 2.4 * sp);
         }
     }
-    SECTION("interlock has no effect on a spiral chain") {
+    SECTION("interlock drives the ramped arm's stagger in Z only, and no-ops on a pure spiral") {
+        // The interior arm's Z staircase rides the brick-interlock knob when the arm holds
+        // ring-like columns: at 0 (the default) the columns keep the nesting the
+        // arc-length ramp gives them for free, which measured 0.17 of a layer on the T5
+        // tube. A PURE spiral still staggers unconditionally - it is one helical thread,
+        // with nothing else resisting radial cleavage - so the knob is inert there.
         const ExPolygon ann = make_annulus(12.0, 8.0 * sp + (0.5 - sp));
         Surfaces surfaces{ Surface(stInternal, ann) };
-        auto build = [&](double interlock_pct) {
+        auto build = [&](double interlock_pct, int ramp_pct) {
             PrintRegionConfig cfg;
             cfg.continuous_shell_adaptive_beading.value = true;
             cfg.continuous_shell_interior_spiral.value  = true;
+            cfg.continuous_shell_junction_ramp.value    = ramp_pct;
             cfg.continuous_shell_interlock.value        = interlock_pct;
             return cs_signature(surfaces, flow, cfg);
         };
-        const CsSig flat = build(0), locked = build(100);
+        const CsSig flat = build(0, 5), locked = build(100, 5);
         REQUIRE(flat.pts.size() == locked.pts.size());
-        for (size_t i = 0; i < flat.pts.size(); ++i)
-            REQUIRE(flat.pts[i] == locked.pts[i]);
+        bool any_z = false;
+        for (size_t i = 0; i < flat.pts.size(); ++i) {
+            REQUIRE(std::get<0>(flat.pts[i]) == std::get<0>(locked.pts[i]));   // X untouched
+            REQUIRE(std::get<1>(flat.pts[i]) == std::get<1>(locked.pts[i]));   // Y untouched
+            REQUIRE(std::get<3>(flat.pts[i]) == std::get<3>(locked.pts[i]));   // width untouched
+            if (std::get<2>(flat.pts[i]) != std::get<2>(locked.pts[i]))
+                any_z = true;
+        }
+        REQUIRE(any_z);                                        // it does move Z on a ramped arm
+
+        const CsSig sp_flat = build(0, 100), sp_locked = build(100, 100);
+        REQUIRE(sp_flat.pts.size() == sp_locked.pts.size());
+        for (size_t i = 0; i < sp_flat.pts.size(); ++i)
+            REQUIRE(sp_flat.pts[i] == sp_locked.pts[i]);       // inert on a pure spiral
     }
 }
 
@@ -1675,6 +1693,7 @@ TEST_CASE("Interior spiral carries a per-revolution incommensurate Z-stagger", "
         PrintRegionConfig cfg;
         cfg.continuous_shell_adaptive_beading.value = true;
         cfg.continuous_shell_interior_spiral.value  = true;
+        cfg.continuous_shell_junction_ramp.value    = 100;   // the staircase is unconditional here
         ExtrusionEntityCollection e;
         std::string reason;
         REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, layer_height, &cfg, e, &reason, false, layer_idx));
@@ -1742,6 +1761,7 @@ TEST_CASE("Interior spiral carries a per-revolution incommensurate Z-stagger", "
         PrintRegionConfig cfg;
         cfg.continuous_shell_adaptive_beading.value = true;
         cfg.continuous_shell_interior_spiral.value  = true;
+        cfg.continuous_shell_junction_ramp.value    = 100;   // the staircase is unconditional here
         ExtrusionEntityCollection e;
         std::string reason;
         REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, layer_height, &cfg, e, &reason, false, layer_idx));

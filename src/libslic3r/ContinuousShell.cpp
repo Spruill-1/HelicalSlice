@@ -988,15 +988,25 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
     if (plan != nullptr && plan->spiral && has_bore && grid.size() == 2 && plan->n_slots >= 6) {
         const double S   = double(plan->n_slots - 1);        // slot span, surface to surface
         const double th0 = seam_theta;                       // both junctions ride the seam column
-        // Stagger amplitude: a quarter layer (see the caller). The wrap modulus below is
-        // one full LAYER, not twice the amplitude - offsets are nest-equivalent mod the
-        // layer height, whatever amplitude the stagger happens to use.
-        const coord_t wamp = (layer_index == 0) ? 0 : coord_t(layer_h_scaled / 4);
         const double g_conj = 0.6180339887498949;            // golden-ratio conjugate
         const int    n_revs = int(S);                        // n_slots is integral, so S is too
         const bool   ramped = plan->ramp_frac < 0.999;
         const double f      = std::clamp(plan->ramp_frac, 0.05, 1.0);
         const int    n_col  = std::max(1, n_revs - 1);       // buried columns, slots 1 .. S-1
+        // Stagger amplitude. A PURE SPIRAL needs the staircase unconditionally: its
+        // interior is one helical thread and interdigitation is the only thing resisting
+        // radial cleavage. A RAMPED arm does not - its ring-like columns are topologically
+        // blocked from radial extraction, AND the arc-length ramp already offsets radially
+        // adjacent columns by its own rise per revolution (measured 0.17 of a layer on the
+        // T5 tube, against designed offsets of 0.19/0.19/0.31 - so the staircase was
+        // contributing +0.02/+0.02/+0.14, i.e. nothing on two interfaces and a
+        // least-overlapping outlier on the third). So for a ramped arm the staircase rides
+        // the existing brick-interlock knob, whose default of 0 means "keep the natural
+        // nesting" - the same verdict that knob already carries for ring mode.
+        // The wrap modulus below is one full LAYER, not twice the amplitude: offsets are
+        // nest-equivalent mod the layer height, whatever amplitude is in use.
+        const coord_t wamp = (layer_index == 0) ? 0
+                           : (ramped ? interlock_amp : coord_t(layer_h_scaled / 4));
         const int    n_arm_rev = ramped ? n_col : n_revs;    // revolutions the arm actually makes
         std::vector<double> lvl(size_t(n_revs) + 1, 0.0);    // staircase level per revolution (scaled)
         if (wamp > 0) {

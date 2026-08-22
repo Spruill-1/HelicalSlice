@@ -476,7 +476,39 @@ Measured per-interface offsets after the fix (fraction of a layer, folded mod h)
 
 0.19 / 0.19 / 0.31 are exactly the golden gaps the level sequence is designed to produce,
 so the interdigitation is now on target at every interface with no outlier.
-`sliced/T5_ramp5b.gcode.3mf` is the candidate.
+
+## Path-taper PRINTED, and the staircase turns out to be redundant (2026-08-21)
+
+The void line is gone: the section is a uniform corner-void lattice with no continuous
+channel at any radius. The voids are distinctly TRIANGULAR though - the T-junction
+signature of deliberate staggering, and the same signature the interlock A/B produced on
+the tube where a tear could be started (the plain one needed a scalpel). That prompted
+measuring how much of the stagger is actually ours:
+
+**The arc-length ramp already offsets radially adjacent columns by its own rise per
+revolution - measured h x (one revolution / total layer path) = 0.25 x 93/558 = 0.17 of a
+layer on the T5 tube.** Against designed offsets of 0.19 / 0.19 / 0.31, the imposed
+staircase was therefore contributing +0.02 / +0.02 / +0.14: nothing on two interfaces,
+and on the third an outlier that is the LEAST overlapping interface in the wall.
+
+The staircase exists because a pure spiral is one helical thread with nothing else
+resisting radial cleavage. A ramped arm's ring-like columns are topologically blocked
+already, so for a ramped arm the staircase now rides the existing
+`continuous_shell_interlock` knob - default 0, i.e. keep the natural nesting, the same
+verdict that knob already carries for ring mode. A pure spiral still staggers
+unconditionally. Measured per-interface offsets (fraction of a layer, folded mod h):
+
+| | interface 1 | 2 | 3 | mean overlap | weight |
+|---|---|---|---|---|---|
+| half stagger | 0.38 | 0.38 | 0.38 | ~62% | 16.51 g |
+| quarter, slot-taper | 0.19 | 0.19 | 0.48 | 72% | 16.51 g |
+| quarter, path-taper | 0.19 | 0.19 | 0.31 | 77% | 16.51 g |
+| **natural nesting (interlock 0)** | **0.16** | **0.17** | **0.17** | **83%** | 16.51 g |
+
+Uniform across every interface, no outlier, the most bead-to-bead contact of any
+configuration tried, and it deletes a knob's worth of machinery from the default path.
+`sliced/T5_ramp5c.gcode.3mf` is the candidate. Prediction: smaller and more uniform
+voids, less pronounced T-junction rows, no return of the peel (topology carries that).
 
 ## C-full design brief (from this campaign)
 
