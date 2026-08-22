@@ -573,10 +573,27 @@ unexpectedly. **S4's 30 solid layers above the cap are move-for-move IDENTICAL b
 ring and spiral mode** - the plan declines on solid sections and hands back cleanly,
 which is the mid-print handover working exactly as designed.
 
-`sliced/PlateS_shapes.gcode.3mf` prints all four (39.9 g, 174 min) for physical
-confirmation. Slicer-side generalization is done; what a print would still add is
-surface/seam behaviour at corners and lobes, and whether the cap transition leaves a
-visible mark.
+`sliced/PlateS_shapes.gcode.3mf` (built by `tools/make_shape_plate.py`) prints all four
+shapes in spiral mode PLUS the legacy 60 mm T5 tube in RING mode as the seam control -
+56.4 g, 243 min, five objects printed by object. Running the control on the same plate
+puts the seam A/B on one filament, one session and one machine state, and its 60 mm
+height matches the spiral tube already in hand.
+
+Two things the script asserts rather than assumes, because both are silent failure modes:
+
+- **The 60 mm control must print LAST.** It exceeds the H2D's 47.4 mm rod clearance
+  (`extruder_clearance_height_to_rod`), so it is only safe alongside the 30 mm shapes if
+  nothing is printed after it. The arranger does put it last - the script fails the build
+  if it ever stops doing so, since getting this wrong drives the gantry through a printed
+  part. (The old suite note that 60 mm objects "exceed the by-object height limit" is too
+  strong: they are fine as the final object, and OrcaSlicer's own sequential validation
+  passes.)
+- **The per-object override must actually apply.** Measured on the sliced plate: the four
+  shapes run 3.0 junctions per layer (ramped spiral) and the control runs 6.0 (ring mode),
+  which is the override working rather than silently inheriting the plate's spiral setting.
+
+`sliced/T5_ring.gcode.3mf` remains as a standalone control (16.55 g, 75 min) if only the
+seam comparison is wanted without the 4-hour plate.
 
 ## C-full design brief (from this campaign)
 
