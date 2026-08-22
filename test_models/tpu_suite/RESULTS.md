@@ -510,6 +510,37 @@ configuration tried, and it deletes a knob's worth of machinery from the default
 `sliced/T5_ramp5c.gcode.3mf` is the candidate. Prediction: smaller and more uniform
 voids, less pronounced T-junction rows, no return of the peel (topology carries that).
 
+## Natural nesting PRINTED: TEAR TEST PASSED - strength gate cleared (2026-08-22)
+
+The natural-nesting tube (ramp 5, interlock 0) **could not be torn without a scalpel** -
+exactly the result the plain adaptive RING tube gave, and the result the interlocked ring
+tube FAILED (a tear could be started and propagated on that one). No peel, no
+delamination, uniform section. On the one test that has ever discriminated between
+configurations in this campaign, the interior spiral now matches ring mode.
+
+State of the two modes on the same tube, same profile, same printer:
+
+| | ring mode | ramp 5, natural nesting |
+|---|---|---|
+| predicted weight | 16.55 g | 16.51 g |
+| print time | 75 min | 75 min |
+| junctions per layer | 6 | **3** |
+| tear initiation | scalpel required | **scalpel required** |
+| radial peel | none | none |
+
+Caveat worth keeping: "cannot start a tear" is a CEILING result. Both configurations sit
+at the ceiling, so this shows no difference rather than proving equality - ranking them
+would need a starter notch and a propagation measurement, or a pull test. n=1 as always.
+
+That leaves exactly one question unanswered, and it is the one the whole workstream
+exists for: **is the seam actually better than ring mode's?** Never A/B'd on a finished
+tube. `sliced/T5_ring.gcode.3mf` is now the control - same geometry, same profile, only
+`continuous_shell_interior_spiral` off - so the comparison is a single print away.
+Protocol: backlit photograph of both seams, fingernail across the seam, and flex each
+tube with the seam on the outside of the bend (the test that exposed the scarf as a
+crease initiator). If the seam is not visibly better, the feature has no justification
+left and should stay off regardless of the strength parity.
+
 ## C-full design brief (from this campaign)
 
 1. Retire ONE ring at a time via an angular wedge (locally odd counts) —
