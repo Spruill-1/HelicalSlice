@@ -541,6 +541,43 @@ tube with the seam on the outside of the bend (the test that exposed the scarf a
 crease initiator). If the seam is not visibly better, the feature has no justification
 left and should stay off regardless of the strength parity.
 
+## Non-tube shapes: slicer validation (2026-08-22)
+
+Everything in the campaign had been validated on ONE circular tube, which is the
+friendliest case for a ramped arm: constant radius, constant wall, one bore, no corners,
+no solid sections. Four shapes each break one of those (`tools/gen_shape_suite.py`,
+all 30 mm tall, same 2.485 mm wall as T5):
+
+- **S1_ellipse** radius varies 20 -> 13 around the section
+- **S2_rsquare** superellipse, four corners (the case that historically under-counted
+  max beads on square annuli)
+- **S3_lobed** three lobes, concave-ish flanks, still star-shaped
+- **S4_capped** circular tube closing with a solid cap at 22 mm, so the plan must
+  decline mid-print and hand back to ring mode
+
+Sliced both ways and compared against ring mode on the same geometry, with the same
+72-ray metric applied to the validated tube as a baseline:
+
+| shape | weight ring / spiral | max radial gap ring / spiral | disturbed rays (spiral) |
+|---|---|---|---|
+| T5 tube (validated) | 16.55 / 16.51 g | 0.41 / 0.78 mm | 3 / 72 |
+| S1 ellipse | 8.67 / 8.66 g | 0.52 / 0.79 mm | 2 / 72 |
+| S2 rounded square | 9.33 / 9.31 g | 0.50 / 0.80 mm | 2 / 72 |
+| S3 three-lobed | 8.06 / 8.04 g | 0.50 / 0.80 mm | 3 / 72 |
+| S4 capped | 14.08 / 14.07 g | 0.41 / 0.76 mm | 3 / 72 |
+
+Every shape behaves like the tube: volume parity within 0.02 g, and a handoff band of
+2-3 rays in 72 (~4% of the circumference) with the same ~0.8 mm worst gap the printed,
+peel-free, untearable tube already carries. No shape hard-failed or declined
+unexpectedly. **S4's 30 solid layers above the cap are move-for-move IDENTICAL between
+ring and spiral mode** - the plan declines on solid sections and hands back cleanly,
+which is the mid-print handover working exactly as designed.
+
+`sliced/PlateS_shapes.gcode.3mf` prints all four (39.9 g, 174 min) for physical
+confirmation. Slicer-side generalization is done; what a print would still add is
+surface/seam behaviour at corners and lobes, and whether the cap transition leaves a
+visible mark.
+
 ## C-full design brief (from this campaign)
 
 1. Retire ONE ring at a time via an angular wedge (locally odd counts) —
