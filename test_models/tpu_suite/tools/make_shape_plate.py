@@ -1,15 +1,23 @@
-"""Build the single-plate shape + seam-control validation project.
+"""Build a shape + seam-control validation plate.
 
-Five objects, printed by object: the four non-tube shapes with the interior spiral ON,
-plus the legacy 60 mm T5 tube with it OFF (per-object override) as the RING-MODE SEAM
-CONTROL. Putting the control on the same plate means the seam A/B runs on one filament,
-one session and one machine state - better control than comparing tubes printed days
-apart, and it matches the 60 mm spiral tube already in hand.
+    make_shape_plate.py                                  # the full four-shape suite
+    make_shape_plate.py --out PlateS_resume S4_capped.stl  # just these, e.g. to resume
 
-Height safety: the 60 mm tube exceeds the H2D's 47.4 mm rod clearance, so it is only
-printable alongside shorter objects if it goes LAST in the sequential order. The
-arranger already does that (the shapes are 30 mm); the script asserts it rather than
-trusting it, because getting this wrong drives the gantry through a printed part.
+Objects print by object: the named shapes with the interior spiral ON, plus the legacy
+60 mm T5 tube with it OFF (per-object override) as the RING-MODE SEAM CONTROL. Running
+the control on the same plate puts the seam A/B on one filament, one session and one
+machine state - better than comparing tubes printed days apart - and its 60 mm height
+matches the spiral tube already in hand.
+
+Three things are asserted rather than assumed, because each fails silently:
+
+  * The 60 mm control prints LAST. It exceeds the H2D's 47.4 mm rod clearance, so it is
+    only safe alongside 30 mm shapes if nothing follows it. Getting this wrong drives
+    the gantry through a printed part.
+  * The per-object override applies - the control must slice in ring mode (~k junctions
+    per layer) rather than inheriting the plate's spiral setting (~3).
+  * The nozzle flow declaration carries one entry per extruder, or Bambu Connect
+    refuses the file.
 """
 import json, os, re, subprocess, sys, zipfile
 
@@ -18,10 +26,19 @@ SLICED  = os.path.join(SUITE, "sliced")
 CFG     = os.path.join(SUITE, "config")
 REPO    = os.path.abspath(os.path.join(SUITE, "..", ".."))
 EXE     = os.environ.get("ORCA_EXE") or os.path.join(REPO, "build", "src", "RelWithDebInfo", "orca-slicer.exe")
-PROJECT = os.path.join(SUITE, "PlateS_shapes.3mf")
 CONTROL = "T5_seam.stl"                       # the legacy 60 mm tube, sliced in ring mode
-SHAPES  = ["S1_ellipse.stl", "S2_rsquare.stl", "S3_lobed.stl", "S4_capped.stl"]
+ALL_SHAPES = ["S1_ellipse.stl", "S2_rsquare.stl", "S3_lobed.stl", "S4_capped.stl"]
 ROD_CLEARANCE = 47.4
+
+# Usage: make_shape_plate.py [--out NAME] [shape.stl ...]
+# With no shapes listed the full suite is built. Naming a subset re-plates just those
+# (e.g. to resume after a failed print) - the ring-mode control is always appended.
+argv   = sys.argv[1:]
+OUTNAME = "PlateS_shapes"
+if "--out" in argv:
+    i = argv.index("--out"); OUTNAME = argv[i + 1]; del argv[i:i + 2]
+SHAPES  = argv or list(ALL_SHAPES)
+PROJECT = os.path.join(SUITE, OUTNAME + ".3mf")
 
 def write_process():
     proc = json.load(open(os.path.join(CFG, "cs_t1_t4.json"), encoding="utf-8"))
@@ -81,10 +98,10 @@ def main():
     fil     = os.path.join(CFG, "filament.json")
     stls    = [os.path.join(SUITE, f) for f in SHAPES + [CONTROL]]
 
-    probe = os.path.join(SLICED, "PlateS_probe.gcode.3mf")
+    probe = os.path.join(SLICED, OUTNAME + "_probe.gcode.3mf")
     r = subprocess.run([EXE, "--load-settings", f"{machine};{proc}", "--load-filaments", fil,
                         "--arrange", "1", "--slice", "0",
-                        "--export-3mf", "PlateS_probe.gcode.3mf", "--outputdir", SLICED] + stls,
+                        "--export-3mf", OUTNAME + "_probe.gcode.3mf", "--outputdir", SLICED] + stls,
                        capture_output=True, text=True, timeout=1800)
     if r.returncode or not os.path.exists(probe):
         print((r.stdout or "")[-900:]); sys.exit("probe slice failed")
@@ -112,11 +129,11 @@ def main():
     zin.close()
     os.remove(probe)
 
-    out = os.path.join(SLICED, "PlateS_shapes.gcode.3mf")
+    out = os.path.join(SLICED, OUTNAME + ".gcode.3mf")
     if os.path.exists(out):
         os.remove(out)
     r = subprocess.run([EXE, "--load-settings", f"{machine};{proc}", "--load-filaments", fil,
-                        "--slice", "0", "--export-3mf", "PlateS_shapes.gcode.3mf",
+                        "--slice", "0", "--export-3mf", OUTNAME + ".gcode.3mf",
                         "--outputdir", SLICED, PROJECT],
                        capture_output=True, text=True, timeout=1800)
     if r.returncode or not os.path.exists(out):
