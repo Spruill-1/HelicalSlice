@@ -415,5 +415,9 @@
  "layer_change_gcode": ";======== H2D 20250710 layer_change ========\n; layer num/total_layer_count: {layer_num+1}/[total_layer_count]\n; update layer progress\nM73 L{layer_num+1}\nM991 S0 P{layer_num} ;notify layer change\n",
  "machine_pause_gcode": "M400 U1",
  "setting_id": "GM033",
- "printer_model": "Bambu Lab H2D"
+ "printer_model": "Bambu Lab H2D",
+ "nozzle_volume_type": [
+  "Standard",
+  "Standard"
+ ]
 }

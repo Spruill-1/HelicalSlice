@@ -137,6 +137,21 @@ def main():
         f"objects over {ROD_CLEARANCE} mm rod clearance must print LAST; got {tall} of {len(segs)}"
     assert junctions_per_layer(segs[-1]) > 4.5, \
         "the control object is not slicing in ring mode - per-object override did not apply"
+
+    # Bambu Connect validates the nozzle flow declared in the G-code CONFIG_BLOCK against
+    # the printer and refuses the file on mismatch ("The nozzle flow setting does not
+    # match ... Standardx1"). It needs ONE ENTRY PER EXTRUDER; a single entry on a
+    # two-extruder machine leaves the right nozzle unresolvable. This has bitten the suite
+    # twice, because the fix used to live only as a runtime patch inside a slicing script -
+    # it is now pinned in config/machine.json, and asserted here so it cannot regress again.
+    n_extruders = len(json.load(open(machine, encoding="utf-8"))["nozzle_diameter"])
+    decl = re.search(r"; nozzle_volume_type = (.*)", g)
+    assert decl, "no nozzle_volume_type declared - Bambu Connect will refuse the file"
+    entries = [s for s in decl.group(1).strip().split(",") if s]
+    assert len(entries) == n_extruders, \
+        (f"nozzle_volume_type declares {len(entries)} entry/entries ({decl.group(1).strip()}) "
+         f"for {n_extruders} extruders - Bambu Connect will refuse the file")
+    print(f"nozzle flow declaration: {decl.group(1).strip()} ({n_extruders} extruders) OK")
     print(f"\nOK: the {segs[-1]['zmax']:.0f} mm control prints last, and its junction count "
           f"confirms ring mode against the shapes' ramped spiral.")
 
