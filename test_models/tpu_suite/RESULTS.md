@@ -595,6 +595,25 @@ Two things the script asserts rather than assumes, because both are silent failu
 `sliced/T5_ring.gcode.3mf` remains as a standalone control (16.55 g, 75 min) if only the
 seam comparison is wanted without the 4-hour plate.
 
+## Non-tube shapes PRINTED: cross-sections are shape-INDEPENDENT (2026-08-23)
+
+(A power outage killed the first plate after three objects; the two survivors were
+re-plated with `make_shape_plate.py --out PlateS_resume S4_capped.stl`, identifying the
+lost pair by matching G-code segments to the project's build-item transforms.)
+
+**The three non-circular shapes came out with practically identical cross-sections** -
+the same regular corner-void lattice, indistinguishable between an ellipse whose radius
+swings 20 -> 13, a superellipse with four corners, and a three-lobed section with concave
+flanks. That is a stronger result than the slicer metric predicted. The metric said each
+shape carries the same 2-3 disturbed rays in 72 as the tube; the prints say the packing
+is shape-INDEPENDENT, including through the corners where the per-angle bead plan varies
+width fastest. Whatever the adaptive plan and the ramped arm are doing, section geometry
+does not perturb it.
+
+Taken with the tear and peel results on the tube, the interior spiral is now validated on
+geometry as well as strength: constant-radius circular, radius-varying, cornered,
+concave, and (slicer-side) annulus-to-solid.
+
 ## C-full design brief (from this campaign)
 
 1. Retire ONE ring at a time via an angular wedge (locally odd counts) —
