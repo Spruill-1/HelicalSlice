@@ -639,6 +639,51 @@ have been even if v1 had printed.
 the sliced G-code: 13.72 mm held to z=12.5, then 11.91 / 9.40 / 6.90 / 4.40 / 1.90 at
 2.5 mm intervals, closing just past z=26 - a clean 45-degree taper with no bridge.
 
+## Sparse core + continuous shell: S5, and a mode-coupling finding (2026-08-23)
+
+S4 v2's coned closure printed well (outside unchanged, inside clean and tapering to a
+smooth point), so S5 generalises it into a part that stacks three regimes in one object
+to test the sparse "woven" infill against the newer modes:
+
+    z 0 .. 10     annular wall, 5 beads (2.035 mm)   -> stays dense
+    z 10 .. 24    45-degree cone closing             -> wall thickens
+    z 24 .. 36    solid column, 27.9 mm core         -> sparse woven core
+    top layers    lid over the sparse core
+
+Wall thickness is the whole trick: the sparsifier only thins a chain with buried rings
+past its shells (annular needs n > 2*wall_loops+1, i.e. six beads at wall_loops 2), so
+2.035 mm is the thickest wall that stays fully dense. No modifiers and no height ranges -
+continuous shell rejects objects whose extra regions could split a layer, and that guard
+is right for modifier volumes even if it also blocks height ranges.
+
+Sliced at density 25% against a density-0 reference, the core does exactly what it should:
+**18.3 -> 7.2 beads per ray** in the solid column. But the annular wall also changed,
+5.0 -> 4.0 beads per ray, and that is NOT sparsification - decimation never fires there
+(`thick` is false at five beads). Isolating it:
+
+| config | wall beads/ray at z=5 |
+|---|---|
+| adaptive ON, density 0% | 5.0 |
+| adaptive OFF, density 0% | 4.0 |
+| adaptive ON, density 25% | **4.0** (identical to adaptive OFF) |
+
+**Enabling `continuous_shell_infill_density` silently disables ADAPTIVE BEADING (C-full)
+for the whole object**, because the plan is gated on `!woven.enabled` - and the interior
+spiral goes with it, for the same reason. So switching on sparse infill quietly regresses
+every wall in the part to the pre-C-full marching path, the one whose printed failure
+modes (periodic medial void line, rough transition band) this campaign spent its first
+half fixing.
+
+Whether the spiral should compose with sparse infill is arguable - sparse fill decimates
+the very buried rings the spiral reorganises, so they are plausibly alternatives for the
+same material. Adaptive beading is NOT arguable: it decides bead counts and widths, which
+is orthogonal to whether interior rings are later decimated, and losing it is a straight
+regression. Worth decoupling, but that is its own change with its own validation, not a
+side effect of this test.
+
+`sliced/S5_sparse.gcode.3mf` (18.9 g, 89 min) is the print. Read its wall as a C-lite
+wall, not as one of the validated C-full/spiral walls - it is not comparable to the tubes.
+
 ## C-full design brief (from this campaign)
 
 1. Retire ONE ring at a time via an angular wedge (locally odd counts) —
