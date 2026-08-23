@@ -142,9 +142,17 @@ def main():
     if r.returncode or not os.path.exists(out):
         print((r.stdout or "")[-900:]); sys.exit("plate slice failed")
 
+    # CLI slicing emits no thumbnail PNGs and Bambu Connect REFUSES such files.
+    subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                 "inject_thumbnails.py"), OUTNAME],
+                   cwd=os.path.dirname(os.path.abspath(__file__)),
+                   check=True, capture_output=True, text=True)
+
     with zipfile.ZipFile(out) as z:
         g    = z.read("Metadata/plate_1.gcode").decode("utf-8", "replace")
+        pngs = [n for n in z.namelist() if n.lower().endswith(".png")]
         meta = "".join(z.read(n).decode("utf-8", "replace") for n in z.namelist() if "slice_info" in n)
+    assert len(pngs) >= 5, f"only {len(pngs)} thumbnails - Bambu Connect will refuse the file"
     w = re.search(r'weight[^\d]*([\d.]+)', meta); t = re.search(r'prediction[^\d]*(\d+)', meta)
     segs = segments(g)
     print(f"plate: {w.group(1) if w else '?'} g, {int(t.group(1))//60 if t else '?'} min, "

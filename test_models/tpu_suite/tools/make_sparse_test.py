@@ -99,7 +99,21 @@ def slice_it(density, outname, outdir, overrides=None):
     decl = re.search(r"; nozzle_volume_type = (.*)", g)
     msg = f"nozzle_volume_type must declare {n_ext} entries - Bambu Connect will refuse the file"
     assert decl and len([e for e in decl.group(1).strip().split(",") if e]) == n_ext, msg
+    if os.path.abspath(outdir) == os.path.abspath(SLICED):
+        inject_thumbnails(out, outname)
     return out
+
+
+def inject_thumbnails(out, outname):
+    """CLI slicing emits no thumbnail PNGs and Bambu Connect REFUSES such files.
+    Every builder here must inject them; forgetting produces a file that slices, measures
+    and reports perfectly and then will not load on the printer."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    subprocess.run([sys.executable, os.path.join(here, "inject_thumbnails.py"), outname],
+                   cwd=here, check=True, capture_output=True, text=True)
+    with zipfile.ZipFile(out) as z:
+        pngs = [n for n in z.namelist() if n.lower().endswith(".png")]
+    assert len(pngs) >= 5, f"{outname}: only {len(pngs)} thumbnails - Bambu Connect will refuse the file"
 
 def profile(path, label):
     with zipfile.ZipFile(path) as z:

@@ -146,3 +146,55 @@ its own deps build — build trees are not in git):
   plate/small/no_light/top/pick PNGs rendered from `Metadata/plate_1.json`.
 
 The mode's error philosophy is fail-loudly: no silent fallbacks. Keep it that way.
+
+## Work plan from the 2026-08-23 audit
+
+Ordering rationale: fix what is wrong in **already-validated territory** first (density 0,
+default ON), then the prerequisites the decoupling would otherwise expose, then the
+decoupling itself. Each workstream is one commit with its own verification.
+
+| # | Workstream | Scope | Why here | Verified by |
+|---|---|---|---|---|
+| **W0** | Golden `CsSig` harness | Byte-identity table at density 0 over annulus / eccentric / star tube / taper flip / sub-bead / solid / the four force_solid sections / spiral-on | Fence for every later step. Any diff is a bug, never a threshold to retune | Green before W1 |
+| **W1** | `floor_transitional` re-derives `toolpath_locations` | `:599-616`, consumed `:626` | **Default ON at density 0** - the only item that touches print-validated output today | Golden table moves ONLY on transition layers; P2 print |
+| **W2** | Weave clamps | `:1680-1705`: clamp to shell radius -/+ one spacing; build `inner_prof` for the solid (no-bore) case | Prerequisite: the decoupling newly exposes *planned* surface rings to a bead-on-bead collision | G-code: no kept rib within a spacing of a shell; P4 section |
+| **W3** | Decoupling: `ContourChain::ring_slot` | Steps 1-8 of the brief; sparsifier extracted to a free function and called from the plan branch | The headline regression | Desync detector test; bit-identity at density 0; P3 |
+| **W4** | `force_solid` keeps adaptive | drop `&& !force_solid` at `:1970`, keep spiral gated on it | Owns the printed doubled lip; density>0 only, so inert at density 0 | P3 cone lip vs the S5 in hand |
+| **W5** | Surface the decline notes | 7 sites write `note`, nothing reads it (`:1489-1491`) | W3/W4 widen the set of silent fallbacks | A declining part logs a warning naming the layer |
+| **W6** | `force_solid` -> solid *mask* | accumulate `diff_ex` over shell layers, offset by `wall_loops*spacing` | Biggest behaviour change; wants its own print | Bit-identical on a flat lid; P5 |
+
+**Not scheduled:** the `SlotSchedule` single-source-of-truth refactor. It is the better end
+state and both judges said so, but it rewrites the print-validated sparsifier and carries an
+unprinted rib-placement law. Revisit after P4 says whether weave x per-angle width composes.
+
+## Print campaign
+
+Every print states what it must show. A print that cannot falsify anything is not run.
+
+| Plate | Objects | Question | Baseline | Must show |
+|---|---|---|---|---|
+| **P0** `PlateD_data` (ready) | D1_ladder (wall 8/7/6/5/4 beads), D2_core | Where the sparsify gate really flips, and what a wall looks like either side | density-0 reslice of the same objects | C-lite baseline for P3. Gate fires at 6+ beads only; the 5-bead step is 4 stretched beads |
+| **P1** `S5_conesparse` (in flight) | S5 geometry, `bottom_shell_layers=0` | Does sparsifying the cone wedge help or hurt the overhanging lip? | S5_sparse (printed) | Lip better (less over-extrusion feeding the droop) or worse (less backing). Either answer is data |
+| **P2** after W1 | T4_taper A/B, density 0 | Does re-deriving bead locations close the transition-band skin deficit? | T4_adaptive (printed) | Flip bands lose their void rows; skins gain ~49 um where k=3 |
+| **P3** after W3+W4 | S5 geometry + D1_ladder reprint, density 25 | **The load-bearing question: is C-full-under-sparse actually stronger than C-lite-under-sparse?** | S5_sparse and P0 (both printed) | Ladder 5-bead step 4.0 -> 5.0 beads/ray; base-wall void gone; cone lip undoubled; **tear test vs the C-lite coupon** |
+| **P4** after W2 | Weaved sparse annulus, density 20-30, sectioned | Does a kept rib at its slot's planned width, displaced by the weave, still overlap its neighbours? | P0 ladder 8-bead step | Ribs overlapping, NOT the tangent-with-no-overlap signature the T4 microscopy found |
+| **P5** after W6 | Capped cone + flat-lid part | Does a solid *mask* beat the whole-layer boolean without hurting the lid? | S5_conesparse (P1) | Lid unchanged; wedge sparse only where nothing needs support |
+
+**P3 is the gate on the whole workstream.** RESULTS.md has no sparse + C-full entry, so the
+claim that honest bead counts matter once the interior is decimated is inference. If the tear
+test cannot separate C-full-under-sparse from C-lite-under-sparse, W3 is correctness work with
+no strength dividend and the effort belongs elsewhere.
+
+Two effects ride along on P3 and are unmeasured today: Fermat parity and `spread_twist` are
+computed from POST-decimation indices (`:819-821, :1207-1220`), so a decimated plan chain gets
+different radial-neighbour Z offsets than the same wall at density 0 - a different non-periodic
+interdigitation, which is exactly what north star #4 buys. Tear both orientations.
+
+### Measured baselines already in hand (2026-08-23)
+
+- `PlateD_data` 12.00 g / 57 min vs 17.34 g / 79 min at density 0. Ladder beads per ray,
+  dense -> sparse: 8 -> 4.8, 7 -> 4.8, 6 -> 4.6 (stride); **5 -> 4.0 with the gate OFF**, so
+  that bead is lost to C-lite stretch, not to the sparsifier; 4 -> 4.0 unchanged.
+- D2_core does NOT demonstrate the `:1704` clamp gap: a solid centre is filled either way
+  (density 0 reaches r=0.2412 mm, density 25 r=0.2563 mm). The code gap is real; detecting it
+  needs a ring self-crossing test, not an `rmin` probe.
