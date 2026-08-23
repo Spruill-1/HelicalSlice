@@ -1367,8 +1367,23 @@ bool march_bands(ExPolygon band, coord_t spacing, bool has_hole,
     bool ended_by_vanish = false;
     for (;;) {
         // A wall band must keep exactly one hole; when it pinches we hit the medial.
-        if (has_hole && band.holes.size() != 1)
-            break;
+        if (has_hole && band.holes.size() != 1) {
+            if (band.holes.empty()) {
+                // ...but a wall of VARYING thickness pinches on its thinnest azimuth first, while
+                // thicker azimuths still have bands to give. Stopping here abandons that material:
+                // an eccentric bore (4 mm wall one side, 8 mm the other) kept only the five bands
+                // each face could give before the thin side closed and left a 0.9 mm void ring up
+                // the middle of the thick side - 31% of the part's material missing, silently.
+                // The remainder is no longer annular, so hand it on as a SOLID region and let it
+                // march to its own medial.
+                if (! chain.empty()) {
+                    chains.push_back(std::move(chain));
+                    vanished.push_back(0);
+                }
+                return march_bands(band, spacing, false, chains, vanished, point_count);
+            }
+            break;                          // bore split into several holes: not a topology we model
+        }
         // A solid region that grows a hole is a topology we do not model.
         if (!has_hole && !band.holes.empty())
             return false;
