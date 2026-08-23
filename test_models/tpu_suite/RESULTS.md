@@ -611,8 +611,33 @@ width fastest. Whatever the adaptive plan and the ramped arm are doing, section 
 does not perturb it.
 
 Taken with the tear and peel results on the tube, the interior spiral is now validated on
-geometry as well as strength: constant-radius circular, radius-varying, cornered,
-concave, and (slicer-side) annulus-to-solid.
+geometry as well as strength: constant-radius circular, radius-varying, cornered and
+concave. Annulus-to-solid is NOT yet validated - see below.
+
+## S4_capped v1 was a BAD MODEL, not a slicer result (2026-08-23)
+
+The capped shape printed with a clean outside and a mess inside: material drooping into
+the bore, blobs around the rim. That is a modelling error of mine, not a continuous-shell
+finding. v1 closed the bore with a FLAT HORIZONTAL DISC at z=22, over a bore 27.0 mm
+across - so the first solid layer was a 27 mm unsupported bridge printed into open air,
+with no fillet to ease into it, and in continuous-shell mode no bridging flow, no anchor
+infill and no support to help. It could only droop.
+
+It also means the test measured the wrong thing. The intent was "does the plan decline
+cleanly at annulus-to-solid and hand back to ring mode" - which the slicer answered
+(the solid layers are move-for-move identical between ring and spiral mode) - but the
+print was dominated by a bridging failure that says nothing about the transition.
+
+v2 closes the bore with a 45-degree CONE instead: cylindrical bore to z=13, then the
+radius sheds exactly one layer height per layer up to an apex at z=26.5, solid above.
+Every layer is self-supporting, and the section now walks the wall from 2.06 mm to
+15.4 mm before going solid - so it exercises the plan across nearly its whole range
+rather than stepping over it, which makes it a considerably better test than v1 would
+have been even if v1 had printed.
+
+`sliced/S4_capped_v2.gcode.3mf` (17.2 g, 78 min) is the reprint. Bore radius traced in
+the sliced G-code: 13.72 mm held to z=12.5, then 11.91 / 9.40 / 6.90 / 4.40 / 1.90 at
+2.5 mm intervals, closing just past z=26 - a clean 45-degree taper with no bridge.
 
 ## C-full design brief (from this campaign)
 

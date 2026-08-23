@@ -37,6 +37,9 @@ argv   = sys.argv[1:]
 OUTNAME = "PlateS_shapes"
 if "--out" in argv:
     i = argv.index("--out"); OUTNAME = argv[i + 1]; del argv[i:i + 2]
+WITH_CONTROL = "--no-control" not in argv        # drop the control once it has been printed
+if not WITH_CONTROL:
+    argv.remove("--no-control")
 SHAPES  = argv or list(ALL_SHAPES)
 PROJECT = os.path.join(SUITE, OUTNAME + ".3mf")
 
@@ -96,7 +99,7 @@ def main():
     proc    = write_process()
     machine = os.path.join(CFG, "machine.json")
     fil     = os.path.join(CFG, "filament.json")
-    stls    = [os.path.join(SUITE, f) for f in SHAPES + [CONTROL]]
+    stls    = [os.path.join(SUITE, f) for f in SHAPES + ([CONTROL] if WITH_CONTROL else [])]
 
     probe = os.path.join(SLICED, OUTNAME + "_probe.gcode.3mf")
     r = subprocess.run([EXE, "--load-settings", f"{machine};{proc}", "--load-filaments", fil,
@@ -116,8 +119,8 @@ def main():
         return (m.group(0).replace(f'value="{CONTROL}"', 'value="T5_ring_control"', 1) +
                 '\n    <metadata key="continuous_shell_interior_spiral" value="0"/>')
     ms2, _ = re.subn(r'<object id="(\d+)">\s*<metadata key="name" value="([^"]+)"/>', fix, ms)
-    if hits[0] != 1:
-        sys.exit(f"expected exactly one {CONTROL} object to tag, tagged {hits[0]}")
+    if hits[0] != (1 if WITH_CONTROL else 0):
+        sys.exit(f"expected {1 if WITH_CONTROL else 0} {CONTROL} object(s) to tag, tagged {hits[0]}")
 
     with zipfile.ZipFile(PROJECT, "w", zipfile.ZIP_DEFLATED) as zout:
         for info in zin.infolist():
@@ -150,10 +153,11 @@ def main():
         print(f"  {i+1}. peak Z {s['zmax']:5.1f} mm   junctions/layer {junctions_per_layer(s):.1f}")
 
     tall = [i for i, s in enumerate(segs) if s["zmax"] > ROD_CLEARANCE]
-    assert tall == [len(segs) - 1], \
+    assert tall in ([], [len(segs) - 1]), \
         f"objects over {ROD_CLEARANCE} mm rod clearance must print LAST; got {tall} of {len(segs)}"
-    assert junctions_per_layer(segs[-1]) > 4.5, \
-        "the control object is not slicing in ring mode - per-object override did not apply"
+    if WITH_CONTROL:
+        assert junctions_per_layer(segs[-1]) > 4.5, \
+            "the control object is not slicing in ring mode - per-object override did not apply"
 
     # Bambu Connect validates the nozzle flow declared in the G-code CONFIG_BLOCK against
     # the printer and refuses the file on mismatch ("The nozzle flow setting does not
@@ -169,8 +173,11 @@ def main():
         (f"nozzle_volume_type declares {len(entries)} entry/entries ({decl.group(1).strip()}) "
          f"for {n_extruders} extruders - Bambu Connect will refuse the file")
     print(f"nozzle flow declaration: {decl.group(1).strip()} ({n_extruders} extruders) OK")
-    print(f"\nOK: the {segs[-1]['zmax']:.0f} mm control prints last, and its junction count "
-          f"confirms ring mode against the shapes' ramped spiral.")
+    if WITH_CONTROL:
+        print(f"\nOK: the {segs[-1]['zmax']:.0f} mm control prints last, and its junction count "
+              f"confirms ring mode against the shapes' ramped spiral.")
+    else:
+        print("\nOK: shapes only, no ring-mode control on this plate.")
 
 if __name__ == "__main__":
     main()
