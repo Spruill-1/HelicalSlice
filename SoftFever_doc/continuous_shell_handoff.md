@@ -198,3 +198,44 @@ interdigitation, which is exactly what north star #4 buys. Tear both orientation
 - D2_core does NOT demonstrate the `:1704` clamp gap: a solid centre is filled either way
   (density 0 reaches r=0.2412 mm, density 25 r=0.2563 mm). The code gap is real; detecting it
   needs a ring self-crossing test, not an `rmin` probe.
+
+### W1b (new, 2026-08-23): the medial deficit on walls of varying thickness
+
+The marching-pinch fix (c17d5e36fd) restored the BULK material on eccentric bores - 69% ->
+101% at a 2 mm offset - but measuring the worst ray rather than the median shows one
+oversized gap left per ray, and it sits at the MEDIAL, where the two marching fronts meet:
+
+| tube | wall thin/thick | material | worst medial gap |
+|---|---|---|---|
+| E1_ecc  (offset 2.0, pinches)        | 4.0 / 8.0 mm | 101% | 0.82 mm (~1 bead) |
+| E2_mild (offset 0.5, does NOT pinch) | 5.5 / 6.5 mm |  94% | 1.29 mm (~2 beads) |
+
+Every other gap on both is 0.40-0.47 mm. E2 measured 94% before the pinch fix as well, so
+its void is pre-existing and untouched by it - the two are the same defect at different
+severities, not a regression introduced by the fix.
+
+Root cause, and why the obvious patch is wrong: C-lite's deficit correction is SCALAR. It
+takes one `d_res` from `vanish_depth` and widens the innermost ring pair uniformly. On a
+wall whose thickness varies with azimuth the residual varies too, so no single number is
+right. Simply marking the pinched chain `vanished = 1` makes it worse, not better:
+`vanish_depth` bisects until the whole shape vanishes, so on a pinched chain it returns the
+THICK side's half-thickness and would widen the innermost beads by ~0.6 mm each.
+
+The per-angle machinery that can express this already exists - it is C-full - and it
+declines on exactly these walls:
+
+    adaptive beading declined: wall thickness crosses more than one bead-count threshold
+
+So the correct fix is to widen C-full's scope to walls spanning more than one bead-count
+step, which means a per-angle bead COUNT rather than a single `n_slots` with per-angle
+widths. The width-birth mechanism already prints a transitional ring floored at `w_term`
+with the deficit redistributed, so the ingredients are there, but the count law and
+`blend_ring_beadings` pair only k and k-1 today. That is a design-sized change and should
+get the same treatment C-full itself got, not an improvisation.
+
+`sliced/PlateE_eccentric.gcode.3mf` (19.25 g, 87 min) is the print that scopes it: E1 and
+E2, 30 mm tall so both can be cut and torn. Two questions it answers that G-code cannot -
+(1) does the recovered material BOND at the pinch boundary, where a separate chain is
+joined at a place that used to be a void, or has a void been traded for a weak plane, and
+(2) how bad is a 0.8-1.3 mm medial void ring in plastic, which sets the priority of the
+C-full scope work against the rest of the queue.
