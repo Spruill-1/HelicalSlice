@@ -33,7 +33,11 @@ public:
     static bool build_cross_section(const Surfaces &surfaces, const Flow &flow, double layer_height, const PrintRegionConfig *config,
                                     ExtrusionEntityCollection &entities, std::string *reason = nullptr,
                                     bool reverse_path = false, size_t layer_index = 0, bool force_solid = false,
-                                    const ContinuousShellWidthLimits &width_limits = {});
+                                    const ContinuousShellWidthLimits &width_limits = {},
+                                    // Set when the layer BUILT but took a weaker path than asked for
+                                    // (adaptive beading skipped or declined, interior spiral declined).
+                                    // Distinct from `reason`, which reports an outright failure.
+                                    std::string *degrade_note = nullptr);
 
     // Collect the leaf ExtrusionPaths of a continuous-shell entity tree in traversal
     // order. Used by the whole-object Z planner (PrintObject::continuous_shell_z) at

@@ -2279,9 +2279,9 @@ TEST_CASE("Continuous shell density-0 signature table", "[.][ContinuousShellSig]
         cfg.continuous_shell_interior_spiral.value  = r.spiral;
         cfg.continuous_shell_infill_density.value   = 0;
         ExtrusionEntityCollection e;
-        std::string reason;
+        std::string reason, note;
         const bool built = ContinuousShellPathBuilder::build_cross_section(
-            r.surf, flow, 0.25, &cfg, e, &reason, false, r.layer, r.force_solid);
+            r.surf, flow, 0.25, &cfg, e, &reason, false, r.layer, r.force_solid, {}, &note);
         // Model area of the fixture: a malformed ExPolygon (a badly wound hole, say) shows up
         // here as a nonsense area, so a row cannot quietly guard the wrong geometry.
         double area = 0.0;
@@ -2299,6 +2299,10 @@ TEST_CASE("Continuous shell density-0 signature table", "[.][ContinuousShellSig]
         const double cover = s.volume_mm3 / (area * 0.25);
         std::printf("%-42s %8.2f %6zu %8zu %10.3f %7.3f  %016llx\n", r.name, area, s.paths,
                     s.points, s.length_mm, cover, static_cast<unsigned long long>(s.hash));
+        // A row that built but took a weaker path says so - otherwise a fixture can look
+        // like it guards the adaptive path while silently running C-lite.
+        if (! note.empty())
+            std::printf("%-42s   -> %s\n", "", note.c_str());
     }
     std::printf("\n%zu of %zu fixtures built\n\n", built_ok, rows.size());
     REQUIRE(built_ok > 0);

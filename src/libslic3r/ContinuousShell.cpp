@@ -1466,7 +1466,7 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
                                          const ContinuousShellWidthLimits &limits,
                                          bool adaptive = false, double layer_height = 0.,
                                          bool spiral_wanted = false, double junction_ramp = 1., double seam_theta = 0.,
-                                         std::string *fail_reason = nullptr)
+                                         std::string *fail_reason = nullptr, std::string *degrade_note = nullptr)
 {
     const coord_t spacing = flow.scaled_spacing();
     const coord_t width   = flow.scaled_width();
@@ -1485,6 +1485,21 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
     // deficit correction is skipped by design, underfilling the wall.) Out-of-scope
     // sections decline inside build_chain_plan and fall through to marching + C-lite;
     // a plan that contradicts its own invariants aborts the layer loudly.
+    // Every route that skips the plan degrades this layer to the marching C-lite path, which
+    // does NOT correct its medial deficit on a chain that pinches - a wall of varying thickness
+    // can lose a third of its material that way. Each of those routes reports itself; a silent
+    // fallback here is how a 31% underfill on eccentric bores went unnoticed (W0 fence).
+    // `adaptive` already folds in force_solid, which this function cannot see, so the caller
+    // pre-sets the note for the !adaptive cases and this only refines it.
+    if (adaptive && woven.enabled) {
+        if (degrade_note)
+            *degrade_note = "adaptive beading SKIPPED: sparse infill is active on this layer - wall "
+                            "bead counts fall back to C-lite marching";
+    } else if (adaptive && region.holes.size() != 1) {
+        if (degrade_note)
+            *degrade_note = region.holes.empty() ? "adaptive beading out of scope: solid (no bore) section"
+                                                 : "adaptive beading out of scope: multi-bore section";
+    }
     if (adaptive && !woven.enabled && region.holes.size() == 1) {
         std::string note, hard;
         std::unique_ptr<ChainBeadPlan> plan =
@@ -1494,6 +1509,10 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
                 *fail_reason = hard;
             return {};
         }
+        if (degrade_note && !note.empty())
+            // A plan that was BUILT can still carry a note (the spiral declining is not the plan
+            // declining), so say which happened rather than reporting every note as a fallback.
+            *degrade_note = (plan ? "interior spiral declined: " : "adaptive beading declined: ") + note;
         if (plan) {
             ContourChain cc;
             Polygons pr = plan_rings(*plan);
@@ -1908,7 +1927,8 @@ bool build_serpentine_cap(const ExPolygon &region, const Flow &flow, double laye
 bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, const Flow &flow, double layer_height,
                                                      const PrintRegionConfig *config, ExtrusionEntityCollection &entities,
                                                      std::string *reason, bool reverse_path, size_t layer_index, bool force_solid,
-                                                     const ContinuousShellWidthLimits &width_limits)
+                                                     const ContinuousShellWidthLimits &width_limits,
+                                                     std::string *degrade_note)
 {
     ExPolygons regions;
     regions.reserve(surfaces.size());
@@ -1977,9 +1997,18 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         const double jitter_rad = 0.10 * (config->continuous_shell_seam_jitter.value / 100.0);
         cs_seam_theta = double(layer_index) * step_rad + jitter_rad * seam_jitter_walk(layer_index);
     }
+    // Pre-set the note for the two ways adaptive beading can be off before contour_spiral is even
+    // reached; it folds force_solid into `adaptive` and cannot tell them apart from in there.
+    if (degrade_note != nullptr && config != nullptr && ! adaptive) {
+        *degrade_note = config->continuous_shell_adaptive_beading.value
+            ? "adaptive beading OFF: forced-solid cap/shell layer (a top/bottom shell, or a shell "
+              "over air) - wall bead counts fall back to C-lite marching"
+            : "adaptive beading disabled by continuous_shell_adaptive_beading";
+    }
     std::string plan_fail;
     const std::vector<ContourChain> chains = contour_spiral(merged.front(), flow, layer_index, woven, width_limits,
-                                                            adaptive, layer_height, spiral_wanted, junction_ramp, cs_seam_theta, &plan_fail);
+                                                            adaptive, layer_height, spiral_wanted, junction_ramp, cs_seam_theta,
+                                                            &plan_fail, degrade_note);
     if (chains.empty()) {
         if (reason != nullptr)
             *reason = !plan_fail.empty() ? plan_fail : "Continuous shell mode could not construct a contour spiral.";

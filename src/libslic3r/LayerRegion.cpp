@@ -223,10 +223,17 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
             if (const auto &opt = object_config.wall_transition_filter_deviation)
                 cs_width_limits.wall_transition_filter_deviation_mm = opt.value * 0.01 * min_nozzle;
         }
+        std::string degrade_note;
         if (ContinuousShellPathBuilder::build_cross_section(
                 slices.surfaces, this->flow(frExternalPerimeter), this->layer()->height, &region_config,
                 continuous_entities, &reason, (this->layer()->id() & 1u) != 0, size_t(this->layer()->id()), force_solid,
-                cs_width_limits)) {
+                cs_width_limits, &degrade_note)) {
+            // The mode's contract is fail-loudly. A layer that BUILDS but silently takes a weaker
+            // path than the options asked for is the other half of that contract: it must say so,
+            // or a wall quietly loses bead count (and material) with nothing in the log.
+            if (! degrade_note.empty())
+                BOOST_LOG_TRIVIAL(warning) << "Continuous shell, layer " << this->layer()->id()
+                                           << ": " << degrade_note;
             this->perimeters.no_sort = false;
             this->perimeters.clear();
             // Perimeter consumers require each top-level item to be an
