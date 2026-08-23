@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <vector>
 #include <array>
+#include <cstdio>
 
 using namespace Slic3r;
 
@@ -2155,4 +2156,150 @@ TEST_CASE("Adaptive beading degrades to C-lite byte-identically out of scope", "
         on.continuous_shell_adaptive_beading.value = true;
         expect_identical(surfaces, on, off);
     }
+}
+
+// ---------------------------------------------------------------------------------------
+// W0 - the density-0 signature fence.
+//
+// The decoupling work (W1..W6) must not move ANY output at continuous_shell_infill_density
+// = 0. This dumps a stable signature per fixture so the table can be diffed before and after
+// a change; a differing row is a bug, never a threshold to retune.
+//
+//     libslic3r_tests.exe "[ContinuousShellSig]" > before.txt      (before the change)
+//     libslic3r_tests.exe "[ContinuousShellSig]" > after.txt       (after it)
+//     diff before.txt after.txt
+//
+// Deliberately HIDDEN ([.]) and not asserted against baked-in constants: the signature folds
+// coord_t values derived from floating-point geometry, so a golden table would false-fail on
+// a different compiler or platform for reasons unrelated to the change under test. The fence
+// is a before/after diff on ONE machine, which is exactly what it needs to be.
+//
+// It folds x, y, Z and width and flow, so it catches a moved bead, a changed Z ramp and a
+// re-flowed bead alike. It does its OWN build rather than going through cs_paths(), because a
+// fixture that DECLINES is part of the fence too - it must keep declining, for the same
+// reason - and cs_paths() REQUIREs a successful build.
+// ---------------------------------------------------------------------------------------
+namespace {
+
+struct CsFence { uint64_t hash = 0xcbf29ce484222325ull; size_t paths = 0, points = 0;
+                 double length_mm = 0.0, volume_mm3 = 0.0; };
+
+void cs_fence_mix(CsFence &s, uint64_t v)
+{
+    for (int i = 0; i < 8; ++i) {                       // FNV-1a 64, byte at a time
+        s.hash ^= uint64_t((v >> (i * 8)) & 0xffull);
+        s.hash *= 0x100000001b3ull;
+    }
+}
+
+CsFence cs_fence_signature(ExtrusionEntityCollection &e)
+{
+    CsFence s;
+    std::vector<ExtrusionPath *> paths;
+    for (ExtrusionEntity *ent : e.entities)
+        ContinuousShellPathBuilder::collect_paths(ent, paths);
+    s.paths = paths.size();
+    for (const ExtrusionPath *p : paths) {
+        cs_fence_mix(s, uint64_t(p->polyline.points.size()));
+        // Widths are already bucketed to 0.05 mm by the plan, so nanometres is far finer than
+        // any legitimate variation while keeping the hash integral (no float bits folded).
+        cs_fence_mix(s, uint64_t(int64_t(std::llround(double(p->width) * 1e6))));
+        cs_fence_mix(s, uint64_t(int64_t(std::llround(double(p->mm3_per_mm) * 1e9))));
+        for (const Point3 &q : p->polyline.points) {
+            cs_fence_mix(s, uint64_t(int64_t(q.x())));
+            cs_fence_mix(s, uint64_t(int64_t(q.y())));
+            cs_fence_mix(s, uint64_t(int64_t(q.z())));
+            ++s.points;
+        }
+        s.length_mm  += p->polyline.length() * SCALING_FACTOR;
+        s.volume_mm3 += double(p->mm3_per_mm) * p->polyline.length() * SCALING_FACTOR;
+    }
+    return s;
+}
+
+// Closed ring in scaled units. ccw=false emits the clockwise winding a HOLE needs.
+Polygon cs_fence_ring(double r_mm, double cx_mm, double cy_mm, double lobe_mm, int lobes, bool ccw)
+{
+    Polygon p;
+    const int n = 160;
+    for (int i = 0; i < n; ++i) {
+        const double a  = (ccw ? 1.0 : -1.0) * 2.0 * M_PI * double(i) / double(n);
+        const double rr = r_mm + lobe_mm * std::cos(double(lobes) * a);
+        p.points.emplace_back(coord_t(std::llround((cx_mm + rr * std::cos(a)) * 1e6)),
+                              coord_t(std::llround((cy_mm + rr * std::sin(a)) * 1e6)));
+    }
+    return p;
+}
+
+Surfaces cs_fence_tube(double r_out, double r_bore, double bore_dx = 0.0, double lobe = 0.0)
+{
+    return Surfaces{ Surface(stInternal, ExPolygon(cs_fence_ring(r_out, 0.0, 0.0, lobe, 5, true),
+                                                   cs_fence_ring(r_bore, bore_dx, 0.0, 0.0, 0, false))) };
+}
+
+Surfaces cs_fence_disc(double r_out)
+{
+    return Surfaces{ Surface(stInternal, ExPolygon(cs_fence_ring(r_out, 0.0, 0.0, 0.0, 0, true))) };
+}
+
+} // namespace
+
+TEST_CASE("Continuous shell density-0 signature table", "[.][ContinuousShellSig]")
+{
+    const Flow flow(0.5f, 0.25f, 0.5f);
+
+    struct Row { const char *name; Surfaces surf; bool adaptive; bool spiral; bool force_solid; size_t layer; };
+    std::vector<Row> rows{
+        { "annulus r10/bore4            adaptive=1", cs_fence_tube(10.0, 4.0),           true,  false, false, 0 },
+        { "annulus r10/bore4            adaptive=0", cs_fence_tube(10.0, 4.0),           false, false, false, 0 },
+        { "annulus r10/bore4  layer=7   adaptive=1", cs_fence_tube(10.0, 4.0),           true,  false, false, 7 },
+        { "eccentric annulus bore@+2    adaptive=1", cs_fence_tube(10.0, 4.0, 2.0),      true,  false, false, 0 },
+        { "eccentric annulus bore@+2    adaptive=0", cs_fence_tube(10.0, 4.0, 2.0),      false, false, false, 0 },
+        { "star tube lobe0.8            adaptive=1", cs_fence_tube(10.0, 4.0, 0.0, 0.8), true,  false, false, 0 },
+        { "star tube lobe0.8            adaptive=0", cs_fence_tube(10.0, 4.0, 0.0, 0.8), false, false, false, 0 },
+        { "taper wall 2.4mm             adaptive=1", cs_fence_tube(6.4, 4.0),            true,  false, false, 0 },
+        { "taper wall 2.2mm             adaptive=1", cs_fence_tube(6.4, 4.2),            true,  false, false, 0 },
+        { "taper wall 2.0mm             adaptive=1", cs_fence_tube(6.4, 4.4),            true,  false, false, 0 },
+        { "sub-bead wall 0.3mm          adaptive=1", cs_fence_tube(5.0, 4.7),            true,  false, false, 0 },
+        { "solid disc r10               adaptive=1", cs_fence_disc(10.0),                true,  false, false, 0 },
+        { "solid disc r10  force_solid  layer=0",    cs_fence_disc(10.0),                true,  false, true,  0 },
+        { "solid disc r10  force_solid  layer=1",    cs_fence_disc(10.0),                true,  false, true,  1 },
+        { "annulus         force_solid  layer=0",    cs_fence_tube(10.0, 4.0),           true,  false, true,  0 },
+        { "annulus         force_solid  layer=1",    cs_fence_tube(10.0, 4.0),           true,  false, true,  1 },
+        { "annulus r10/bore4            spiral=1",   cs_fence_tube(10.0, 4.0),           true,  true,  false, 0 },
+        { "eccentric annulus            spiral=1",   cs_fence_tube(10.0, 4.0, 2.0),      true,  true,  false, 0 },
+    };
+
+    std::printf("\n%-42s %8s %6s %8s %10s %7s  %s\n", "fixture (all at infill_density = 0)",
+                "area_mm2", "paths", "points", "length_mm", "cover", "signature");
+    size_t built_ok = 0;
+    for (Row &r : rows) {
+        PrintRegionConfig cfg;
+        cfg.continuous_shell_adaptive_beading.value = r.adaptive;
+        cfg.continuous_shell_interior_spiral.value  = r.spiral;
+        cfg.continuous_shell_infill_density.value   = 0;
+        ExtrusionEntityCollection e;
+        std::string reason;
+        const bool built = ContinuousShellPathBuilder::build_cross_section(
+            r.surf, flow, 0.25, &cfg, e, &reason, false, r.layer, r.force_solid);
+        // Model area of the fixture: a malformed ExPolygon (a badly wound hole, say) shows up
+        // here as a nonsense area, so a row cannot quietly guard the wrong geometry.
+        double area = 0.0;
+        for (const Surface &sf : r.surf)
+            area += sf.expolygon.area() * SCALING_FACTOR * SCALING_FACTOR;
+        if (! built) {
+            std::printf("%-42s %8.2f %6s %8s %10s %7s  DECLINED: %s\n", r.name, area, "-", "-",
+                        "-", "-", reason.c_str());
+            continue;
+        }
+        ++built_ok;
+        const CsFence s = cs_fence_signature(e);
+        // Coverage = extruded volume / model volume. Length alone cannot say whether a wall
+        // is filled, because adaptive and C-lite reach the same coverage at different widths.
+        const double cover = s.volume_mm3 / (area * 0.25);
+        std::printf("%-42s %8.2f %6zu %8zu %10.3f %7.3f  %016llx\n", r.name, area, s.paths,
+                    s.points, s.length_mm, cover, static_cast<unsigned long long>(s.hash));
+    }
+    std::printf("\n%zu of %zu fixtures built\n\n", built_ok, rows.size());
+    REQUIRE(built_ok > 0);
 }
