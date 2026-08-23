@@ -52,3 +52,4 @@ __pycache__/
 
 # stray slicer artifacts
 test_models/tpu_suite/**/plate_*.gcode
+test_models/tpu_suite/tools/*.gcode.3mf

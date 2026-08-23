@@ -16,10 +16,19 @@ still stays fully dense - so the tube section keeps a solid wall while the core 
 cone, 27.9 mm across, is thick enough to merit sparse fill.
 
 Note the mode interaction this exposes: `continuous_shell_infill_density` above zero
-disables the interior spiral for the WHOLE object (the plan is gated on !woven.enabled),
-so this part prints in woven ring mode throughout rather than spiral walls plus a sparse
-core. The two are alternatives for the same material - sparse infill decimates the very
-buried rings the spiral exists to reorganise.
+disables the interior spiral AND adaptive beading for the WHOLE object (the plan is gated
+on !woven.enabled), so this part prints in woven ring mode throughout. Excluding the spiral
+is defensible - it and sparse infill are alternatives for the same buried rings - but losing
+adaptive beading is a straight regression, and the first print showed it: a 0.078 mm void up
+the middle of the 2.035 mm wall (C-lite lays 4 beads stretched to 0.555 mm with zero overlap
+where C-full lays 5 at 0.396), plus a doubled bead 0.203 mm from its neighbour on the cone's
+overhanging bore lip. Both reproduce exactly at density 0 with adaptive beading off.
+
+--bottom-shell 0 sparsifies the wedge of material that forms the cone. That wedge is solid
+because bottom_shell_layers makes it force_solid, which takes the stride-1 branch (fully
+solid, brick-staggered) and is never decimated. The lever is BINARY, not graded: 1, 2 and 3
+all give the same 7.33 mm dense wedge at z=22; only 0 collapses it. detect_floating_vertical_
+shell has no effect on it.
 """
 import json, math, os, re, struct, subprocess, sys, zipfile
 
@@ -63,9 +72,10 @@ def build_mesh():
         tris += [(i1[i], (0.0, 0.0, APEX), i1[j])]
     return tris
 
-def slice_it(density, outname, outdir):
+def slice_it(density, outname, outdir, overrides=None):
     proc = json.load(open(os.path.join(CFG, "cs_shapes.json"), encoding="utf-8"))
     proc["continuous_shell_infill_density"] = str(density)
+    proc.update(overrides or {})
     proc["name"] = f"CS sparse {density}"
     p = os.path.join(CFG, "cs_sparse.json")
     json.dump(proc, open(p, "w", encoding="utf-8"), indent=1)
@@ -80,6 +90,15 @@ def slice_it(density, outname, outdir):
                        capture_output=True, text=True, timeout=1800)
     if r.returncode or not os.path.exists(out):
         print((r.stdout or "")[-900:]); print((r.stderr or "")[-400:]); sys.exit("slice failed")
+    # Bambu Connect refuses a file whose nozzle flow declaration does not carry one entry per
+    # extruder ("The nozzle flow setting does not match ... Standardx1"). Pinned in machine.json;
+    # asserted here so a future edit cannot quietly reintroduce it.
+    with zipfile.ZipFile(out) as z:
+        g = z.read("Metadata/plate_1.gcode").decode("utf-8", "replace")
+    n_ext = len(json.load(open(os.path.join(CFG, "machine.json"), encoding="utf-8"))["nozzle_diameter"])
+    decl = re.search(r"; nozzle_volume_type = (.*)", g)
+    msg = f"nozzle_volume_type must declare {n_ext} entries - Bambu Connect will refuse the file"
+    assert decl and len([e for e in decl.group(1).strip().split(",") if e]) == n_ext, msg
     return out
 
 def profile(path, label):
@@ -122,11 +141,21 @@ def profile(path, label):
         print(f"{b:6.1f} {sum(counts)/len(counts):10.1f} {j:11d}   {reg}")
 
 def main():
+    # Usage: make_sparse_test.py [--bottom-shell N] [--out NAME]
+    argv = sys.argv[1:]
+    over, outname = {}, NAME
+    if "--bottom-shell" in argv:
+        i = argv.index("--bottom-shell"); over["bottom_shell_layers"] = argv[i + 1]; del argv[i:i + 2]
+    if "--out" in argv:
+        i = argv.index("--out"); outname = argv[i + 1]; del argv[i:i + 2]
+
     write_stl(os.path.join(SUITE, NAME + ".stl"), build_mesh())
     print(f"{NAME}: r_out {R_OUT}, wall {WALL} (5 beads), bore closes 45deg {CYL_TOP} -> {APEX:.1f}, "
           f"solid to {TALL}; core above the cone is {2*(R_OUT-WALL):.1f} mm across")
     dense  = slice_it(0, NAME + "_dense", os.path.dirname(os.path.abspath(__file__)))
-    sparse = slice_it(SPARSE_PCT, NAME, SLICED)
+    if over:
+        print("overrides: " + ", ".join(f"{k}={v}" for k, v in over.items()))
+    sparse = slice_it(SPARSE_PCT, outname, SLICED, over)
     profile(dense,  "density 0 (reference)")
     profile(sparse, f"density {SPARSE_PCT}% (the test)")
     print("\nWant: the annular wall unchanged between the two runs, the solid core thinned.")

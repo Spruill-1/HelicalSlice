@@ -684,6 +684,63 @@ side effect of this test.
 `sliced/S5_sparse.gcode.3mf` (18.9 g, 89 min) is the print. Read its wall as a C-lite
 wall, not as one of the validated C-full/spiral walls - it is not comparable to the tubes.
 
+### S5 printed (2026-08-23): the regression is now photographed, and it owns every defect
+
+Printed 18.9 g / 89 min. Outside decent; the three zones are visibly distinct (they run at
+very different path counts per layer, so layer times differ). Two defects, both reported by
+eye and both confirmed in the G-code:
+
+**1. A void up the middle of the 2.035 mm base wall.** C-lite lays FOUR beads there and
+stretches the interior pair to 0.555 mm - 1.40x nominal, far past the ~1.1x stretch cap the
+T4 microscopy set - and even then they do not close:
+
+| | beads | radii (mm) | widths | flank overlap | medial gap |
+|---|---|---|---|---|---|
+| density 0 (C-full) | 5 | 14.187 / 14.583 / 14.979 / 15.376 / 15.773 | all 0.396-0.398 | normal | none |
+| density 25 (C-lite) | 4 | 14.187 / 14.663 / 15.296 / 15.773 | 0.396 / **0.555** / **0.555** / 0.396 | **zero at every interface** | **0.078 mm** |
+
+Beads laid exactly tangent, nowhere overlapping, with a residual gap at the medial axis:
+the missing fifth bead, printed.
+
+**2. Dangling filament inside the cone.** Not stringing - travels never enter the bore
+(measured: zero bore-crossing travel moves over the whole cone). It is a DOUBLED BEAD on the
+overhanging bore lip: C-lite puts two full-width (0.396) beads 0.203 mm apart, ~33% local
+over-extrusion, on every cone layer, exactly where 63% of the lip hangs over air. C-full
+spaces the same lip at a uniform 0.398 with no doubling.
+
+Both defects reproduce EXACTLY at density 0 with adaptive beading off (same 4-bead stretched
+wall, same 0.203 mm doubled lip). So sparse infill causes neither directly: **every wall
+defect in this part is the adaptive-beading regression above.** The sparsifier's own job was
+done correctly - a plain thick tube (OD40/ID8) at the same density decimates cleanly across
+its entire buried span.
+
+### Why the cone wedge printed solid, and the lever that sparsifies it
+
+The wedge of material forming the cone stays fully dense, growing from 2.4 mm (z=13) to
+7.3 mm (z=22) outward from the bore. It is the bottom-shell-over-overhang region, which takes
+CS's `force_solid` branch: stride 1 (nothing decimated) plus the brick stagger - confirmed by
+consecutive cone layers alternating +-0.20 mm on top of the 0.25 mm cone step, which only
+that branch applies.
+
+The lever is `bottom_shell_layers`, and it is **binary, not graded**:
+
+| bottom_shell_layers | dense wedge at z=13 / z=18 / z=22 |
+|---|---|
+| 3 (default) | 2.37 / 4.87 / 7.33 mm |
+| 2 | 2.37 / 4.87 / 7.33 mm |
+| 1 | 2.37 / 4.87 / 7.33 mm |
+| **0** | **0.21 / 0.22 / 0.21 mm** |
+
+`detect_floating_vertical_shell` has no effect on it.
+
+`sliced/S5_conesparse.gcode.3mf` (**11.97 g, 57 min**) is the follow-up print: identical
+geometry and density, `bottom_shell_layers = 0`, single variable. Cone beads/ray fall
+11.5 -> 5.4 (z=13), 21.8 -> 8.8 (z=18), 26.0 -> 8.0 (z=22); the base wall and first layer are
+untouched. Open question it asks: the cone's overhanging lip now has sparse rings rather than
+solid behind it, so the underside may get better (less over-extrusion feeding the droop) or
+worse (less backing). The base-wall void and the doubled lip WILL recur - they need the
+decoupling, not a config change.
+
 ## C-full design brief (from this campaign)
 
 1. Retire ONE ring at a time via an angular wedge (locally odd counts) —
