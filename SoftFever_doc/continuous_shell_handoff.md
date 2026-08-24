@@ -317,3 +317,42 @@ transitional floor) to 0.550 (exactly the eps = 0.10 cap).
   wall must be checked for surface banding; the mitigation if it shows is coarser bucketing.
 - **PlateD_data still needs its second object replaced** (D2_core cannot detect the :1704
   clamp gap) before it is worth filament. Fold into W2.
+
+### PlateF built (2026-08-23), and two corrections to the record
+
+`sliced/PlateF_varying.gcode.3mf` (20.02 g, 90 min): E2_mild re-sliced from the SAME STL as
+the printed part, plus a 5-lobe tube. Both at density 0, so W2 cannot invalidate this plate -
+the weave clamps live inside the decimation block, which only runs at density > 0. That is
+why this print goes BEFORE W2 rather than after.
+
+**Correction 1 - the per-object splitter was wrong, and it poisoned the first report.** It
+split a sequential plate on a Z drop scanned from `G1` lines only; the inter-object move on
+this plate lands on a `G0`, so both objects merged into one and every per-object number was
+computed over the pair. It reported 791 width runs and a 0.710 mm gap, neither of which was a
+property of any object. All three plate tools now split on the explicit `; printing object
+NAME` markers Orca emits, which also name the object instead of inferring it from height.
+
+**Correction 2 - reporting a maximum conflated a seam with a void ring.** One ray carrying a
+big gap is a seam artefact; a void ring shows as most rays carrying one. Measured on E2_mild
+at z=15, same STL, before and after W1b/W1:
+
+| | median | p90 | max | rays with gap > 0.55 mm |
+|---|---|---|---|---|
+| before (PlateE, printed) | 0.811 | 1.271 | 1.631 | **48 / 72** |
+| after (PlateF) | 0.399 | 0.435 | 0.690 | **1 / 72** |
+
+So the void ring IS gone and the typical gap is now one bead spacing. Quoting the max alone
+made the fix look half as effective as it is - a mistake in the opposite direction from the
+single-layer 0.551 mm figure quoted earlier, which was equally unrepresentative. The tools
+now report the whole distribution.
+
+**Risk downgraded: the width-run explosion is not one at this profile.** The fence measured
+334 runs in a layer on a lobed wall, and the first PlateF report said 791 - but that was the
+merged-object bug. Measured per object at the campaign's flow: 19 runs per layer on the lobed
+tube, 9 on the eccentric. The fence's 334 came from a different flow (0.5 mm nozzle) and
+geometry. Still worth a look at the printed lobe flanks, but this is no longer a reason to
+hold W3, and coarser bucketing is not needed on this evidence.
+
+One thing to check on the print: F2_lobed carries beads down to 0.246 mm, below the 0.30 mm
+transitional floor, on segments long enough not to be corner noise. Look at the lobe flanks
+for thin or broken beads.

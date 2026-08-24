@@ -67,28 +67,35 @@ def build_tube(dx):
 
 
 def split_objects(g):
-    """Per-object extrusion SEGMENTS (not just endpoints) of a sequential plate."""
-    segs, cur = [], {"zmax": 0.0, "seg": []}
-    x = y = None
-    prevz = None
-    for line in g.split("\n"):
-        if not line.startswith("G1 "):
+    """Per-object extrusion SEGMENTS, split on the explicit "; printing object NAME" markers
+    Orca emits - never on a Z-drop heuristic. The inter-object move can land on a G0, which a
+    G1-only scan misses, silently merging every object into one; that happened on the first
+    run of PlateF and made every per-object number meaningless. The markers also NAME the
+    object, so nothing has to be inferred from height or plate order."""
+    objs, order, cur = {}, [], None
+    x = y = zz = None
+    for line in g.splitlines():
+        m = re.match(r"; printing object (\S+)", line)
+        if m:
+            cur = m.group(1)
+            if cur not in objs:
+                objs[cur] = []
+                order.append(cur)
+            continue
+        if line.startswith("; stop printing object"):
+            cur = None
+            continue
+        if not (line.startswith("G1 ") or line.startswith("G0 ")):
             continue
         nx = re.search(r" X(-?[\d.]+)", line); ny = re.search(r" Y(-?[\d.]+)", line)
         nz = re.search(r" Z(-?[\d.]+)", line); ne = re.search(r" E(-?[\d.]+)", line)
         px, py = x, y
         if nx: x = float(nx.group(1))
         if ny: y = float(ny.group(1))
-        if nz:
-            z = float(nz.group(1))
-            if prevz is not None and z < prevz - 5.0:
-                segs.append(cur); cur = {"zmax": 0.0, "seg": []}
-            prevz = z
-            cur["zmax"] = max(cur["zmax"], z)
-        if ne and float(ne.group(1)) > 0 and px is not None and x is not None and prevz is not None:
-            cur["seg"].append((px, py, x, y, prevz))
-    segs.append(cur)
-    return [s for s in segs if s["seg"]]
+        if nz: zz = float(nz.group(1))
+        if ne and float(ne.group(1)) > 0 and cur is not None            and px is not None and x is not None and zz is not None:
+            objs[cur].append((px, py, x, y, zz))
+    return [(n, objs[n]) for n in order if objs[n]]
 
 
 def worst_gap(segments, cx, cy):
