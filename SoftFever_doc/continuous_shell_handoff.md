@@ -266,3 +266,54 @@ band keeps a hole until the whole thing vanishes - most likely a numerical slive
 surviving the offset. If that is the cause, the fix is to treat a collapsed hole as a
 pinch, which routes this geometry through the mechanism the print just validated rather
 than inventing a new one.
+
+### W1b DONE for drifting walls (2026-08-23) - and what it changes downstream
+
+The ring-ladder probe showed the marching path cannot be rescued. It lays rings at fixed
+spacing from each face, so the leftover at the medial is a function of azimuth, and after
+the pinch fix the gap simply MOVED: at a 2 mm bore offset the thick side became perfect
+(18 rings, 0.448) and the THIN side inherited a 0.821 mm gap. No scalar correction can
+express an azimuth-varying residual.
+
+The fix is on the C-full side, and it turned out to be a pre-filter that was measuring the
+wrong thing. `n_max - n_min > 1` rejected any wall whose per-bin counts differed by two -
+but the count law assigns per-bin counts, so a wall that merely DRIFTS gets counts two
+apart even where one count serves the whole section inside the same +-10% stretch budget.
+The check now tests that directly (two probes, at the thinnest and thickest bins) and, when
+one count fits, uses it uniformly - which runs the section down the well-tested
+constant-count path instead of asking the k/k-1 blend to span two steps, which it cannot
+represent. When no count fits it still DECLINES rather than hard-fails: refusing to slice a
+part that used to slice is a worse failure than the underfill.
+
+Measured, real slicer, tubes of identical volume:
+
+| bore offset | before W1b | after |
+|---|---|---|
+| 0.5 mm | 94%, 1.29 mm void | **100%, worst gap 0.551 mm** |
+| 1.0 - 3.0 mm | 101-102% | 101-102% |
+
+Fence: only the varying-wall rows move. bore@+0.5 coverage 0.906 -> 1.002, bore@+1
+1.059 -> 0.997, and the lobed star tube 0.931 -> 1.028 (its 7% deficit was the same
+defect). Uniform walls are byte-identical. Widths stay inside the envelope: 0.300 (the
+transitional floor) to 0.550 (exactly the eps = 0.10 cap).
+
+**Downstream phase updates warranted by this:**
+
+- **W3 (decoupling) is worth MORE than costed.** Its value was always "adaptive beading
+  survives sparse infill", but the plan used to decline on any wall crossing more than one
+  bead-count step - i.e. on most real geometry. It now engages far more widely, so W3
+  carries the benefit to correspondingly more parts.
+- **W2 (weave clamps) matters MORE, and is more clearly a prerequisite.** The decoupling
+  now exposes *planned* surface rings to the bead-on-bead weave collision on many more
+  cross-sections than when only near-uniform tubes took the plan.
+- **W1b-v2 (per-angle bead COUNTS) drops in priority but stays open.** Walls where no
+  single count fits still decline to marching. Coverage there is now 101-102% because the
+  pinch fix carries them, but the fence still shows a 0.821 mm thin-side ladder gap at a
+  2 mm offset. It is no longer a material-loss bug, only a local void.
+- **NEW RISK to watch in print: width-run explosion.** Planning a lobed wall produces 334
+  separate width runs in one layer (vs 1 on a uniform tube, 4 on a taper). Each is a 0.05 mm
+  bucket step so the variation is smooth, and T4 validated width ladders - but 334 flow
+  changes per layer is far beyond anything printed so far. The next print with a non-uniform
+  wall must be checked for surface banding; the mitigation if it shows is coarser bucketing.
+- **PlateD_data still needs its second object replaced** (D2_core cannot detect the :1704
+  clamp gap) before it is worth filament. Fold into W2.

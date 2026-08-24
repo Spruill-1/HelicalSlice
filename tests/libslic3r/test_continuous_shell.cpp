@@ -2182,7 +2182,8 @@ TEST_CASE("Adaptive beading degrades to C-lite byte-identically out of scope", "
 namespace {
 
 struct CsFence { uint64_t hash = 0xcbf29ce484222325ull; size_t paths = 0, points = 0;
-                 double length_mm = 0.0, volume_mm3 = 0.0; };
+                 double length_mm = 0.0, volume_mm3 = 0.0;
+                 float  w_min = 1e9f, w_max = 0.f; };
 
 void cs_fence_mix(CsFence &s, uint64_t v)
 {
@@ -2204,6 +2205,8 @@ CsFence cs_fence_signature(ExtrusionEntityCollection &e)
         // Widths are already bucketed to 0.05 mm by the plan, so nanometres is far finer than
         // any legitimate variation while keeping the hash integral (no float bits folded).
         cs_fence_mix(s, uint64_t(int64_t(std::llround(double(p->width) * 1e6))));
+        s.w_min = std::min(s.w_min, p->width);
+        s.w_max = std::max(s.w_max, p->width);
         cs_fence_mix(s, uint64_t(int64_t(std::llround(double(p->mm3_per_mm) * 1e9))));
         for (const Point3 &q : p->polyline.points) {
             cs_fence_mix(s, uint64_t(int64_t(q.x())));
@@ -2272,8 +2275,8 @@ TEST_CASE("Continuous shell density-0 signature table", "[.][ContinuousShellSig]
         { "eccentric annulus            spiral=1",   cs_fence_tube(10.0, 4.0, 2.0),      true,  true,  false, 0 },
     };
 
-    std::printf("\n%-42s %8s %6s %8s %10s %7s  %s\n", "fixture (all at infill_density = 0)",
-                "area_mm2", "paths", "points", "length_mm", "cover", "signature");
+    std::printf("\n%-42s %8s %6s %8s %10s %7s %13s  %s\n", "fixture (all at infill_density = 0)",
+                "area_mm2", "paths", "points", "length_mm", "cover", "width lo/hi", "signature");
     size_t built_ok = 0;
     for (Row &r : rows) {
         PrintRegionConfig cfg;
@@ -2299,8 +2302,9 @@ TEST_CASE("Continuous shell density-0 signature table", "[.][ContinuousShellSig]
         // Coverage = extruded volume / model volume. Length alone cannot say whether a wall
         // is filled, because adaptive and C-lite reach the same coverage at different widths.
         const double cover = s.volume_mm3 / (area * 0.25);
-        std::printf("%-42s %8.2f %6zu %8zu %10.3f %7.3f  %016llx\n", r.name, area, s.paths,
-                    s.points, s.length_mm, cover, static_cast<unsigned long long>(s.hash));
+        std::printf("%-42s %8.2f %6zu %8zu %10.3f %7.3f %6.3f/%.3f  %016llx\n", r.name, area, s.paths,
+                    s.points, s.length_mm, cover, double(s.w_min), double(s.w_max),
+                    static_cast<unsigned long long>(s.hash));
         // A row that built but took a weaker path says so - otherwise a fixture can look
         // like it guards the adaptive path while silently running C-lite.
         if (! note.empty())
@@ -2308,4 +2312,78 @@ TEST_CASE("Continuous shell density-0 signature table", "[.][ContinuousShellSig]
     }
     std::printf("\n%zu of %zu fixtures built\n\n", built_ok, rows.size());
     REQUIRE(built_ok > 0);
+}
+
+// ---------------------------------------------------------------------------------------
+// W1b diagnostic: why does a MILDLY eccentric wall never take the pinch path?
+//
+// march_bands is repeated `offset_ex(band, -spacing)`, so its loop can be reproduced here
+// with public API - no instrumentation of production code needed. By hand a 5.5/6.5 mm wall
+// should close its thin side ~1.3 bands before its thick side, producing a hole-less
+// crescent that routes into the pinch branch. At a 0.5 mm bore offset it does not: the fence
+// shows one chain and 0.906 coverage. This prints the band-by-band topology so the reason is
+// a measurement rather than a guess.
+//
+//     libslic3r_tests.exe "[ContinuousShellMarch]"
+// ---------------------------------------------------------------------------------------
+TEST_CASE("Continuous shell march topology by eccentricity", "[.][ContinuousShellMarch]")
+{
+    const Flow flow(0.5f, 0.25f, 0.5f);
+    const coord_t spacing = flow.scaled_spacing();
+    const coord_t width   = flow.scaled_width();
+    std::printf("\nspacing %.4f mm, width %.4f mm\n",
+                double(spacing) * SCALING_FACTOR, double(width) * SCALING_FACTOR);
+
+    for (const double dx : { 0.0, 0.5, 1.0, 2.0 }) {
+        Surfaces surf = cs_fence_tube(10.0, 4.0, dx);
+        std::printf("\n=== bore offset %.1f mm (wall %.1f thin / %.1f thick) ===\n",
+                    dx, 6.0 - dx, 6.0 + dx);
+        ExPolygons cur = offset_ex(ExPolygons{ surf.front().expolygon }, -float(width) / 2.f);
+        for (int k = 0; k < 40 && ! cur.empty(); ++k) {
+            std::printf("  band %2d: %zu piece(s)", k, cur.size());
+            for (const ExPolygon &e : cur) {
+                const double a_out = e.contour.area() * SCALING_FACTOR * SCALING_FACTOR;
+                double a_hole = 0.0;
+                for (const Polygon &h : e.holes)
+                    a_hole += std::abs(h.area()) * SCALING_FACTOR * SCALING_FACTOR;
+                std::printf("  [contour %7.3f mm2, %zu hole(s) %7.4f mm2]", a_out, e.holes.size(), a_hole);
+            }
+            std::printf("\n");
+            cur = offset_ex(cur, -float(spacing));
+        }
+        std::printf("  -> vanished\n");
+    }
+    REQUIRE(true);
+}
+
+TEST_CASE("Continuous shell ring ladder by eccentricity", "[.][ContinuousShellMarch]")
+{
+    // Where does the material actually land? Ring radii along the THIN azimuth (+x, where the
+    // bore is offset toward) and the THICK one (-x). The wall runs from the bore surface out
+    // to r=10 at both, so a filled wall shows an unbroken ladder at one bead spacing.
+    const Flow flow(0.5f, 0.25f, 0.5f);
+    std::printf("\n");
+    for (const double dx : { 0.0, 0.5, 1.0, 2.0 }) {
+        Surfaces surf = cs_fence_tube(10.0, 4.0, dx);
+        PrintRegionConfig cfg;
+        cfg.continuous_shell_adaptive_beading.value = true;
+        cfg.continuous_shell_infill_density.value   = 0;
+        ExtrusionEntityCollection e;
+        std::string reason;
+        REQUIRE(ContinuousShellPathBuilder::build_cross_section(surf, flow, 0.25, &cfg, e, &reason, false, 0, false));
+        std::vector<ExtrusionPath *> paths;
+        for (ExtrusionEntity *ent : e.entities)
+            ContinuousShellPathBuilder::collect_paths(ent, paths);
+        std::printf("=== bore offset %.1f mm ===\n", dx);
+        for (const auto &probe : { std::make_pair("thin (+x)", 0.0), std::make_pair("thick(-x)", M_PI) }) {
+            const std::vector<double> r = ray_ring_radii(paths, probe.second);
+            double worst = 0.0;
+            for (size_t i = 1; i < r.size(); ++i)
+                worst = std::max(worst, r[i] - r[i - 1]);
+            std::printf("  %s %2zu rings, worst gap %.3f mm :", probe.first, r.size(), worst);
+            for (const double v : r)
+                std::printf(" %.2f", v);
+            std::printf("\n");
+        }
+    }
 }

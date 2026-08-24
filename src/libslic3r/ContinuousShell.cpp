@@ -448,8 +448,45 @@ std::unique_ptr<ChainBeadPlan> build_chain_plan(const ExPolygon &region, const F
     }
     if (n_min < 1)
         { if (decline_note) *decline_note = "wall too thin for a planned bead"; return nullptr; }
-    if (n_max - n_min > 1)
-        { if (decline_note) *decline_note = "wall thickness crosses more than one bead-count threshold"; return nullptr; }
+    if (n_max - n_min > 1) {
+        // The count law picks a count per bin, so a wall whose thickness merely DRIFTS can be
+        // assigned counts two apart even where a single count would serve the whole section
+        // comfortably. Declining those sends the wall to marching, which cannot fill a wall of
+        // varying thickness: it lays rings at fixed spacing from each face, so the leftover at
+        // the medial is a function of azimuth and no scalar correction can close it. Measured
+        // on a 5.5/6.5 mm wall (a 0.5 mm bore offset - an utterly ordinary geometry): 12 rings
+        // and a 1.54 mm void up the thick side, 9% of the section's material missing.
+        //
+        // So test what actually matters - whether ONE count covers every angle inside the same
+        // +-eps stretch budget the count law uses - and if it does, use it uniformly. That runs
+        // the section down the well-tested constant-count path (rho == 1, no transition window)
+        // rather than asking the k/k-1 blend to span two steps, which it cannot represent.
+        // The width extremes sit at the thinnest and thickest bins, so two probes suffice.
+        const coord_t w_ceil_sp = coord_t(std::llround(1.10 * double(w_sp)));   // the law's eps = 0.10
+        const auto [it_lo, it_hi] = std::minmax_element(t_sp.begin(), t_sp.end());
+        const coord_t t_lo = coord_t(std::llround(*it_lo)), t_hi = coord_t(std::llround(*it_hi));
+        auto count_fits = [&](coord_t k, coord_t t) {
+            const Arachne::BeadingStrategy::Beading b = strategy->compute(t, k);
+            if (b.bead_widths.size() != size_t(k))
+                return false;
+            for (const coord_t w : b.bead_widths)
+                if (w < w_floor_sp || w > w_ceil_sp)
+                    return false;
+            return true;
+        };
+        coord_t k_uniform = 0;
+        for (coord_t k = n_min; k <= n_max && k_uniform == 0; ++k)
+            if (count_fits(k, t_lo) && count_fits(k, t_hi))
+                k_uniform = k;
+        if (k_uniform == 0)
+            // Genuinely out of budget: no single count is printable across this wall, and the
+            // blend cannot cross two steps. DECLINE (fall through to marching) rather than
+            // hard-fail - refusing to slice a part that used to slice is a worse failure than
+            // the underfill, and per-angle bead COUNTS are the real fix (see W1b in the handoff).
+            { if (decline_note) *decline_note = "wall thickness crosses more than one bead-count threshold"; return nullptr; }
+        std::fill(n_bin.begin(), n_bin.end(), k_uniform);
+        n_min = n_max = k_uniform;
+    }
 
     // Blend factor per bin. Where the count is uniform this is constant 1 and the medial
     // slot is a full ring. Where t(theta) crosses a count threshold, the bins at the
