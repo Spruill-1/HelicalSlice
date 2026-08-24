@@ -859,3 +859,36 @@ geometry.
 **The floor guard is validated, and did better than predicted.** The lobed part was expected to
 show a REDUCED void column; it came off "basically perfect as one continuous solid". The column
 traced to beads below the 0.30 mm transitional floor is gone at the resolution of a cut.
+
+### PlateD printed (2026-08-24, pre-W3 slice): one fix justified, one fix not working
+
+Material note: this campaign prints in TRANSLUCENT MAGENTA TPU. An earlier memory entry said
+matte black PETG and was carried forward stale; TPU is why the 0.30 mm w_term floor exists at
+all (a TPU bead die-swells and gaps below ~1.2x layer height).
+
+**D1_ladder, the 5-bead step: the medial void is REAL.** Microscope section of the 21-28 mm
+band shows a continuous void running along the middle of the ~2 mm wall - the C-lite stretch
+defect, four beads laid where five belong. This is the printed justification for W3, which
+takes that step from 4.0 to 5.0 beads per ray. A post-W3 reprint is a clean one-variable A/B.
+
+**D2_weave: W2's weave clamp is NOT holding.** The section shows the sparse lattice merging
+into the inner face of the outer shell rather than standing a bead clear of it. Measured on
+the printed file, and controlled against the detector's own error rate by re-slicing the same
+geometry with the weave off:
+
+| same binary, same geometry | median shell1 -> next gap | below 0.30 mm |
+|---|---|---|
+| weave 0% (plain concentric rings) | 0.400 mm | 13 / 360 azimuths |
+| weave 100% | 0.538 mm | **101 / 360 azimuths** |
+
+The 13/360 is the ray-crossing detector's false-positive floor on a wavy lattice; 101/360 is
+four times that, so the population is real. At roughly a quarter of azimuths the lattice sits
+within 0.30 mm of the inner shell ring, where the clamp is supposed to hold it at one spacing
+(0.396 mm). W2 shipped with the caveat that #5 could not be verified from G-code at all and #7
+only indirectly - the indirect evidence (ladder bead counts rising) was real but did not mean
+the clamp was sufficient.
+
+Open as **W2b**: find why the bound is not binding. Note the clamp caps the OUTWARD swing at
+`outer_prof - spacing`, so a lobe that would exceed it should flatten against the bound at
+exactly 0.396 - a gap of 0.12 is not explainable by the clamp working as written, so this is a
+mechanism question, not a tuning one.
