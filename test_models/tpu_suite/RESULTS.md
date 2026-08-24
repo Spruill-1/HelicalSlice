@@ -756,3 +756,28 @@ decoupling, not a config change.
 
 Strength prediction to test destructively: stretched-regime walls fail along
 the medial void line; squeezed walls have no preferred plane.
+
+### PlateE printed (2026-08-23): the pinch fix is validated; the MILD case is now the worst
+
+E1_ecc (bore offset 2.0 mm, 4/8 mm wall - the case that pinches) and E2_mild (offset
+0.5 mm, 5.5/6.5 mm - never pinches), 30 mm tall, sliced density 0, spiral off.
+
+| | predicted medial gap | material | printed |
+|---|---|---|---|
+| E1 (pinches, fix applies) | 0.82 mm | 101% | near-perfect bricklaying, extremely few internal voids on either the thick or the thin side |
+| E2 (never pinches) | 1.29 mm | 94% | the void down the middle of the thick side; otherwise essentially fully solid, barely any voids under the scope |
+
+Both predictions held, including the counter-intuitive ordering.
+
+**The risk the print existed to test did not materialise.** E1 is where the marching fix
+(c17d5e36fd) recovered 31% of the part's material by handing the pinched remainder on as a
+solid region - so a SEPARATE CHAIN is now joined at a place that used to be a void. That
+interface could have been a weak plane. It is invisible in the cut: no delamination, no
+void row, bricklaying continuous across it.
+
+**The fix left the extreme case cleaner than the mild one.** E2 never pinches, so it never
+reaches the new code path: its band vanishes normally, the scalar deficit correction fires,
+and ~2 beads of gap survive at the medial. A 0.5 mm bore offset is a very ordinary
+geometry, so this is now the worst case in the family and the target for W1b - which is a
+statement about the DEFICIT CORRECTION on a vanishing band, not only about widening
+C-full's scope.

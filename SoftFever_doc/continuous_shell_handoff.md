@@ -239,3 +239,30 @@ E2, 30 mm tall so both can be cut and torn. Two questions it answers that G-code
 joined at a place that used to be a void, or has a void been traded for a weak plane, and
 (2) how bad is a 0.8-1.3 mm medial void ring in plastic, which sets the priority of the
 C-full scope work against the rest of the queue.
+
+**W1b sharpened by the PlateE print (2026-08-23).** Both predictions held, and the risk the
+print existed to test did not materialise: E1 - the tube the marching fix took from 69% to
+101%, where recovered material arrives as a separate chain joined where a void used to be -
+shows near-perfect bricklaying with extremely few voids on either side of the cut. No weak
+plane at the new interface. E2 shows its 1.29 mm medial void exactly where predicted, and
+is otherwise essentially solid.
+
+So the fix left the EXTREME case cleaner than the mild one, and the fence pins where the
+behaviour changes:
+
+| bore offset | chains | coverage | path |
+|---|---|---|---|
+| 0.5 mm | 1 | 0.906 | never pinches - 9.4% short, visible medial void |
+| 1.0 mm | 4 | 1.059 | pinches, marching fix applies |
+| 2.0 mm | 4 | 1.056 | pinches, marching fix applies |
+
+A 0.5 mm bore offset on a 6 mm wall is an utterly ordinary geometry, so this is now the
+worst case in the family. W1b's first step is therefore NOT to widen C-full's scope (which
+would also work, and is far bigger): it is to instrument march_bands and find why a
+5.5/6.5 mm wall does not take the pinch path at all. By hand the thin side should close at
+k~6.9 and the thick side at k~8.2, which ought to produce a hole-less crescent and route
+into the already-validated pinch branch. It does not, and the single-chain result says the
+band keeps a hole until the whole thing vanishes - most likely a numerical sliver hole
+surviving the offset. If that is the cause, the fix is to treat a collapsed hole as a
+pinch, which routes this geometry through the mechanism the print just validated rather
+than inventing a new one.

@@ -2253,6 +2253,8 @@ TEST_CASE("Continuous shell density-0 signature table", "[.][ContinuousShellSig]
         { "annulus r10/bore4            adaptive=1", cs_fence_tube(10.0, 4.0),           true,  false, false, 0 },
         { "annulus r10/bore4            adaptive=0", cs_fence_tube(10.0, 4.0),           false, false, false, 0 },
         { "annulus r10/bore4  layer=7   adaptive=1", cs_fence_tube(10.0, 4.0),           true,  false, false, 7 },
+        { "eccentric annulus bore@+0.5  adaptive=1", cs_fence_tube(10.0, 4.0, 0.5),      true,  false, false, 0 },
+        { "eccentric annulus bore@+1    adaptive=1", cs_fence_tube(10.0, 4.0, 1.0),      true,  false, false, 0 },
         { "eccentric annulus bore@+2    adaptive=1", cs_fence_tube(10.0, 4.0, 2.0),      true,  false, false, 0 },
         { "eccentric annulus bore@+2    adaptive=0", cs_fence_tube(10.0, 4.0, 2.0),      false, false, false, 0 },
         { "star tube lobe0.8            adaptive=1", cs_fence_tube(10.0, 4.0, 0.0, 0.8), true,  false, false, 0 },
