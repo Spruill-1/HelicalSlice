@@ -13,11 +13,13 @@ stretched beads instead of five. So the same object measures the sparsify gate A
 -beading regression, and after the decoupling the 5-bead step must go 4.0 -> 5.0 beads per ray
 while the 8/7/6 steps stay sparsified.
 
-D2_core - a plain SOLID cylinder (no bore). The weave's inward clamp at ContinuousShell.cpp:1704
-is guarded by `if (annular)`, so on a solid chain the innermost kept infill ring is bounded only
-by `max(rr, 1.0)` - one scaled unit, i.e. 1 nm from the centroid. This object is that code path.
-Measured here in the G-code before printing, so the print only has to answer whether the
-collapse matters physically.
+D2_weave - a THICK ANNULUS (r_out 10 / bore 2.5), which exercises the full woven lattice and
+has real boundaries at both faces. It replaced a solid cylinder that could not do the job: a
+solid chain legitimately runs its terminus ring to the centre, so neither the innermost
+extrusion radius nor the smallest adjacent-ring gap separates a collapsed ring from normal
+convergence, and four probes failed for that reason. What a bad weave clamp looks like is
+bead-on-bead against a SHELL, and that shows physically as over-extrusion - a question for the
+printer rather than for a G-code script.
 
 Both are the C-lite baseline that the post-decoupling reprints get compared against.
 """
@@ -34,7 +36,7 @@ SP      = 0.3963                       # bead spacing at 0.4 nozzle, this profil
 R_OUT   = 16.0
 STEPS   = [8, 7, 6, 5, 4]              # beads of wall, bottom -> top
 STEP_H  = 7.0
-CORE_R, CORE_H = 10.0, 20.0
+CORE_R, CORE_BORE, CORE_H = 10.0, 2.5, 20.0   # 7.5 mm wall: ~19 beads, well past the gate
 SEG     = 256
 OUTNAME = "PlateD_data"
 
@@ -88,13 +90,25 @@ def build_ladder():
 
 
 def build_core():
+    """D2_weave: a THICK ANNULUS, not the solid cylinder this slot used to hold.
+
+    The solid cylinder was meant to exercise the weave's missing inward clamp, and it cannot:
+    a solid chain legitimately runs its terminus ring to the centre, so neither the innermost
+    extrusion radius nor the smallest adjacent-ring gap can separate a collapsed ring from
+    normal convergence. Four probes were tried and all failed for that reason.
+
+    A thick annulus has real boundaries at BOTH faces, exercises the full woven lattice, and is
+    the geometry where bead-on-bead against a shell would show up physically as over-extrusion.
+    That is the W2 question a print can answer."""
     tris = []
     o0, o1 = ring(CORE_R, 0.0), ring(CORE_R, CORE_H)
-    c0, c1 = (0.0, 0.0, 0.0), (0.0, 0.0, CORE_H)
+    i0, i1 = ring(CORE_BORE, 0.0), ring(CORE_BORE, CORE_H)
     for i in range(SEG):
         j = (i + 1) % SEG
         tris += [(o0[i], o0[j], o1[j]), (o0[i], o1[j], o1[i])]
-        tris += [(o0[i], c0, o0[j]), (o1[i], o1[j], c1)]
+        tris += [(i0[i], i1[j], i0[j]), (i0[i], i1[i], i1[j])]
+        tris += [(o0[i], i0[j], o0[j]), (o0[i], i0[i], i0[j])]
+        tris += [(o1[i], o1[j], i1[j]), (o1[i], i1[j], i1[i])]
     return tris
 
 
@@ -128,6 +142,33 @@ def split_objects(g):
         if ne and float(ne.group(1)) > 0 and cur is not None            and px is not None and x is not None and zz is not None:
             objs[cur].append((px, py, x, y, zz))
     return [(n, objs[n]) for n in order if objs[n]]
+
+
+def min_ring_gap(segments, cx, cy):
+    """Smallest radial gap between adjacent rings, over 72 rays.
+
+    This is the detector for the weave's missing inward clamp on a SOLID chain. The obvious
+    probe - the innermost extrusion radius - cannot see it, because a solid centre is filled
+    either way: it read 0.2412 mm at density 0 and 0.2563 mm at density 25 while the bug was
+    live. A ring collapsing inward instead shows up as it CROSSING or touching its neighbour,
+    i.e. an adjacent-ring gap heading to zero, which is what this measures."""
+    worst = 1e9
+    for k in range(72):
+        az = -math.pi + (k + 0.5) * (2 * math.pi / 72)
+        hits = []
+        for (x0, y0, x1, y1, *_) in segments:
+            a0 = math.atan2(y0 - cy, x0 - cx); a1 = math.atan2(y1 - cy, x1 - cx)
+            d0 = math.atan2(math.sin(a0 - az), math.cos(a0 - az))
+            d1 = math.atan2(math.sin(a1 - az), math.cos(a1 - az))
+            if (d0 < 0) != (d1 < 0) and abs(d0 - d1) < math.pi:
+                t = d0 / (d0 - d1)
+                hits.append(math.hypot(x0 + t*(x1-x0) - cx, y0 + t*(y1-y0) - cy))
+        hits.sort()
+        for i in range(len(hits) - 1):
+            d = hits[i+1] - hits[i]
+            if d > 0.02:                      # ignore a ray clipping one bead twice
+                worst = min(worst, d)
+    return worst
 
 
 def crossings_per_ray(pts, cx, cy):
@@ -165,21 +206,19 @@ def analyse(path, quiet=False):
     out = {"ladder": {}, "core": None,
            "weight":  float(w.group(1)) if w else 0.0,
            "minutes": int(t.group(1)) // 60 if t else 0}
-    for s in split_objects(g):
-        pts = s["pts"]
-        cx = sum(p[0] for p in pts) / len(pts)
-        cy = sum(p[1] for p in pts) / len(pts)
-        if s["zmax"] > (CORE_H + 2.0):
+    for name, segs in split_objects(g):
+        cx = sum(q[0] for q in segs) / len(segs)
+        cy = sum(q[1] for q in segs) / len(segs)
+        if "ladder" in name:
             for si, n in enumerate(STEPS):
                 zb = si * STEP_H + STEP_H * 0.5
-                by = [p for p in pts if abs(p[2] - zb) < lh]
+                by = [(q[0], q[1]) for q in segs if abs(q[4] - zb) < lh]
                 if by:
                     out["ladder"][n] = crossings_per_ray(by, cx, cy)
         else:
             zb = CORE_H * 0.5
-            by = [p for p in pts if abs(p[2] - zb) < lh]
-            rmin = min(math.hypot(p[0] - cx, p[1] - cy) for p in by) if by else float("nan")
-            out["core"] = (crossings_per_ray(by, cx, cy), rmin)
+            by = [q for q in segs if abs(q[4] - zb) < lh]
+            out["core"] = min_ring_gap(by, cx, cy)
     return out
 
 
@@ -209,25 +248,17 @@ def report(sparse, dense, density):
         else:
             what = "gate on but not thinned"
         print(f"    {n:5d} {d:7.1f} {s:7.1f}   {what}")
-    if sparse["core"]:
-        got, rmin = sparse["core"]
-        dgot, drmin = dense["core"] if dense["core"] else (0.0, float("nan"))
+    if sparse["core"] is not None:
         print("")
-        print("D2_core - solid cylinder, innermost extrusion radius")
-        print(f"    density 0:    {drmin:7.4f} mm ({dgot:.1f} beads/ray)")
-        print(f"    density {density}%:  {rmin:7.4f} mm ({got:.1f} beads/ray)")
-        # A SOLID disc has material at its centre by construction, so a small rmin proves
-        # nothing on its own - the density-0 reference lands there too. The unclamped weave
-        # (ContinuousShell.cpp:1704, inward clamp guarded by `if (annular)`) only shows up as
-        # rmin falling materially BELOW the reference. This geometry cannot separate the two;
-        # a bored part clamps on the bore shell, so exercising the solid path needs a detector
-        # on ring self-crossing rather than on rmin. Left measured, deliberately not claimed.
-        if rmin < drmin - 0.05:
-            print(f"    -> sparse run reaches {drmin - rmin:.3f} mm further in than the reference:"
-                  f" consistent with the unclamped inward weave")
-        else:
-            print("    -> no inward excursion beyond the density-0 reference; this geometry does"
-                  " NOT demonstrate the :1704 clamp gap (a solid centre is filled either way)")
+        print("D2_weave - thick annulus: smallest gap between adjacent rings")
+        print(f"    density 0:    {dense['core']:6.3f} mm")
+        print(f"    density {density}%:  {sparse['core']:6.3f} mm")
+        # Reported WITHOUT a verdict on purpose. The weave deliberately brings anti-phase
+        # neighbours' bead edges into contact at the lobe peaks, so a small gap between two
+        # INFILL rings is the design working, not a fault; and from G-code alone there is no way
+        # to tell which crossing is a shell and which is infill. What a bad clamp would look
+        # like is bead-on-bead against a SHELL, which shows physically as over-extrusion - that
+        # is what this object is for, and it is a question for the printer, not this script.
 
 
 def slice_plate(density, outname, inject):
@@ -244,7 +275,7 @@ def slice_plate(density, outname, inject):
                         "--load-filaments", os.path.join(CFG, "filament.json"),
                         "--arrange", "1", "--slice", "0",
                         "--export-3mf", outname + ".gcode.3mf", "--outputdir", outdir,
-                        os.path.join(SUITE, "D1_ladder.stl"), os.path.join(SUITE, "D2_core.stl")],
+                        os.path.join(SUITE, "D1_ladder.stl"), os.path.join(SUITE, "D2_weave.stl")],
                        capture_output=True, text=True, timeout=1800)
     if r.returncode or not os.path.exists(out):
         print((r.stdout or "")[-900:])
@@ -261,10 +292,10 @@ def main():
     density = argv[argv.index("--density") + 1] if "--density" in argv else "25"
 
     write_stl(os.path.join(SUITE, "D1_ladder.stl"), build_ladder())
-    write_stl(os.path.join(SUITE, "D2_core.stl"), build_core())
+    write_stl(os.path.join(SUITE, "D2_weave.stl"), build_core())
     print(f"D1_ladder: r_out {R_OUT}, wall steps {STEPS} beads "
           f"({[round(n * SP, 3) for n in STEPS]} mm), {STEP_H} mm each; gate flips between 6 and 5")
-    print(f"D2_core:   solid cylinder r {CORE_R}, h {CORE_H} (no bore -> the unclamped weave path)")
+    print(f"D2_weave:  annulus r_out {CORE_R} / bore {CORE_BORE}, h {CORE_H} - the woven lattice")
 
     dense  = analyse(slice_plate(0, "PlateD_dense", False), quiet=True)
     sparse = analyse(slice_plate(density, OUTNAME, True))

@@ -1810,8 +1810,13 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
                     // clamp every infill point to the shell radius AT ITS OWN ANGLE - shape-aware, so
                     // it works for non-round cross-sections too (a mean radius would flatten corners).
                     const AngularProfile outer_prof = AngularProfile::build(cc.loops[sl - 1], centre);              // innermost outer-shell ring
+                    // A SOLID chain has no bore shell, but it does have a terminus ring, and it needs
+                    // an inward bound just as much: without one the only thing stopping an inward lobe
+                    // was max(rr, 1.0) - one scaled unit, a nanometre from the centroid - so the
+                    // innermost kept ring could collapse onto the axis. A degenerate terminus profiles
+                    // as zero, which floors the bound at one spacing from the centre: also correct.
                     const AngularProfile inner_prof = annular ? AngularProfile::build(cc.loops[cc.loops.size() - sl], centre) // outermost bore-shell ring
-                                                              : AngularProfile();
+                                                              : AngularProfile::build(cc.loops.back(), centre);              // terminus ring
                     // Per-ring anti-phase: each successive infill ring flips by pi so neighbours interlock.
                     // The per-LAYER advance (dphase) still rotates the whole lattice so stacked layers weave.
                     const double layer_phase = double(layer_index) * woven.dphase;
@@ -1825,9 +1830,19 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
                             const double r = d.norm();
                             if (r < 1.0) continue;
                             const double th = std::atan2(d.y(), d.x());
+                            // Keep ONE SPACING clear of the shells, not merely on the near side of
+                            // their centrelines. The amplitude law sizes lobes for infill-to-infill
+                            // neighbours K*spacing apart, but the first kept infill ring's outward
+                            // neighbour is the immovable shell ring one spacing away; clamping to the
+                            // shell's own radius let the lobe close that pitch to zero and lay bead on
+                            // bead for part of every lobe period.
+                            const double hi = outer_prof.sample_nearest(th) - double(spacing);
+                            const double lo = inner_prof.sample_nearest(th) + double(spacing);
                             double rr = r + amp * std::sin(woven.lobes * th + phase);
-                            rr = std::min(rr, outer_prof.sample_nearest(th));                 // never cross the outer shell
-                            if (annular) rr = std::max(rr, inner_prof.sample_nearest(th));    // never cross the bore shell
+                            // A band narrower than two spacings cannot be woven without touching a
+                            // shell; leave those points where the plan put them rather than forcing
+                            // one bound and violating the other.
+                            rr = (lo <= hi) ? std::clamp(rr, lo, hi) : r;
                             rr = std::max(rr, 1.0);
                             p = Point(coord_t(std::llround(centre.x() + rr * std::cos(th))),
                                       coord_t(std::llround(centre.y() + rr * std::sin(th))));

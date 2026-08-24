@@ -381,3 +381,39 @@ parallel without invalidating it.
 Note: `PlateF_varying.gcode.3mf` in the repo is now the POST-guard slice, because it was
 re-sliced to verify the guard. It no longer matches the printed PlateF part. PlateG supersedes
 it as the canonical artifact for this geometry.
+
+### W2 done (2026-08-24): weave clamps
+
+Two audit findings, both density>0 only, both in the weave perturbation block:
+
+- **#7** the clamps bounded infill points by the SHELL RING'S OWN RADIUS, so a lobe could
+  close the pitch to a shell to zero and lay bead on bead. The amplitude law sizes lobes for
+  infill-to-infill neighbours K*spacing apart, but the first kept infill ring's outward
+  neighbour is an immovable shell one spacing away. Now clamped to one spacing clear of both
+  shells, with a band narrower than two spacings left unwoven rather than forced.
+- **#5** a SOLID (no-bore) chain had no inward clamp at all - `if (annular)` guarded it - so
+  the innermost kept ring was bounded only by `max(rr, 1.0)`, a nanometre from the centroid.
+  It now profiles the terminus ring; a degenerate terminus reads zero, which floors the bound
+  at one spacing from the centre, also correct.
+
+**Verification, stated honestly.** Full suite green (171 cases) and the density-0 fence is
+byte-identical on all 20 rows, so the change is confined to density>0 as intended. Indirect
+but attributable evidence that #7 bites: on the D1_ladder at density 25, with nothing else
+changed, sparse beads per ray rose 4.8 -> 5.3 (8-bead wall), 4.8 -> 5.1 (7) and 4.6 -> 5.2
+(6) - rings that used to be clamped onto a shell's centreline now resolve as separate
+crossings a spacing away.
+
+**What could NOT be verified from G-code, and why.** Four probes for #5 were built and all
+failed for the same principled reason: a solid chain legitimately runs its terminus ring to
+the centre, so neither the innermost extrusion radius (0.2412 mm at density 0 vs 0.2563 at
+25 while the bug was live) nor the smallest adjacent-ring gap can separate a collapsed ring
+from normal convergence. Nor can a shell-to-infill pitch be isolated by ray crossings, because
+the weave deliberately brings anti-phase infill neighbours' bead EDGES into contact, so small
+gaps are the design working. #5's fix rests on code reasoning plus containment, not on a
+measurement - the honest status.
+
+**PlateD_data's dud object is replaced.** D2_core (solid cylinder) becomes D2_weave, a thick
+annulus (r_out 10 / bore 2.5, 7.5 mm wall). It has real boundaries at both faces, exercises
+the full woven lattice, and is the geometry where a bad clamp shows physically as
+over-extrusion against a shell. That is the W2 print question, and it is a question for the
+printer rather than for a G-code script. Plate is 11.93 g / 56 min.
