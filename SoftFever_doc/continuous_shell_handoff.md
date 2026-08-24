@@ -417,3 +417,51 @@ annulus (r_out 10 / bore 2.5, 7.5 mm wall). It has real boundaries at both faces
 the full woven lattice, and is the geometry where a bad clamp shows physically as
 over-extrusion against a shell. That is the W2 print question, and it is a question for the
 printer rather than for a G-code script. Plate is 11.93 g / 56 min.
+
+### W3 DONE (2026-08-24): adaptive beading and sparse infill compose
+
+The headline regression is closed. `ContourChain` gains `ring_slot`, the plan slot each loop
+came from. Position in `loops` used to BE the slot, which is exactly why the two could not
+coexist: decimation drops rings, so every surviving ring past the first gap would have read a
+neighbour's per-angle widths.
+
+The design's load-bearing claim was verified before building on it: in ring mode the plan is
+read by loop index in exactly ONE place, `point_w` (`:1003`), called from the ring emitter and
+the outer-ring emitter. The spiral branch takes explicit slots and never calls it; `width_of`
+at the scarf uses `ring_widths`, not the plan. So routing `point_w` through the map re-routes
+every ring-mode width, and phase B is untouchable by the change.
+
+Shape of it:
+
+- the sparsifier is extracted to `apply_woven_infill(cc, woven, spacing, layer_index, note)`
+  so the PLAN path can call it too - it previously returned its chain before ever reaching
+  that code;
+- decimation compacts `ring_slot` and `ring_widths` in lockstep with `loops`;
+- `chain_thick_enough` / `chain_will_decimate` replace two separate expressions that had to
+  agree and could drift;
+- `validate_chain` checks the map is present, strictly increasing, in range, and still holds
+  both pinned surfaces - `ChainBeadPlan::interp` indexes its tables unchecked, so a drifted
+  map is an out-of-bounds read, not merely a wrong bead;
+- the solid-cap brick stagger is skipped on planned chains: it is a rigid half-spacing
+  translation of the interior block and the plan owns radial placement;
+- spiral x sparse is now REJECTED rather than silently ignored (a spiral chain carries only
+  its two pinned surfaces, and the sparsifier needs more than two rings, so sparse infill was
+  a no-op on spiral layers). Mirrored in `Print::validate` so it is caught before slicing
+  rather than at layer 60 of a long job.
+
+**Verified.** Full suite green (172 cases) and the density-0 fence byte-identical on all 20
+rows - the change is confined to density>0. End to end, the pre-registered prediction on
+D1_ladder is met exactly: the 5-bead step reads **5.0 beads per ray, up from 4.0**, while the
+4-bead step stays 4.0 and the 6/7/8 steps stay sparsified.
+
+One existing test was INVERTED, which was expected: "woven sparse annulus keeps its lattice"
+asserted that at density 30 the adaptive option changed nothing. That was the defect written
+down as a requirement. It is replaced by a test that the plan engages, that decimation still
+happens, and by the DESYNC DETECTOR - on a varying wall with the weave off, decimation never
+moves a point, so any surviving point must keep exactly the width it had when nothing was
+decimated. A slot desync corrupts a whole ring (hundreds of points) and cannot hide.
+
+Building that detector took three passes and both dead ends are worth knowing: coordinates
+shared by two rings cannot say which slot a later run meant (49 false hits), and the point ON
+a width-run boundary belongs to both ExtrusionPaths and legitimately carries either width
+(2 more). Excluding both leaves zero.

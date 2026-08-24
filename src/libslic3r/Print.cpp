@@ -1404,6 +1404,16 @@ StringObjectException Print::validate(std::vector<StringObjectException> *warnin
                 return {L("Continuous shell mode does not support objects with multiple materials, modifier volumes, or per-part setting overrides."), nullptr, "continuous_shell_mode"};
         }
 
+        // The interior spiral and sparse infill both reorganise the buried interior - the
+        // spiral rebuilds exactly the rings sparse fill decimates - so only one can apply.
+        // The slicer rejects the pair per layer, but finding that out at layer 60 of a long
+        // print job is a poor way to learn it; catch it before any slicing starts.
+        if (m_default_region_config.continuous_shell_interior_spiral.value &&
+            m_default_region_config.continuous_shell_infill_density.value > 0)
+            return {L("Continuous shell mode: the interior spiral and sparse infill both reorganise the buried "
+                      "interior. Enable only one of them."),
+                    nullptr, "continuous_shell_interior_spiral"};
+
         // Settings this mode simply overrides: warn so the result isn't surprising.
         // (wall_loops is genuinely consumed - it sets the solid shell ring count around
         // woven infill and serpentine caps - so it gets no warning.)

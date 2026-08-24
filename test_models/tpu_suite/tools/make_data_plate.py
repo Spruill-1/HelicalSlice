@@ -264,6 +264,10 @@ def report(sparse, dense, density):
 def slice_plate(density, outname, inject):
     proc = json.load(open(os.path.join(CFG, "cs_shapes.json"), encoding="utf-8"))
     proc["continuous_shell_infill_density"] = str(density)
+    # The interior spiral and sparse infill both reorganise the buried interior, so enabling
+    # both is now rejected outright rather than silently doing nothing (it used to be a no-op:
+    # a spiral chain carries only its two pinned surfaces, and the sparsifier needs more rings).
+    proc["continuous_shell_interior_spiral"] = "0"
     proc["name"] = f"CS data {density}"
     p = os.path.join(CFG, "cs_data.json")
     json.dump(proc, open(p, "w", encoding="utf-8"), indent=1)

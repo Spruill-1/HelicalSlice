@@ -833,7 +833,11 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
                          const std::vector<float> *ring_widths = nullptr, std::vector<float> *pt_width = nullptr,
                          float nominal_width = 0.f,
                          coord_t scarf_len = 0, float scarf_floor = 0.f,
-                         const ChainBeadPlan *plan = nullptr, coord_t layer_h_scaled = 0)
+                         const ChainBeadPlan *plan = nullptr, coord_t layer_h_scaled = 0,
+                         // Which plan SLOT each ring came from. Identity while nothing has been
+                         // decimated; after sparse infill drops rings it is the only thing that
+                         // still ties a surviving ring to its own per-angle widths.
+                         const std::vector<size_t> *ring_slot = nullptr)
 {
     Polyline spiral;
     if (rings_in.empty())
@@ -1001,9 +1005,12 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
     // angle (so ring resampling can never desynchronize a width array); chains without a
     // plan keep the per-ring width.
     auto point_w = [&](size_t idx, const Point &p) -> float {
-        if (plan != nullptr && idx < plan->n_slots) {
+        // Position in `rings_in` is NOT the plan slot once decimation has dropped rings, so go
+        // through the slot map whenever one is supplied.
+        const size_t slot = (ring_slot != nullptr && idx < ring_slot->size()) ? (*ring_slot)[idx] : idx;
+        if (plan != nullptr && slot < plan->n_slots) {
             const Vec2d d = p.cast<double>() - plan->centre;
-            return plan->width_at(idx, std::atan2(d.y(), d.x()));
+            return plan->width_at(slot, std::atan2(d.y(), d.x()));
         }
         return width_of(idx);
     };
@@ -1538,7 +1545,60 @@ struct ContourChain {
     // per-point widths come from the plan (ring_widths stays empty); the C-lite medial
     // deficit correction is skipped - the plan covers the full wall by construction.
     std::shared_ptr<ChainBeadPlan> plan;
+    // The plan SLOT each loop came from, parallel to `loops`. Non-empty exactly when `plan`
+    // is set. Position in `loops` used to BE the slot index, which is why sparse infill and
+    // adaptive beading could not coexist: decimation drops rings, and every surviving ring
+    // after the first gap would have read a neighbour's per-angle widths. Carrying the slot
+    // explicitly lets the two compose - decimation compacts this in lockstep with `loops`,
+    // and a surviving ring keeps its OWN slot's widths.
+    std::vector<size_t> ring_slot;
 };
+
+// One definition of "this chain has buried rings to thin", used by the sparsifier and by the
+// C-lite deficit correction that must stand aside for it. They were two separate expressions
+// and had to agree; now they cannot drift.
+bool chain_thick_enough(const ContourChain &cc, const WovenInfill &w)
+{
+    return cc.has_bore ? cc.loops.size() > 2 * w.shell_loops + 1
+                       : cc.loops.size() > w.shell_loops + 1;
+}
+
+bool chain_will_decimate(const ContourChain &cc, const WovenInfill &w)
+{
+    return w.enabled && w.stride > 1 && cc.loops.size() > 2 && chain_thick_enough(cc, w);
+}
+
+// The plan indexes its per-angle width and position tables by SLOT. Nothing downstream can
+// notice a slot map that has drifted out of step with `loops` - it would simply read a
+// neighbour's widths - and ChainBeadPlan::interp indexes its tables unchecked, so an
+// off-by-one is an out-of-bounds read rather than a wrong bead. Check it explicitly.
+bool validate_chain(const ContourChain &cc, std::string *fail_reason)
+{
+    auto fail = [&](const char *why) {
+        if (fail_reason)
+            *fail_reason = std::string("Continuous shell adaptive beading: ") + why;
+        return false;
+    };
+    if (!cc.ring_widths.empty() && cc.ring_widths.size() != cc.loops.size())
+        return fail("per-ring width array is out of step with the rings.");
+    if (cc.plan == nullptr)
+        return cc.ring_slot.empty() ? true : fail("a chain without a plan carries a slot map.");
+    if (cc.ring_slot.size() != cc.loops.size())
+        return fail("plan ring/slot map is out of step with the rings.");
+    if (cc.ring_slot.empty())
+        return fail("plan chain carries no slot map.");
+    for (size_t i = 0; i < cc.ring_slot.size(); ++i) {
+        if (cc.ring_slot[i] >= cc.plan->n_slots)
+            return fail("plan slot index out of range.");
+        if (i > 0 && cc.ring_slot[i] <= cc.ring_slot[i - 1])
+            return fail("plan slot map is not strictly increasing.");
+    }
+    // Both surfaces are pinned and must survive any decimation: the ring form keeps the full
+    // range, and the spiral form is truncated to exactly those two.
+    if (cc.ring_slot.front() != 0 || cc.ring_slot.back() != cc.plan->n_slots - 1)
+        return fail("plan chain lost one of its pinned surface rings.");
+    return true;
+}
 
 // Decompose a single connected cross-section into the concentric loop sets that fill
 // it as Fermat-style in/out spirals - ONE ContourChain per connected piece.
@@ -1569,6 +1629,158 @@ coord_t vanish_depth(const ExPolygons &shape, coord_t hi)
     return lo + (hi - lo) / 2;
 }
 
+// Sparse woven infill applied to ONE chain. Extracted from the marching loop so the
+// PLAN path can call it too: before that, switching on continuous_shell_infill_density
+// silently disabled adaptive beading for the whole object, because the plan branch
+// returned its chain before ever reaching this code.
+void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spacing,
+                        size_t layer_index, std::string *degrade_note)
+{
+    if (!woven.enabled || cc.loops.size() <= 2)
+        return;
+    if (woven.stride > 1 && !chain_thick_enough(cc, woven) && degrade_note)
+        *degrade_note = "continuous shell: wall too thin to sparsify - printed solid";
+    // Sparse WOVEN infill. Keep a solid shell of shell_loops rings on every free FACE and thin
+    // the buried interior to the sparse stride, all carried by the SAME continuous bead. For a
+    // SOLID chain the shell hugs the outer face and the fill thins toward the centre. For an
+    // ANNULAR chain (a thick tube wall) the loop list runs outer-face -> medial -> bore-face, so
+    // keep shell_loops at BOTH ends (a solid skin on the OD and the ID) and thin only the deep
+    // middle - otherwise a very thick wall (e.g. OD100/ID10) would print 100% solid. With weave>0
+    // each thinned ring is perturbed radially by A*sin(k*theta + phase), phase advancing per layer,
+    // so a fixed angle bulges out on one layer and in on the next - diagonal inter-layer struts (a
+    // gyroid-like 3D interlock, completed by the Z-wave in build_cross_section) instead of nested
+    // tubes. Disabled unless infill density is set.
+    if (woven.enabled && cc.loops.size() > 2) {
+        const size_t sl = woven.shell_loops;
+        const size_t K  = woven.stride;
+        const size_t n  = cc.loops.size();
+        const bool   annular = cc.has_bore;
+        // is_infill on ORIGINAL indices: buried interior beyond the shell(s). Annular keeps a
+        // shell at both ends; solid keeps the outer shell and the buried core (minus the terminus).
+        auto is_infill = [&](size_t i) -> bool {
+            if (i < sl) return false;
+            return annular ? (i + sl < n) : (i + 1 < n);
+        };
+        const bool thick = chain_thick_enough(cc, woven);   // one definition, shared
+        // Perturbation centre = centroid of the outer boundary loop (shared by the
+        // weave and the solid stagger below).
+        Vec2d centre(0., 0.);
+        if (!cc.loops.front().points.empty()) {
+            for (const Point &p : cc.loops.front().points) centre += p.cast<double>();
+            centre /= double(cc.loops.front().points.size());
+        }
+        // Angular-parametrization gate (see star_shaped_about): on a folded section
+        // decline every perturbation that phases or clamps by angle-about-centre.
+        // Checked over the FULL pre-decimation ring set (a superset of the kept
+        // rings), so the kept rings are covered too. Decimation itself stays on.
+        if (thick)
+            for (const Polygon &ring : cc.loops)
+                if (!star_shaped_about(ring, centre)) { cc.star_ok = false; break; }
+        if (K > 1 && thick) {
+            Polygons kept; std::vector<char> kept_infill;
+            std::vector<size_t> kept_slot; std::vector<float> kept_w;
+            kept.reserve(n); kept_infill.reserve(n);
+            for (size_t i = 0; i < n; ++i) {
+                const bool inf = is_infill(i);
+                if (!inf || (i - sl) % K == 0) {   // keep every shell/terminus ring + every K-th infill ring
+                    kept_infill.push_back(inf ? char(1) : char(0));
+                    // The slot map and any per-ring widths are compacted in LOCKSTEP with the
+                    // rings. Without this a surviving ring would read the widths of whatever
+                    // slot happened to land at its new position - the reason adaptive beading
+                    // and sparse infill could not previously coexist.
+                    if (!cc.ring_slot.empty())   kept_slot.push_back(cc.ring_slot[i]);
+                    if (!cc.ring_widths.empty()) kept_w.push_back(cc.ring_widths[i]);
+                    kept.push_back(std::move(cc.loops[i]));
+                }
+            }
+            cc.loops = std::move(kept);
+            if (!cc.ring_slot.empty())   cc.ring_slot   = std::move(kept_slot);
+            if (!cc.ring_widths.empty()) cc.ring_widths = std::move(kept_w);
+            cc.woven_infill = true;   // spiralize_rings should tag [shell | infill | shell] accordingly
+
+            if (woven.weave > 0.0 && cc.star_ok) {
+                // Radial amplitude sized so that ANTI-PHASE neighbours just touch. Sparse rings
+                // sit K*spacing apart; giving consecutive infill rings a pi phase offset makes ring
+                // j bulge OUT where ring j+1 bulges IN, so their closest approach is
+                // K*spacing - 2*amp. Targeting a one-bead centre gap (amp = weave*(K-1)/2*spacing)
+                // brings the bead EDGES into contact at the lobe peaks - the rings knit into one
+                // connected in-plane lattice ("lobes along a slice") instead of separate wavy tubes,
+                // while the valleys stay open for the sparse voids. Capped below half the spacing so
+                // they never cross.
+                const double amp = std::min(woven.weave * 0.5 * double(K - 1), 0.49 * double(K)) * double(spacing);
+                // The lobes must stay INSIDE the infill band: an outward bulge that crossed the
+                // solid outer shell would push nubs past the object surface (a rough wall); an
+                // inward one would invade the bore shell. The shell rings are un-perturbed, so
+                // clamp every infill point to the shell radius AT ITS OWN ANGLE - shape-aware, so
+                // it works for non-round cross-sections too (a mean radius would flatten corners).
+                const AngularProfile outer_prof = AngularProfile::build(cc.loops[sl - 1], centre);              // innermost outer-shell ring
+                // A SOLID chain has no bore shell, but it does have a terminus ring, and it needs
+                // an inward bound just as much: without one the only thing stopping an inward lobe
+                // was max(rr, 1.0) - one scaled unit, a nanometre from the centroid - so the
+                // innermost kept ring could collapse onto the axis. A degenerate terminus profiles
+                // as zero, which floors the bound at one spacing from the centre: also correct.
+                const AngularProfile inner_prof = annular ? AngularProfile::build(cc.loops[cc.loops.size() - sl], centre) // outermost bore-shell ring
+                                                          : AngularProfile::build(cc.loops.back(), centre);              // terminus ring
+                // Per-ring anti-phase: each successive infill ring flips by pi so neighbours interlock.
+                // The per-LAYER advance (dphase) still rotates the whole lattice so stacked layers weave.
+                const double layer_phase = double(layer_index) * woven.dphase;
+                size_t infill_ring = 0;
+                for (size_t j = 0; j < cc.loops.size(); ++j) {
+                    if (!kept_infill[j]) continue;   // weave only the thinned infill, not the solid shells
+                    const double phase = layer_phase + double(infill_ring) * M_PI;
+                    ++infill_ring;
+                    for (Point &p : cc.loops[j].points) {
+                        const Vec2d d = p.cast<double>() - centre;
+                        const double r = d.norm();
+                        if (r < 1.0) continue;
+                        const double th = std::atan2(d.y(), d.x());
+                        // Keep ONE SPACING clear of the shells, not merely on the near side of
+                        // their centrelines. The amplitude law sizes lobes for infill-to-infill
+                        // neighbours K*spacing apart, but the first kept infill ring's outward
+                        // neighbour is the immovable shell ring one spacing away; clamping to the
+                        // shell's own radius let the lobe close that pitch to zero and lay bead on
+                        // bead for part of every lobe period.
+                        const double hi = outer_prof.sample_nearest(th) - double(spacing);
+                        const double lo = inner_prof.sample_nearest(th) + double(spacing);
+                        double rr = r + amp * std::sin(woven.lobes * th + phase);
+                        // A band narrower than two spacings cannot be woven without touching a
+                        // shell; leave those points where the plan put them rather than forcing
+                        // one bound and violating the other.
+                        rr = (lo <= hi) ? std::clamp(rr, lo, hi) : r;
+                        rr = std::max(rr, 1.0);
+                        p = Point(coord_t(std::llround(centre.x() + rr * std::cos(th))),
+                                  coord_t(std::llround(centre.y() + rr * std::sin(th))));
+                    }
+                }
+            }
+        } else if (woven.solid_stagger > 0.0 && thick && cc.star_ok && cc.plan == nullptr) {
+            // Solid cap/shell brick stagger (see build_cross_section). Shift only the interior rings
+            // inward by solid_stagger this layer; the outer wall rings (< sl) and, for a tube, the
+            // bore shell stay put. Bounded so a ring never invades the bore. The fill stays fully
+            // solid (no decimation, no infill tag) - this only nudges interior geometry per layer.
+            AngularProfile inner_prof;                       // per-angle bore-shell radius (shape-aware)
+            if (annular)
+                inner_prof = AngularProfile::build(cc.loops[n - sl], centre);
+            for (size_t j = 0; j < n; ++j) {
+                if (!is_infill(j)) continue;                 // shift interior only; shells stay put
+                for (Point &p : cc.loops[j].points) {
+                    const Vec2d d = p.cast<double>() - centre;
+                    const double r = d.norm();
+                    if (r < 1.0) continue;
+                    const double th = std::atan2(d.y(), d.x());
+                    double rr = r - woven.solid_stagger;
+                    if (annular)
+                        rr = std::max(rr, inner_prof.sample_nearest(th));
+                    rr = std::max(rr, 1.0);
+                    p = Point(coord_t(std::llround(centre.x() + rr * std::cos(th))),
+                              coord_t(std::llround(centre.y() + rr * std::sin(th))));
+                }
+            }
+        }
+    }
+}
+
+
 std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &flow, size_t layer_index, const WovenInfill &woven,
                                          const ContinuousShellWidthLimits &limits,
                                          bool adaptive = false, double layer_height = 0.,
@@ -1598,16 +1810,27 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
     // fallback here is how a 31% underfill on eccentric bores went unnoticed (W0 fence).
     // `adaptive` already folds in force_solid, which this function cannot see, so the caller
     // pre-sets the note for the !adaptive cases and this only refines it.
-    if (adaptive && woven.enabled) {
-        if (degrade_note)
-            *degrade_note = "adaptive beading SKIPPED: sparse infill is active on this layer - wall "
-                            "bead counts fall back to C-lite marching";
-    } else if (adaptive && region.holes.size() != 1) {
+    if (spiral_wanted && woven.enabled) {
+        // Not belt-and-braces: a spiral plan chain carries only its two pinned surfaces, and
+        // the sparsifier needs more than two rings, so without this sparse infill is a SILENT
+        // NO-OP on spiral layers. They are alternatives for the same buried rings anyway - the
+        // spiral reorganises exactly what sparse fill decimates - so say so and stop.
+        if (fail_reason)
+            *fail_reason = "Continuous shell: the interior spiral and sparse infill both reorganise "
+                           "the buried interior - enable only one (set continuous_shell_infill_density "
+                           "or continuous_shell_interior_spiral to 0).";
+        return {};
+    }
+    if (adaptive && region.holes.size() != 1) {
         if (degrade_note)
             *degrade_note = region.holes.empty() ? "adaptive beading out of scope: solid (no bore) section"
                                                  : "adaptive beading out of scope: multi-bore section";
     }
-    if (adaptive && !woven.enabled && region.holes.size() == 1) {
+    // Sparse infill no longer excludes the plan. Adaptive beading decides bead COUNTS and
+    // WIDTHS; decimation decides which buried rings survive afterwards. They are orthogonal,
+    // and coupling them cost every wall in a sparse part its bead count (a 2.035 mm wall got
+    // four stretched beads instead of five, with a 0.078 mm void up the medial - printed).
+    if (adaptive && region.holes.size() == 1) {
         std::string note, hard;
         std::unique_ptr<ChainBeadPlan> plan =
             build_chain_plan(region, flow, limits, layer_height, spiral_wanted, junction_ramp, seam_theta, &note, &hard);
@@ -1624,11 +1847,28 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
             ContourChain cc;
             Polygons pr = plan_rings(*plan);
             cc.has_bore = true;
-            if (plan->spiral && pr.size() >= 2)
-                cc.loops = Polygons{ std::move(pr.front()), std::move(pr.back()) };
-            else
+            const size_t n_slots = plan->n_slots;
+            if (plan->spiral && pr.size() >= 2) {
+                cc.loops     = Polygons{ std::move(pr.front()), std::move(pr.back()) };
+                cc.ring_slot = { 0, n_slots - 1 };          // the two pinned surfaces
+            } else {
                 cc.loops = std::move(pr);
+                cc.ring_slot.resize(cc.loops.size());
+                for (size_t i = 0; i < cc.ring_slot.size(); ++i)
+                    cc.ring_slot[i] = i;                    // identity until decimation compacts it
+            }
             cc.plan = std::move(plan);
+            // Sparse infill on a PLANNED chain: the decimation runs here, on the plan's rings,
+            // rather than only on marched ones. This is the whole point of carrying ring_slot -
+            // before it, enabling continuous_shell_infill_density silently disabled adaptive
+            // beading for the entire object.
+            apply_woven_infill(cc, woven, spacing, layer_index, degrade_note);
+            std::string bad;
+            if (!validate_chain(cc, &bad)) {
+                if (fail_reason)
+                    *fail_reason = bad;
+                return {};
+            }
             std::vector<ContourChain> out;
             out.push_back(std::move(cc));
             return out;
@@ -1720,8 +1960,7 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
         // medial) while leaving its outer flank untouched. Skipped for chains about to be
         // sparsified (their interior is deliberately open) and for chains that ended by a
         // pinch or split (material continues elsewhere; there is no closed deficit).
-        const bool will_decimate = woven.enabled && woven.stride > 1 &&
-            (cc.has_bore ? cc.loops.size() > 2 * woven.shell_loops + 1 : cc.loops.size() > woven.shell_loops + 1);
+        const bool will_decimate = chain_will_decimate(cc, woven);
         if (!cc.plan && !will_decimate && ci < vanished.size() && vanished[ci] && !chain.empty()) {
             const coord_t d_res = vanish_depth(ExPolygons{ chain.back() }, spacing);
             const coord_t v     = 2 * d_res - width;
@@ -1745,135 +1984,7 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
                     cc.ring_widths[contours_n] = widened;
             }
         }
-        // Sparse WOVEN infill. Keep a solid shell of shell_loops rings on every free FACE and thin
-        // the buried interior to the sparse stride, all carried by the SAME continuous bead. For a
-        // SOLID chain the shell hugs the outer face and the fill thins toward the centre. For an
-        // ANNULAR chain (a thick tube wall) the loop list runs outer-face -> medial -> bore-face, so
-        // keep shell_loops at BOTH ends (a solid skin on the OD and the ID) and thin only the deep
-        // middle - otherwise a very thick wall (e.g. OD100/ID10) would print 100% solid. With weave>0
-        // each thinned ring is perturbed radially by A*sin(k*theta + phase), phase advancing per layer,
-        // so a fixed angle bulges out on one layer and in on the next - diagonal inter-layer struts (a
-        // gyroid-like 3D interlock, completed by the Z-wave in build_cross_section) instead of nested
-        // tubes. Disabled unless infill density is set.
-        if (woven.enabled && cc.loops.size() > 2) {
-            const size_t sl = woven.shell_loops;
-            const size_t K  = woven.stride;
-            const size_t n  = cc.loops.size();
-            const bool   annular = cc.has_bore;
-            // is_infill on ORIGINAL indices: buried interior beyond the shell(s). Annular keeps a
-            // shell at both ends; solid keeps the outer shell and the buried core (minus the terminus).
-            auto is_infill = [&](size_t i) -> bool {
-                if (i < sl) return false;
-                return annular ? (i + sl < n) : (i + 1 < n);
-            };
-            const bool thick = annular ? (n > 2 * sl + 1) : (n > sl + 1);
-            // Perturbation centre = centroid of the outer boundary loop (shared by the
-            // weave and the solid stagger below).
-            Vec2d centre(0., 0.);
-            if (!cc.loops.front().points.empty()) {
-                for (const Point &p : cc.loops.front().points) centre += p.cast<double>();
-                centre /= double(cc.loops.front().points.size());
-            }
-            // Angular-parametrization gate (see star_shaped_about): on a folded section
-            // decline every perturbation that phases or clamps by angle-about-centre.
-            // Checked over the FULL pre-decimation ring set (a superset of the kept
-            // rings), so the kept rings are covered too. Decimation itself stays on.
-            if (thick)
-                for (const Polygon &ring : cc.loops)
-                    if (!star_shaped_about(ring, centre)) { cc.star_ok = false; break; }
-            if (K > 1 && thick) {
-                Polygons kept; std::vector<char> kept_infill;
-                kept.reserve(n); kept_infill.reserve(n);
-                for (size_t i = 0; i < n; ++i) {
-                    const bool inf = is_infill(i);
-                    if (!inf || (i - sl) % K == 0) {   // keep every shell/terminus ring + every K-th infill ring
-                        kept_infill.push_back(inf ? char(1) : char(0));
-                        kept.push_back(std::move(cc.loops[i]));
-                    }
-                }
-                cc.loops = std::move(kept);
-                cc.woven_infill = true;   // spiralize_rings should tag [shell | infill | shell] accordingly
-
-                if (woven.weave > 0.0 && cc.star_ok) {
-                    // Radial amplitude sized so that ANTI-PHASE neighbours just touch. Sparse rings
-                    // sit K*spacing apart; giving consecutive infill rings a pi phase offset makes ring
-                    // j bulge OUT where ring j+1 bulges IN, so their closest approach is
-                    // K*spacing - 2*amp. Targeting a one-bead centre gap (amp = weave*(K-1)/2*spacing)
-                    // brings the bead EDGES into contact at the lobe peaks - the rings knit into one
-                    // connected in-plane lattice ("lobes along a slice") instead of separate wavy tubes,
-                    // while the valleys stay open for the sparse voids. Capped below half the spacing so
-                    // they never cross.
-                    const double amp = std::min(woven.weave * 0.5 * double(K - 1), 0.49 * double(K)) * double(spacing);
-                    // The lobes must stay INSIDE the infill band: an outward bulge that crossed the
-                    // solid outer shell would push nubs past the object surface (a rough wall); an
-                    // inward one would invade the bore shell. The shell rings are un-perturbed, so
-                    // clamp every infill point to the shell radius AT ITS OWN ANGLE - shape-aware, so
-                    // it works for non-round cross-sections too (a mean radius would flatten corners).
-                    const AngularProfile outer_prof = AngularProfile::build(cc.loops[sl - 1], centre);              // innermost outer-shell ring
-                    // A SOLID chain has no bore shell, but it does have a terminus ring, and it needs
-                    // an inward bound just as much: without one the only thing stopping an inward lobe
-                    // was max(rr, 1.0) - one scaled unit, a nanometre from the centroid - so the
-                    // innermost kept ring could collapse onto the axis. A degenerate terminus profiles
-                    // as zero, which floors the bound at one spacing from the centre: also correct.
-                    const AngularProfile inner_prof = annular ? AngularProfile::build(cc.loops[cc.loops.size() - sl], centre) // outermost bore-shell ring
-                                                              : AngularProfile::build(cc.loops.back(), centre);              // terminus ring
-                    // Per-ring anti-phase: each successive infill ring flips by pi so neighbours interlock.
-                    // The per-LAYER advance (dphase) still rotates the whole lattice so stacked layers weave.
-                    const double layer_phase = double(layer_index) * woven.dphase;
-                    size_t infill_ring = 0;
-                    for (size_t j = 0; j < cc.loops.size(); ++j) {
-                        if (!kept_infill[j]) continue;   // weave only the thinned infill, not the solid shells
-                        const double phase = layer_phase + double(infill_ring) * M_PI;
-                        ++infill_ring;
-                        for (Point &p : cc.loops[j].points) {
-                            const Vec2d d = p.cast<double>() - centre;
-                            const double r = d.norm();
-                            if (r < 1.0) continue;
-                            const double th = std::atan2(d.y(), d.x());
-                            // Keep ONE SPACING clear of the shells, not merely on the near side of
-                            // their centrelines. The amplitude law sizes lobes for infill-to-infill
-                            // neighbours K*spacing apart, but the first kept infill ring's outward
-                            // neighbour is the immovable shell ring one spacing away; clamping to the
-                            // shell's own radius let the lobe close that pitch to zero and lay bead on
-                            // bead for part of every lobe period.
-                            const double hi = outer_prof.sample_nearest(th) - double(spacing);
-                            const double lo = inner_prof.sample_nearest(th) + double(spacing);
-                            double rr = r + amp * std::sin(woven.lobes * th + phase);
-                            // A band narrower than two spacings cannot be woven without touching a
-                            // shell; leave those points where the plan put them rather than forcing
-                            // one bound and violating the other.
-                            rr = (lo <= hi) ? std::clamp(rr, lo, hi) : r;
-                            rr = std::max(rr, 1.0);
-                            p = Point(coord_t(std::llround(centre.x() + rr * std::cos(th))),
-                                      coord_t(std::llround(centre.y() + rr * std::sin(th))));
-                        }
-                    }
-                }
-            } else if (woven.solid_stagger > 0.0 && thick && cc.star_ok) {
-                // Solid cap/shell brick stagger (see build_cross_section). Shift only the interior rings
-                // inward by solid_stagger this layer; the outer wall rings (< sl) and, for a tube, the
-                // bore shell stay put. Bounded so a ring never invades the bore. The fill stays fully
-                // solid (no decimation, no infill tag) - this only nudges interior geometry per layer.
-                AngularProfile inner_prof;                       // per-angle bore-shell radius (shape-aware)
-                if (annular)
-                    inner_prof = AngularProfile::build(cc.loops[n - sl], centre);
-                for (size_t j = 0; j < n; ++j) {
-                    if (!is_infill(j)) continue;                 // shift interior only; shells stay put
-                    for (Point &p : cc.loops[j].points) {
-                        const Vec2d d = p.cast<double>() - centre;
-                        const double r = d.norm();
-                        if (r < 1.0) continue;
-                        const double th = std::atan2(d.y(), d.x());
-                        double rr = r - woven.solid_stagger;
-                        if (annular)
-                            rr = std::max(rr, inner_prof.sample_nearest(th));
-                        rr = std::max(rr, 1.0);
-                        p = Point(coord_t(std::llround(centre.x() + rr * std::cos(th))),
-                                  coord_t(std::llround(centre.y() + rr * std::sin(th))));
-                    }
-                }
-            }
-        }
+        apply_woven_infill(cc, woven, spacing, layer_index, degrade_note);
         if (!cc.loops.empty())
             out.push_back(std::move(cc));
     }
@@ -2214,7 +2325,8 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
                                        ring_spacing, layer_index, chain.has_bore, &flags, interlock_amp, &zoff,
                                        connector_spread, chain.woven_infill ? woven.shell_loops : 0,
                                        &merged.front(), &chain.ring_widths, &widths, flow.width(),
-                                       scarf_len, scarf_floor, chain.plan.get(), cs_layer_h_scaled);
+                                       scarf_len, scarf_floor, chain.plan.get(), cs_layer_h_scaled,
+                                       chain.ring_slot.empty() ? nullptr : &chain.ring_slot);
         if (sub.points.size() >= 2 && sub.points.size() == flags.size() && sub.points.size() == zoff.size()
             && sub.points.size() == widths.size())
             // A chain carries the Z-wave only when its interior was actually thinned AND its

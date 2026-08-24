@@ -10,6 +10,7 @@
 #include <vector>
 #include <array>
 #include <cstdio>
+#include <map>
 
 using namespace Slic3r;
 
@@ -2136,15 +2137,6 @@ TEST_CASE("Adaptive beading degrades to C-lite byte-identically out of scope", "
         on.continuous_shell_adaptive_beading.value = true;
         expect_identical(surfaces, on, off);
     }
-    SECTION("woven sparse annulus keeps its lattice") {
-        const ExPolygon ann = make_annulus(10.0, 4.0);
-        Surfaces surfaces{ Surface(stInternal, ann) };
-        PrintRegionConfig on, off;
-        on.continuous_shell_infill_density.value  = 30;
-        off.continuous_shell_infill_density.value = 30;
-        on.continuous_shell_adaptive_beading.value = true;
-        expect_identical(surfaces, on, off);
-    }
     SECTION("solid disc keeps its spiral") {
         Polygon circ;
         for (int i = 0; i < 96; ++i) {
@@ -2155,6 +2147,114 @@ TEST_CASE("Adaptive beading degrades to C-lite byte-identically out of scope", "
         PrintRegionConfig on, off;
         on.continuous_shell_adaptive_beading.value = true;
         expect_identical(surfaces, on, off);
+    }
+}
+
+TEST_CASE("Adaptive beading composes with sparse infill", "[ContinuousShell]") {
+    // This replaces a section of the degrade test that asserted the OPPOSITE - that at density
+    // 30 the adaptive option changed nothing. That was true, and it was the defect: switching on
+    // sparse infill silently disabled adaptive beading for the whole object, so every wall in a
+    // sparse part fell back to C-lite marching. Printed cost on a 2.035 mm wall: four stretched
+    // beads (0.555 mm, 1.40x nominal) instead of five, laid tangent with a 0.078 mm void up the
+    // medial. Beading decides bead counts and widths; decimation decides which buried rings
+    // survive afterwards. They are orthogonal and must compose.
+    Flow flow(0.5f, 0.25f, 0.5f);
+
+    SECTION("the plan engages, and the interior is still sparsified") {
+        Surfaces surfaces{ Surface(stInternal, make_annulus(10.0, 4.0)) };
+        PrintRegionConfig c_on, c_off, c_dense;
+        c_on.continuous_shell_adaptive_beading.value    = true;
+        c_on.continuous_shell_infill_density.value      = 30;
+        c_off.continuous_shell_adaptive_beading.value   = false;
+        c_off.continuous_shell_infill_density.value     = 30;
+        c_dense.continuous_shell_adaptive_beading.value = true;
+        c_dense.continuous_shell_infill_density.value   = 0;
+        ExtrusionEntityCollection e_on, e_off, e_dense;
+        auto len = [](const std::vector<ExtrusionPath *> &ps) {
+            double l = 0.0;
+            for (const ExtrusionPath *p : ps) l += p->polyline.length() * SCALING_FACTOR;
+            return l;
+        };
+        const double on    = len(cs_paths(surfaces, flow, c_on,    e_on));
+        const double off   = len(cs_paths(surfaces, flow, c_off,   e_off));
+        const double dense = len(cs_paths(surfaces, flow, c_dense, e_dense));
+        INFO("sparse+adaptive " << on << " mm, sparse+C-lite " << off << " mm, dense " << dense);
+        REQUIRE(on != Catch::Approx(off).epsilon(1e-9));   // the plan is no longer switched off
+        REQUIRE(on < 0.7 * dense);                          // ...and decimation still happened
+    }
+
+    SECTION("a surviving ring keeps its OWN slot's widths") {
+        // The desync detector. On a wall of VARYING thickness the plan gives each slot a
+        // different per-angle width, so a slot map that drifted out of step with the rings
+        // would hand a surviving ring its neighbour's widths. With the weave off, decimation
+        // never MOVES a point - it only drops rings - so any point that survives must keep
+        // exactly the width it had when nothing was decimated. That makes a desync show up as
+        // a width change at an unchanged coordinate, which cannot happen by accident.
+        Polygon outer, inner;
+        for (int i = 0; i < 240; ++i) {
+            const double a = 2.0 * M_PI * i / 240.0;
+            outer.points.emplace_back(coord_t(10000000 * std::cos(a)), coord_t(10000000 * std::sin(a)));
+            inner.points.emplace_back(coord_t(1200000 + 4000000 * std::cos(a)), coord_t(4000000 * std::sin(a)));
+        }
+        ExPolygons ann = diff_ex(Polygons{outer}, Polygons{inner});
+        REQUIRE(ann.size() == 1);
+        Surfaces surfaces{ Surface(stInternal, ann.front()) };
+
+        auto run = [&](int density, ExtrusionEntityCollection &e) {
+            PrintRegionConfig cfg;
+            cfg.continuous_shell_adaptive_beading.value = true;
+            cfg.continuous_shell_infill_density.value   = density;
+            cfg.continuous_shell_infill_weave.value     = 0;    // decimation must not move points
+            return cs_paths(surfaces, flow, cfg, e);
+        };
+        ExtrusionEntityCollection e_dense, e_sparse;
+        const std::vector<ExtrusionPath *> dense  = run(0,  e_dense);
+        const std::vector<ExtrusionPath *> sparse = run(30, e_sparse);
+
+        // Keyed on the exact coordinate, but a coordinate that TWO rings pass through cannot
+        // say which slot a later run meant, so those are excluded rather than guessed at.
+        std::map<std::pair<coord_t, coord_t>, std::pair<float, int>> width_at;
+        std::vector<int> buckets;
+        for (const ExtrusionPath *p : dense)
+            for (const Point3 &q : p->polyline.points) {
+                auto &slot = width_at[std::make_pair(q.x(), q.y())];
+                if (slot.second == 0) slot.first = p->width;
+                else if (std::abs(double(slot.first) - double(p->width)) > 1e-6) slot.second = -1000;
+                if (slot.second >= 0) ++slot.second;
+                buckets.push_back(int(std::lround(double(p->width) * 100.0)));
+            }
+        std::sort(buckets.begin(), buckets.end());
+        buckets.erase(std::unique(buckets.begin(), buckets.end()), buckets.end());
+        INFO("distinct planned widths on the dense run: " << buckets.size());
+        REQUIRE(buckets.size() > 1);        // otherwise a desync would be invisible
+
+        size_t matched = 0, wrong = 0;
+        std::string detail;
+        for (const ExtrusionPath *p : sparse)
+            for (const Point3 &q : p->polyline.points) {
+                // The continuous bead is split into ExtrusionPaths at width changes, so the
+                // point ON a boundary belongs to both runs and legitimately carries either
+                // width. The two runs split in different places, so those are excluded - a
+                // real slot desync corrupts a whole ring (hundreds of points), never two.
+                if (&q == &p->polyline.points.front() || &q == &p->polyline.points.back())
+                    continue;
+                const auto it = width_at.find(std::make_pair(q.x(), q.y()));
+                if (it == width_at.end() || it->second.second != 1)
+                    continue;               // never seen, or shared by rings of differing width
+                ++matched;
+                if (std::abs(double(it->second.first) - double(p->width)) > 1e-6) {
+                    ++wrong;
+                    if (wrong <= 6)
+                        detail += "  r=" + std::to_string(std::hypot(double(q.x()), double(q.y())) * SCALING_FACTOR)
+                                + " dense_w=" + std::to_string(it->second.first)
+                                + " sparse_w=" + std::to_string(p->width)
+                                + " first=" + std::to_string(&q == &p->polyline.points.front())
+                                + " last="  + std::to_string(&q == &p->polyline.points.back());
+                }
+            }
+        INFO(matched << " points matched by coordinate, " << wrong << " carry a different width" << detail);
+        REQUIRE(matched > 200);             // the comparison must have real coverage
+        REQUIRE(wrong == 0);
     }
 }
 
