@@ -2387,3 +2387,66 @@ TEST_CASE("Continuous shell ring ladder by eccentricity", "[.][ContinuousShellMa
         }
     }
 }
+
+
+
+TEST_CASE("Adaptive beading keeps the surface flank pinned across a bead-birth window",
+          "[ContinuousShell]") {
+    // Regression for the floor_transitional rebate. Flooring the transitional bead to w_term
+    // takes the deficit back from the other beads, and at count 3 the recipient list has no
+    // interior beads and falls back to {0, count-1} - the PINNED SURFACE beads. The rebate
+    // changed widths WITHOUT moving toolpath_locations; Arachne places beads edge to edge, so
+    // a narrowed surface bead kept its centreline and pulled its outer flank IN from the wall,
+    // under-extruding both free skins.
+    //
+    // Getting a LARGE rebate takes care. On a uniform wall the count law never selects a count
+    // whose narrowest bead is below the floor, so the deficit is a few microns. The big ones
+    // live in a transition WINDOW, where blend_ring_beadings scales the appearing bead toward
+    // zero: the wall must therefore vary across the 2 -> 3 bead threshold. Two earlier versions
+    // of this test used uniform walls, passed against the very bug they were written for, and
+    // proved nothing.
+    const Flow flow(0.5f, 0.25f, 0.5f);
+    const double r_bore = 4.0, r_out = 5.2, ecc = 0.15;   // wall 1.05 .. 1.35 mm
+    Surfaces surf = cs_fence_tube(r_out, r_bore, ecc);
+    PrintRegionConfig cfg;
+    cfg.continuous_shell_adaptive_beading.value = true;
+    cfg.continuous_shell_infill_density.value   = 0;
+    ExtrusionEntityCollection e;
+    std::string reason, note;
+    REQUIRE(ContinuousShellPathBuilder::build_cross_section(surf, flow, 0.25, &cfg, e, &reason,
+                                                            false, 0, false, {}, &note));
+    INFO("degrade note: " << note);
+    std::vector<ExtrusionPath *> paths;
+    for (ExtrusionEntity *ent : e.entities)
+        ContinuousShellPathBuilder::collect_paths(ent, paths);
+    REQUIRE_FALSE(paths.empty());
+
+    float w_min = 1e9f;
+    for (const ExtrusionPath *p : paths)
+        w_min = std::min(w_min, p->width);
+    INFO("narrowest bead " << w_min);
+    REQUIRE(w_min < 0.35f);          // the window must actually be exercised
+
+    // Per azimuth: the OUTERMOST bead's outer flank must sit on the outer surface, which here
+    // is a circle of radius r_out about the origin at every angle.
+    double worst = 0.0, worst_az = 0.0;
+    for (int k = 0; k < 72; ++k) {
+        const double az = -M_PI + (double(k) + 0.5) * (2.0 * M_PI / 72.0);
+        double r_hi = 0.0, w_hi = 0.0;
+        for (const ExtrusionPath *p : paths)
+            for (const Point3 &q : p->polyline.points) {
+                double d = std::atan2(double(q.y()), double(q.x())) - az;
+                d = std::atan2(std::sin(d), std::cos(d));
+                if (std::abs(d) > 0.05)
+                    continue;
+                const double r = std::hypot(double(q.x()), double(q.y())) * SCALING_FACTOR;
+                if (r > r_hi) { r_hi = r; w_hi = double(p->width); }
+            }
+        if (r_hi <= 0.0)
+            continue;
+        const double err = std::abs(r_hi + w_hi / 2.0 - r_out);
+        if (err > worst) { worst = err; worst_az = az; }
+    }
+    INFO("worst outer-flank error " << worst << " mm at azimuth " << worst_az);
+    REQUIRE(worst < 0.02);
+}

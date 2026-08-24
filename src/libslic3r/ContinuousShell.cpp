@@ -648,8 +648,24 @@ std::unique_ptr<ChainBeadPlan> build_chain_plan(const ExPolygon &region, const F
                 if (i != midc)
                     recipients.push_back(i);
         const coord_t share = deficit / coord_t(recipients.size());
+        // Arachne places beads EDGE TO EDGE, so rebating widths without moving the
+        // centrelines does not conserve coverage the way the totals suggest: the widened
+        // transitional bead overlaps its neighbours by deficit/2 on each side, and every
+        // rebated recipient opens share/2 of void on each of ITS sides. At count 3 the
+        // recipient list falls back to {0, count-1} - the PINNED SURFACE beads - so both
+        // free skins of an ordinary tube lose ~share/2 of their flank, every layer of a
+        // transition band. Re-tile from the outer flank of bead 0, which is the surface
+        // the beading pins: a narrowed surface bead then keeps its flank ON the surface
+        // and moves its centreline inward, instead of pulling the flank in and
+        // under-extruding the skin.
+        const coord_t flank = bd.toolpath_locations.front() - bd.bead_widths.front() / 2;
         for (const size_t i : recipients)
             bd.bead_widths[i] -= share;
+        coord_t acc = flank;
+        for (size_t i = 0; i < count; ++i) {
+            bd.toolpath_locations[i] = acc + bd.bead_widths[i] / 2;
+            acc += bd.bead_widths[i];
+        }
     };
     for (int b = 0; b < NB; ++b) {
         const coord_t t_b = coord_t(std::llround(t_sp[b]));
