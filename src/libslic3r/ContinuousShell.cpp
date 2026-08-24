@@ -637,8 +637,11 @@ std::unique_ptr<ChainBeadPlan> build_chain_plan(const ExPolygon &region, const F
         const size_t midc = count / 2;
         if (count <= 2 || bd.bead_widths[midc] >= w_floor_sp)
             return;
-        const coord_t deficit = w_floor_sp - bd.bead_widths[midc];
-        bd.bead_widths[midc] = w_floor_sp;
+        const coord_t orig_mid = bd.bead_widths[midc];
+        const coord_t deficit  = w_floor_sp - orig_mid;
+        // Captured BEFORE any width changes: this is the outer flank of bead 0, the surface
+        // the beading pins, and the fixed point the re-tiling below works from.
+        const coord_t flank = bd.toolpath_locations.front() - bd.bead_widths.front() / 2;
         std::vector<size_t> recipients;
         for (size_t i = 1; i + 1 < count; ++i)
             if (i != midc)
@@ -647,7 +650,46 @@ std::unique_ptr<ChainBeadPlan> build_chain_plan(const ExPolygon &region, const F
             for (size_t i = 0; i < count; ++i)
                 if (i != midc)
                     recipients.push_back(i);
-        const coord_t share = deficit / coord_t(recipients.size());
+        // Take the deficit only from beads that can AFFORD it. A recipient rebated below
+        // w_term is exactly the bead the floor exists to prevent - below ~1.2x layer height a
+        // bead die-swells and gaps (the printed T5 verdict) - so paying for the floor by
+        // pushing a neighbour under it trades one unprintable bead for another. PlateF's lobed
+        // tube showed the cost: a 0.05 mm width ladder running down to 0.25 mm, 164 mm of
+        // extrusion per layer in one azimuth sector, and a column of voids in the cut.
+        //
+        // Where the budget is short the transitional bead is lifted only as far as the
+        // interior can pay for. It is the bead that is being born or retired, and the one the
+        // design already treats as special; the alternative puts several structural beads
+        // under the floor to lift one transient bead over it.
+        coord_t headroom = 0;
+        for (const size_t i : recipients)
+            headroom += std::max<coord_t>(0, bd.bead_widths[i] - w_floor_sp);
+        const coord_t pay = std::min(deficit, headroom);
+        if (pay <= 0)
+            return;                       // nothing affordable: leave the beading untouched
+        coord_t remaining = pay;
+        for (int pass = 0; pass < 2 && remaining > 0; ++pass) {
+            coord_t room_total = 0;
+            for (const size_t i : recipients)
+                room_total += std::max<coord_t>(0, bd.bead_widths[i] - w_floor_sp);
+            if (room_total <= 0)
+                break;
+            const coord_t want = remaining;
+            for (const size_t i : recipients) {
+                if (remaining <= 0)
+                    break;
+                const coord_t room = std::max<coord_t>(0, bd.bead_widths[i] - w_floor_sp);
+                if (room <= 0)
+                    continue;
+                // Proportional to each bead's headroom, clamped to it; the second pass mops up
+                // integer rounding against whatever headroom is left.
+                coord_t take = coord_t(double(want) * double(room) / double(room_total));
+                take = std::clamp<coord_t>(take, 1, std::min(room, remaining));
+                bd.bead_widths[i] -= take;
+                remaining -= take;
+            }
+        }
+        bd.bead_widths[midc] = orig_mid + (pay - remaining);
         // Arachne places beads EDGE TO EDGE, so rebating widths without moving the
         // centrelines does not conserve coverage the way the totals suggest: the widened
         // transitional bead overlaps its neighbours by deficit/2 on each side, and every
@@ -658,9 +700,6 @@ std::unique_ptr<ChainBeadPlan> build_chain_plan(const ExPolygon &region, const F
         // the beading pins: a narrowed surface bead then keeps its flank ON the surface
         // and moves its centreline inward, instead of pulling the flank in and
         // under-extruding the skin.
-        const coord_t flank = bd.toolpath_locations.front() - bd.bead_widths.front() / 2;
-        for (const size_t i : recipients)
-            bd.bead_widths[i] -= share;
         coord_t acc = flank;
         for (size_t i = 0; i < count; ++i) {
             bd.toolpath_locations[i] = acc + bd.bead_widths[i] / 2;

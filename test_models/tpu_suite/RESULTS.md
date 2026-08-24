@@ -781,3 +781,37 @@ and ~2 beads of gap survive at the medial. A 0.5 mm bore offset is a very ordina
 geometry, so this is now the worst case in the family and the target for W1b - which is a
 statement about the DEFICIT CORRECTION on a vanishing band, not only about widening
 C-full's scope.
+
+### PlateF printed (2026-08-24): W1b/W1 validated, and the strength result of the campaign
+
+E2_mild re-sliced from the SAME STL as the PlateE part, plus a 5-lobe tube, both density 0.
+
+**Strength: the parts were extremely difficult to cut even with a scalpel** - David's
+comparison, across the many prints of this campaign, is that this is an enormous improvement
+by itself. Against the north star (CS is a strength optimisation) that outranks everything
+else on this plate. Two changes are candidates and this print cannot separate them: filling
+walls that were previously 6-31% short (W1b), and putting the material where it tiles rather
+than leaving overlap-plus-gap pairs (W1). A tear/cut comparison against a concentric tube,
+which neither change touches, would separate them.
+
+**The void ring is gone.** The eccentric tube reads "almost identical internally to the star
+shape" - solid, no medial line - against the printed PlateE part which carries one. Predicted
+from the G-code: rays with a gap over 0.55 mm went 48/72 -> 1/72, median 0.811 -> 0.399 mm
+(one bead spacing).
+
+**The lobed wall prints like the round one.** "Incredibly solid, almost no voids at all."
+Per-angle bead counts and widths on a wall that varies 5.2-6.8 mm produce the same internal
+structure as a wall that does not vary - which is what C-full is for, now shown in plastic.
+
+**One defect found: a column of voids near the outer edge of the lobed part**, and it was
+already visible in the G-code as beads below the 0.30 mm transitional floor. The floor
+protects the transitional bead, but the REBATE that pays for it could push a recipient under.
+Measured on this geometry: a 0.05 mm width ladder running down to 0.246 mm, 164 mm of
+extrusion per layer (15.9%) below the floor, concentrated in a 100-200 degree sector - the
+eccentric tube had none anywhere, which is why only the star showed the column.
+
+Fixed by paying the floor only out of beads that can afford it (see the commit). Sub-floor
+extrusion falls to 70 mm (6.75%), which is almost exactly one ring's worth of a 15-ring wall:
+every STRUCTURAL bead is now at or above the floor, and what remains is the transitional ring
+itself, in windows where the interior has no headroom to lift it. That residue wants the count
+law, not the rebate, and is recorded as follow-up rather than forced here.
