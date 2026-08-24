@@ -356,3 +356,28 @@ hold W3, and coarser bucketing is not needed on this evidence.
 One thing to check on the print: F2_lobed carries beads down to 0.246 mm, below the 0.30 mm
 transitional floor, on segments long enough not to be corner noise. Look at the lobe flanks
 for thin or broken beads.
+
+### PlateG (2026-08-24): the strength attribution control
+
+`sliced/PlateG_control.gcode.3mf` (20.02 g, 90 min), density 0 - so W2 can proceed in
+parallel without invalidating it.
+
+- **G1_conc**, a plain concentric tube, is geometry that NONE of the wall-filling work
+  touches: W1b only widens the plan's scope on walls of VARYING thickness, and W1 plus the
+  floor guard only fire where a transitional bead is floored, which a uniform wall of this
+  thickness never does. The density-0 fence confirms it - the concentric rows are
+  byte-identical across every one of those commits, and this slice reads a flat 0.398 mm
+  median gap, 0/72 rays over 0.55, no sub-floor extrusion, widths 0.394-0.400.
+
+  It exists because PlateF came off "extremely difficult to cut even with a scalpel" and that
+  result is UNATTRIBUTED. If this control cuts like the older campaign parts, the gain belongs
+  to the wall-filling work. If it resists equally, the cause is something this campaign did
+  not change and the strength claim has to be withdrawn.
+
+- **G2_lobed** is PlateF's lobed STL re-sliced with the floor-affordability guard. Expect the
+  void column REDUCED, not absent: sub-floor extrusion is 6.75% of the layer, one transitional
+  ring's worth, and that residue belongs to the count law rather than the rebate.
+
+Note: `PlateF_varying.gcode.3mf` in the repo is now the POST-guard slice, because it was
+re-sliced to verify the guard. It no longer matches the printed PlateF part. PlateG supersedes
+it as the canonical artifact for this geometry.
