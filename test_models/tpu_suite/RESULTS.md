@@ -892,3 +892,35 @@ Open as **W2b**: find why the bound is not binding. Note the clamp caps the OUTW
 `outer_prof - spacing`, so a lobe that would exceed it should flatten against the bound at
 exactly 0.396 - a gap of 0.12 is not explainable by the clamp working as written, so this is a
 mechanism question, not a tuning one.
+
+#### Correction (same day): the W2 clamp violation is ~1% of rays, not 28%
+
+The 101/360 figure above is wrong and the conclusion drawn from it - "W2's clamp is NOT
+holding" - overstates the defect by about 25x. Two measurement faults stacked in it, both
+mine, and the corrected detector is validated by a control that now reads exactly zero:
+
+1. **Junction hops counted as ring crossings.** The continuous bead connects rings with
+   EXTRUDED radial moves, so a ray crossing a hop registers material at an intermediate
+   radius no ring occupies. Excluding segments whose endpoints differ in radius by more than
+   0.15 mm removes them: at weave 0 the sub-0.30 population drops 13/360 -> 0/360.
+2. **Pooling layers.** The 8-12 mm band spans ~16 layers and the weave rotates 9 degrees per
+   layer, so rings at different heights sit at different radii; pooling them into one ray
+   fabricates gaps that exist in no single layer. Measuring per layer is the only valid form.
+
+Per layer, hops excluded:
+
+| | min shell1 -> next gap | rays below 0.30 mm |
+|---|---|---|
+| weave 0% | 0.399 mm | **0 / 5758** |
+| weave 100% | 0.121 mm | **63 / 5814 (1.1%)** |
+
+So there IS a real residue - roughly one ray in ninety puts the lattice ~0.12 mm from the
+inner shell ring where the clamp should hold 0.396 - but it is rare and local, not the
+systematic failure claimed above. The clamp as written cannot produce it (it caps the outward
+swing at `outer_prof - spacing`), so the mechanism is still unidentified.
+
+The printed observation is also better explained now. The lattice IS physically joined to the
+shell, by the junction hops, and that is the mode working as designed - one continuous bead
+has to connect the lattice to the shells somehow. A cut section cannot distinguish "bonded by
+a hop" from "over-extruded against the shell" by eye, which is why the G-code measurement had
+to be the arbiter, and why it had to be a per-layer one.

@@ -7,7 +7,10 @@ and registers them in the model_settings.config plate block.
 import sys, zipfile, json, os
 from PIL import Image, ImageDraw
 
-SLICED = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "sliced"))
+# The builders may be writing to their scratch verify directory rather than sliced/,
+# so honour an explicit override (see plate_common.resolve_outdir).
+SLICED = os.environ.get("TPU_SLICED_DIR") or os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..", "sliced"))
 BED_W, BED_H = 350.0, 320.0
 SZ = 512
 

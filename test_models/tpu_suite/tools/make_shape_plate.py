@@ -21,8 +21,11 @@ Three things are asserted rather than assumed, because each fails silently:
 """
 import json, os, re, subprocess, sys, zipfile
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from plate_common import resolve_outdir, inject_env
+
 SUITE   = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-SLICED  = os.path.join(SUITE, "sliced")
+SLICED, PUBLISHING = resolve_outdir(SUITE)
 CFG     = os.path.join(SUITE, "config")
 REPO    = os.path.abspath(os.path.join(SUITE, "..", ".."))
 EXE     = os.environ.get("ORCA_EXE") or os.path.join(REPO, "build", "src", "RelWithDebInfo", "orca-slicer.exe")
@@ -146,7 +149,7 @@ def main():
     subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                                  "inject_thumbnails.py"), OUTNAME],
                    cwd=os.path.dirname(os.path.abspath(__file__)),
-                   check=True, capture_output=True, text=True)
+                   check=True, capture_output=True, text=True, env=inject_env(SLICED))
 
     with zipfile.ZipFile(out) as z:
         g    = z.read("Metadata/plate_1.gcode").decode("utf-8", "replace")
