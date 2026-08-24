@@ -815,3 +815,47 @@ extrusion falls to 70 mm (6.75%), which is almost exactly one ring's worth of a 
 every STRUCTURAL bead is now at or above the floor, and what remains is the transitional ring
 itself, in windows where the interior has no headroom to lift it. That residue wants the count
 law, not the rebate, and is recorded as follow-up rather than forced here.
+
+### PlateG printed (2026-08-24): the strength claim, corrected
+
+**The broad claim from PlateF is WITHDRAWN.** G1_conc is a plain concentric tube - geometry
+none of the wall-filling work touches, byte-identical in the density-0 fence across every one
+of those commits - and it is ALSO difficult to cut. So most of that scalpel resistance is not
+from W1b/W1: it belongs to machinery that predates them (the continuous bead, the arc-length
+Z ramp, C-full on uniform walls) or to something this campaign never varied. Stating it as a
+result of this work was wrong, and the control is what caught it.
+
+**What survives is a differential, and it has a measured mechanism.** The control cut more
+easily than the varying-wall parts and showed noticeably LESS bricklaying. Two candidate
+mechanisms were measured and BOTH ruled out:
+
+- Z offset between radial neighbours (the arc-length ramp's nesting): identical. Median 0.244
+  of a layer on the control vs 0.248 on the lobed part; well-nested pairs 47.5% vs 49.3%.
+- Radial stagger of a ring between passes: near zero on both. Median scatter 0.1 um and 0.8 um;
+  ~97% of ring-columns tighter than 20 um on each. Rings stack in columns in both parts.
+
+What does differ is the RING INTERFACE. Per-angle bead widths make the boundary between two
+rings wander with azimuth instead of forming a cylinder, and the wander tracks wall variation
+rather than external shape (sd, micron, by ring depth below the surface):
+
+| part | outside | wall | r1 | r3 | r5 | r7 |
+|---|---|---|---|---|---|---|
+| G1_conc | round | uniform | 13 | 56 | 82 | 102 |
+| E2_mild | round | varying | 13 | 70 | 121 | 176 |
+| F2_lobed | lobed | varying | 24 | 109 | 196 | 285 |
+
+E2_mild is the discriminator: a round outside like the control but a varying wall, and it sits
+between them. So this is not the lobed profile resisting a blade. On a uniform wall every
+interface is close to a cylindrical parting surface a crack can follow; on a varying wall the
+same interface wanders by up to 285 um - three quarters of a bead - and there is no continuous
+surface to part along.
+
+**Honest limits**: three parts, one filament, and a subjective cutting assessment with no
+instrumented force. This is a mechanism supported by a measurement and a consistent ordering,
+not a proven causal result. It is a good candidate for the strength campaign's instrumented
+work ([[cs-paper-plan]]), where the wander is a knob that can be dialled independently of
+geometry.
+
+**The floor guard is validated, and did better than predicted.** The lobed part was expected to
+show a REDUCED void column; it came off "basically perfect as one continuous solid". The column
+traced to beads below the 0.30 mm transitional floor is gone at the resolution of a cut.
