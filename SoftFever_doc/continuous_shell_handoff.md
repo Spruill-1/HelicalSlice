@@ -853,3 +853,69 @@ failed are recorded above and in the test's own comments.
 - **Next print: peel the reprinted part, both objects.** The geometry no longer has a peel
   surface; whether the plastic agrees is the question, and the sparse object should be peeled
   too, which the last round did not do.
+
+### The peel again (2026-08-25): the pin worked and the peel did not move
+
+Reprinted with the pin and the stride fix, both objects peel **virtually the same as before**.
+The user's read of the dense one: the middle column of foam is somewhat joined to the innermost,
+still entirely disconnected from the outside, and the "somewhat" is a very weak joint.
+
+**The pin did what it claimed.** Tie fraction by interface, measured on the printed part,
+running bore-outward (rank matching on rays showing the full ring set):
+
+| L2 dense | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| tied | 99.4% | 99.7% | 73.8% | **0.8%** | 15.1% | 63.0% | 13.6% | 43.7% | 21.4% | 99.8% | 99.9% |
+
+The shell interfaces (0, 1, 9, 10) are now tied 99.4-100%, against 43% before. The peel plane did
+not survive there. It moved INTO the lattice, where interface 3 is tied over 0.8% of its
+circumference - a very nearly free cylinder - and 4, 6, 8 are tied 13-21%.
+
+Note the shape of that list: it alternates. High, low, high, low. That is not noise.
+
+**The mechanism: the lattice sets into permanent doublets.** Adjacent rings are meant to be in
+anti-phase, so each interface should close wherever its two rings oppose - about 42% of the
+circumference at overshoot 4, and every interface equally, because a ring spends half its period
+facing each way. Measuring the correlation of adjacent rings' radial deviations, which should be
+about -1 for anti-phase:
+
+| iface | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|
+| correlation | +0.00 | **+0.25** | -0.53 | -0.93 | -0.68 | -0.60 | -0.02 |
+| tied | 74% | 1.6% | 13% | 64% | 14% | 46% | 22% |
+
+Rings 3 and 4 move TOGETHER. Only one pair in the wall (-0.93) is properly opposed. Each ring
+commits to one neighbour and stays committed all the way round, so the wall is a stack of bonded
+doublets with unbonded cylinders between them - which is precisely what a peel finds, and
+precisely what the hand reports.
+
+**The drift is not the cause.** It weakens opposition to cos(d) - 30% lost on the dense object -
+and that was worth testing, but setting it to zero moves the worst interface only from 0.8% to
+6.6% and lowers the mean (57.3% -> 54.6%). Both are catastrophic for peel. Default left at 2
+slots; changing it would be noise-chasing.
+
+### What this means
+
+Every fix so far has moved the weak surface rather than removed it. The scalar amplitude left
+wide gaps unclosable; per-gap sizing fixed that and the weak surface moved to the shell face; the
+pin fixed the shell face and the weak surface moved one ring inward. That is not bad luck - it
+follows from the geometry:
+
+**A lattice of concentric rings that tie by tangency has no radial members.** Its only radial
+connections are the places where two rings happen to touch, so between them there is always a
+continuous cylindrical void, and a peel needs exactly one such surface. Making individual ties
+better cannot remove the class of failure; it relocates it to whichever interface currently ties
+least.
+
+The consequence for the roadmap is that peel resistance is not reachable by tuning the weave.
+What would reach it is a generator whose path traverses the wall RADIALLY - a serpentine that
+sweeps across the thickness as it goes round, so every cell is bounded by continuous material in
+both directions - rather than concentric rings that undulate. That is a new interior mode, not a
+parameter, and it should be weighed against what the ring lattice is good at before it is built.
+
+### Not to be repeated
+
+Three metrics in a row have flattered this subsystem: tie fraction (per-pair, blind to whether
+any azimuth is braced), welds per azimuth (blind to radius, so blind to peel surfaces), and both
+at a knife-edge threshold. The statistic that matches the hand is **tie fraction per interface,
+in radial order, worst-first**. A mean over interfaces hides a free cylinder; a peel does not.
