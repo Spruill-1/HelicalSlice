@@ -2362,6 +2362,124 @@ Surfaces cs_fence_disc(double r_out)
 
 } // namespace
 
+TEST_CASE("Every woven neighbour pair reaches a weld, whatever its gap", "[ContinuousShell]") {
+    // The weave's amplitude used to be one scalar derived from the nominal stride K, on the
+    // assumption that the kept rings sit K spacings apart. They do not. The sparsifier anchors a
+    // ring on each shell and shares the remainder through the middle, so the gaps come out
+    // uneven - and because the excursion was a constant, every gap closed by exactly 2*cap
+    // whatever its width. A gap of K slots closed to one spacing (a weld); a gap of K+1 closed
+    // to two, which is air. No setting reaches it: the amplitude that would close the wide gap
+    // crosses at the narrow one.
+    //
+    // Printed consequence, on a de-lidded part: rings welded into doublets that touched neither
+    // the shells nor each other - a wall that behaved as loose columns rather than a foam.
+    //
+    // The wall here is chosen to mix 4- and 5-slot gaps, which is the case that discriminates;
+    // on a wall whose gaps happen to be uniformly K the old scalar passes, and that is exactly
+    // how this survived so long. The mix is asserted before the welds, so the test cannot go
+    // quietly vacuous if the sparsifier's distribution changes.
+    //
+    // Note what is NOT asserted: that some azimuth is welded all the way through. None is, by
+    // design - anti-phase neighbours mean that where one pair closes the next is at its widest,
+    // so the wall is a truss of alternating doublets rather than a solid. The claim here is the
+    // per-PAIR one: no pair may be left with no weld anywhere.
+    Flow flow(0.5f, 0.25f, 0.5f);
+    const double sp = flow.spacing();
+
+    // Exact ray crossings, interpolated on the segment that spans the azimuth.
+    auto ray_cross = [](const std::vector<ExtrusionPath *> &paths, double az) {
+        std::vector<double> hits;
+        for (const ExtrusionPath *p : paths) {
+            const Points3 &pts = p->polyline.points;
+            for (size_t i = 0; i + 1 < pts.size(); ++i) {
+                const double x0 = double(pts[i].x())     * SCALING_FACTOR;
+                const double y0 = double(pts[i].y())     * SCALING_FACTOR;
+                const double x1 = double(pts[i + 1].x()) * SCALING_FACTOR;
+                const double y1 = double(pts[i + 1].y()) * SCALING_FACTOR;
+                double a0 = std::atan2(y0, x0) - az, a1 = std::atan2(y1, x1) - az;
+                a0 = std::atan2(std::sin(a0), std::cos(a0));
+                a1 = std::atan2(std::sin(a1), std::cos(a1));
+                if ((a0 < 0.0) != (a1 < 0.0) && std::abs(a0 - a1) < M_PI) {
+                    const double t = a0 / (a0 - a1);
+                    hits.push_back(std::hypot(x0 + t * (x1 - x0), y0 + t * (y1 - y0)));
+                }
+            }
+        }
+        std::sort(hits.begin(), hits.end());
+        std::vector<double> out;                      // one entry per bead
+        for (const double r : hits)
+            if (out.empty() || r - out.back() > 0.15) out.push_back(r);
+        return out;
+    };
+
+    PrintRegionConfig cfg;
+    cfg.continuous_shell_adaptive_beading.value = true;
+    cfg.continuous_shell_infill_density.value   = 25;          // stride 4
+    Surfaces surfaces{ Surface(stInternal, make_annulus(12.0, 10.0)) };
+
+    // Nominal ring radii, weave off: decimation drops rings but never moves a point.
+    PrintRegionConfig flat = cfg;
+    flat.continuous_shell_infill_weave.value = 0;
+    ExtrusionEntityCollection e_flat;
+    const std::vector<double> nominal = ray_cross(cs_paths(surfaces, flow, flat, e_flat), 0.0);
+    REQUIRE(nominal.size() >= 6);
+    std::vector<double> gaps;
+    for (size_t i = 0; i + 1 < nominal.size(); ++i)
+        gaps.push_back(nominal[i + 1] - nominal[i]);
+    {
+        std::string g;
+        for (const double v : gaps) g += " " + std::to_string(v / sp).substr(0, 4);
+        INFO("nominal gaps in slots:" << g);
+        std::vector<double> buried;
+        for (const double v : gaps) if (v > 1.5 * sp) buried.push_back(v);
+        // The premise: at least two BURIED gaps, of different widths. Without a spread the two
+        // amplitude laws are indistinguishable here and this passes against the bug.
+        REQUIRE(buried.size() >= 2);
+        REQUIRE(*std::max_element(buried.begin(), buried.end())
+                - *std::min_element(buried.begin(), buried.end()) > 0.5 * sp);
+    }
+
+    // Weave on. Rings are identified by the nominal BAND they lie in - the interval between the
+    // midpoints to either nominal neighbour. That is sound here and not in general: a ring's
+    // excursion toward a mobile neighbour is half the gap's excess over one spacing, which is
+    // strictly less than half the gap, so it can never leave its band. (A ring facing an
+    // immovable shell across a wide gap covers the whole excess and COULD cross a midpoint,
+    // which is why the wall above is one whose buried pairs are all infill-to-infill.) A
+    // junction hop landing in a band puts a second crossing in it; those bands are skipped for
+    // that ray rather than guessed at, and the surviving count is asserted.
+    ExtrusionEntityCollection e_w;
+    const std::vector<ExtrusionPath *> woven = cs_paths(surfaces, flow, cfg, e_w);
+    const int NR = 720;
+    std::vector<double> closest(nominal.size() - 1, 1e9);
+    std::vector<int>    samples(nominal.size() - 1, 0);
+    for (int k = 0; k < NR; ++k) {
+        const std::vector<double> r = ray_cross(woven, -M_PI + (k + 0.5) * (2.0 * M_PI / NR));
+        std::vector<double> band(nominal.size(), 0.0);
+        std::vector<int>    cnt(nominal.size(), 0);
+        for (const double v : r) {
+            for (size_t i = 0; i < nominal.size(); ++i) {
+                const double lo = (i == 0) ? -1e9 : 0.5 * (nominal[i - 1] + nominal[i]);
+                const double hi = (i + 1 == nominal.size()) ? 1e9 : 0.5 * (nominal[i] + nominal[i + 1]);
+                if (v >= lo && v < hi) { band[i] = v; ++cnt[i]; break; }
+            }
+        }
+        for (size_t i = 0; i + 1 < nominal.size(); ++i)
+            if (cnt[i] == 1 && cnt[i + 1] == 1) {
+                closest[i] = std::min(closest[i], band[i + 1] - band[i]);
+                ++samples[i];
+            }
+    }
+
+    for (size_t i = 0; i < closest.size(); ++i) {
+        INFO("pair " << i << " (nominal " << gaps[i] / sp << " slots) closes to "
+             << closest[i] / sp << " slots at best, over " << samples[i] << " of " << NR << " rays");
+        REQUIRE(samples[i] > 3 * NR / 4);        // the sweep really did see this pair all round
+        // One spacing is contact: the distance any two neighbouring beads sit at. The tolerance
+        // covers the polygon's angular sampling, not a weaker claim.
+        REQUIRE(closest[i] <= 1.10 * sp);
+    }
+}
+
 TEST_CASE("Continuous shell density-0 signature table", "[.][ContinuousShellSig]")
 {
     const Flow flow(0.5f, 0.25f, 0.5f);

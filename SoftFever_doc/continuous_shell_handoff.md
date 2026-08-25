@@ -589,3 +589,113 @@ helpers, and an imported module runs its own `resolve_outdir` at import time, wh
 `--publish` from argv before the importing tool's call saw it. `--publish` therefore produced
 a silent verify-only run - the very failure the guard exists to prevent, one level up. The
 decision is now memoized.
+
+### PlateL reprint (2026-08-25): the amplitude law was wrong, not the phase
+
+The staggered-tie plate came off "better, not quite perfect": the dense object was nearly a
+foam, missing only a few connections between adjacent columns; the sparse object still had
+obvious gaps and its columns were **not connected at all**.
+
+The right statistic turned out not to be the one used to justify the drift. Tie fraction is a
+per-PAIR measure - does ring j touch ring j+1 anywhere - and it says nothing about whether any
+given azimuth is braced. The wall reads as columns when an azimuth has **no weld anywhere
+across its depth**, so that is what is measured now (`weldmap.py`: welds per azimuth per layer,
+plus the azimuthal width of the dead bands and how many layers they stack).
+
+**What the drift actually did**, measured on the two printed files:
+
+| | mean welds/azimuth | azimuths with none | dead band | tallest dead stack |
+|---|---|---|---|---|
+| print 1, L1 sparse | 0.85 | 61.4% | 11.9 deg | 5 layers |
+| print 2, L1 sparse | 0.80 | **40.0%** | **4.0 deg** | 8 layers |
+| print 1, L2 dense | 1.18 | 58.0% | 17.9 deg | 5 layers |
+| print 2, L2 dense | 1.03 | **43.4%** | **7.3 deg** | 4 layers |
+
+So the drift was a real improvement - it broke the wide aligned gaps into narrow scattered ones
+- and it slightly reduced weld depth doing it. Both match the part in hand. But 40% of azimuths
+still carried nothing, and a sweep of saturation overshoot x drift **through the slicer** (16
+slices, scored on the same weld map) hit a hard floor near 37%: no combination of the two knobs
+did better. That is the signal that the knobs were not the problem.
+
+### The actual defect
+
+Slicing with the weave OFF shows the kept rings where the sparsifier puts them. On L1:
+
+```
+r:    2.71 3.11 | 3.51        5.52   6.96        8.97 | 9.37 9.76
+gap:   0.40 0.40  2.00        1.45   2.00        0.40   0.40      (mm)
+```
+
+The gaps are **5, 4, 5 slots** - and the amplitude was a single scalar sized from the nominal
+stride K=4. Every gap therefore closed by exactly `2*cap` whatever its width: a 4-slot gap
+closed to one spacing (a weld), a 5-slot gap closed to two, which is air. **No setting reaches
+it** - the amplitude that would close the 5-slot gap crosses at the 4-slot one, and crossing
+retraces ground already laid in the layer. The printed result is exactly what the geometry
+predicts: rings welded into doublets that touch neither the shells nor each other.
+
+This is not peculiar to this part. Sweeping thickness and density shows walls whose kept-ring
+gaps exceed K are the common case, not the exception (d=25 t=9mm: gaps 5,5,5; d=50 t=9mm: a
+3-slot gap where the stride is 2).
+
+### Fix: size the amplitude per gap, per angle
+
+Measure the gap that actually exists between each ring and each of its neighbours, at every
+angle, and size the excursion to close *that*. Two weaving neighbours approach each other, so
+each covers half the excess over one spacing; an immovable shell covers none, so its neighbour
+covers all of it. Both halves come from the same measured gap, so opposed rings meet at exactly
+one spacing by construction and cannot cross. Per-angle because adaptive beading makes the gaps
+vary around the ring.
+
+The two wave constants were then re-swept against the new geometry and set to overshoot 4.0 and
+a drift of 2 slot-widths - chosen because that pair minimises the WORST of the two objects, and
+the sparse one is the failure mode.
+
+| | mean welds/azimuth | azimuths with none | dead band | tallest dead stack |
+|---|---|---|---|---|
+| L1 sparse | 0.80 -> **1.17** | 40.0% -> **28.3%** | 4.0 -> **2.7 deg** | 8 -> 5 layers |
+| L2 dense | 1.03 -> **1.34** | 43.4% -> **25.7%** | 7.3 -> **3.2 deg** | 4 -> 5 layers |
+
+Cost: 5.19 g -> 5.34 g (+2.9%), 28 -> 29 min. Density-0 fence byte-identical; full suite green
+(173 cases).
+
+### What is deliberately NOT claimed
+
+- **No azimuth is welded all the way through, and none can be.** Anti-phase neighbours mean that
+  where one pair closes, the next is at its widest. The wall is a truss of alternating doublets,
+  not a solid; connectivity comes from the alternation around the circumference, not from
+  simultaneous welds. Measured: 0.00% of 9000 rays fully welded, before and after. Any future
+  metric that asks for a full radial bridge is asking for the wrong thing.
+- **Welds are a G-code measure** - beads whose centrelines come within a bead width. Whether they
+  bond in TPU still needs the part.
+- **The two constants are tuned on one plate at two densities.** Treat them as the current best
+  estimate, not as settled.
+
+### Regression test, and the trap it nearly fell into
+
+`Every woven neighbour pair reaches a weld, whatever its gap` asserts the per-pair property on a
+wall that mixes 4- and 5-slot gaps, and asserts that mix first so it cannot go vacuous. It took
+four attempts to make it honest, and the first version **passed against the bug** - the wall it
+used happened to have a single buried gap of exactly K slots, which the old scalar law serves
+perfectly. Two further versions failed for measurement reasons worth recording:
+
+- a wedge sampler splits one saturated ring into two radius clusters and renumbers every ring
+  above it;
+- matching rings by nearest nominal radius breaks **exactly at a weld**, where both rings have
+  moved to within one spacing of the midpoint and each is nearest the other's nominal.
+
+Rings are now identified by the nominal band they lie in, which is sound only because every
+buried pair on that wall is infill-to-infill. Verified in both directions: the test fails
+(2.07 slots vs 1.10 allowed) when the per-gap law is swapped back for the scalar.
+
+### Open, and worth a decision
+
+The sparsifier anchors a ring on each shell and shares the remainder through the middle, so m
+rings make m-1 gaps across span-1 slots and the **delivered stride is (span-1)/(m-1), not K**.
+On L1 that is 4.67 against a requested 4 - about 17% sparser than the density asked for. The
+per-gap amplitude now welds those wider gaps regardless, so this is no longer a strength bug,
+but it does mean the density setting is not being honoured. Correcting it costs roughly one
+extra ring per chain (more material) and changes default output for every sparse part, so it
+should be a deliberate call rather than a quiet fix.
+
+**Next:** reprint PlateL to see whether the columns actually merge in plastic. Then W4
+(`force_solid` layers keeping adaptive beading - the printed doubled bore lip), then W6.
