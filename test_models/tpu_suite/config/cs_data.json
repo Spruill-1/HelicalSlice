@@ -375,6 +375,6 @@
  "continuous_shell_interlock": "0",
  "continuous_shell_scarf_length": "0",
  "continuous_shell_adaptive_beading": "1",
- "continuous_shell_interior_spiral": "1",
+ "continuous_shell_interior_spiral": "0",
  "continuous_shell_infill_density": "25"
 }

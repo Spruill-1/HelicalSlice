@@ -42,6 +42,7 @@ STEP_H  = 7.0
 CORE_R, CORE_BORE, CORE_H = 10.0, 2.5, 20.0   # 7.5 mm wall: ~19 beads, well past the gate
 SEG     = 256
 OUTNAME = "PlateD_data"
+DENSE_PCT = 50        # what a ring-count floor of 6 would pick for this wall (K 4 -> 2)
 
 
 def write_stl(path, tris):
@@ -278,12 +279,52 @@ def slice_plate(density, outname, inject):
     out = os.path.join(outdir, outname + ".gcode.3mf")
     if os.path.exists(out):
         os.remove(out)
-    r = subprocess.run([EXE, "--load-settings", f"{os.path.join(CFG, 'machine.json')};{p}",
-                        "--load-filaments", os.path.join(CFG, "filament.json"),
-                        "--arrange", "1", "--slice", "0",
-                        "--export-3mf", outname + ".gcode.3mf", "--outputdir", outdir,
-                        os.path.join(SUITE, "D1_ladder.stl"), os.path.join(SUITE, "D2_weave.stl")],
-                       capture_output=True, text=True, timeout=1800)
+    stls = [os.path.join(SUITE, "D1_ladder.stl"), os.path.join(SUITE, "D2_weave.stl")]
+    if density:
+        stls.append(os.path.join(SUITE, "D3_dense.stl"))
+    base = [EXE, "--load-settings", f"{os.path.join(CFG, 'machine.json')};{p}",
+            "--load-filaments", os.path.join(CFG, "filament.json")]
+    if density:
+        # D3 carries a PER-OBJECT density override so both strides print in one session, on one
+        # filament: probe-slice to get a project, patch the override into model_settings.config,
+        # then slice the project. Same technique make_shape_plate uses for its ring-mode control.
+        probe = os.path.join(outdir, outname + "_probe.gcode.3mf")
+        if os.path.exists(probe):
+            os.remove(probe)
+        r = subprocess.run(base + ["--arrange", "1", "--slice", "0", "--export-3mf",
+                                   outname + "_probe.gcode.3mf", "--outputdir", outdir] + stls,
+                           capture_output=True, text=True, timeout=1800)
+        if r.returncode or not os.path.exists(probe):
+            print((r.stdout or "")[-900:]); sys.exit("probe slice failed")
+        zin = zipfile.ZipFile(probe)
+        ms  = zin.read("Metadata/model_settings.config").decode("utf-8")
+        hits = [0]
+        def tag(m):
+            if "D3_dense" not in m.group(2):
+                return m.group(0)
+            hits[0] += 1
+            tag_xml = ('\n    <metadata key="continuous_shell_infill_density" '
+                       'value="%d"/>' % DENSE_PCT)
+            return m.group(0) + tag_xml
+        ms2, _ = re.subn(r'<object id="(\d+)">\s*<metadata key="name" value="([^"]+)"/>', tag, ms)
+        if hits[0] != 1:
+            sys.exit(f"expected to tag exactly one D3_dense object, tagged {hits[0]}")
+        project = os.path.join(SUITE, outname + ".3mf")
+        with zipfile.ZipFile(project, "w", zipfile.ZIP_DEFLATED) as zout:
+            for info in zin.infolist():
+                nm = info.filename
+                if nm.startswith("Metadata/plate_") or "thumbnail" in nm.lower()                    or nm.endswith(".gcode") or nm.endswith(".gcode.md5"):
+                    continue
+                zout.writestr(nm, ms2 if nm == "Metadata/model_settings.config" else zin.read(nm))
+        zin.close()
+        os.remove(probe)
+        r = subprocess.run(base + ["--slice", "0", "--export-3mf", outname + ".gcode.3mf",
+                                   "--outputdir", outdir, project],
+                           capture_output=True, text=True, timeout=1800)
+    else:
+        r = subprocess.run(base + ["--arrange", "1", "--slice", "0", "--export-3mf",
+                                   outname + ".gcode.3mf", "--outputdir", outdir] + stls,
+                           capture_output=True, text=True, timeout=1800)
     if r.returncode or not os.path.exists(out):
         print((r.stdout or "")[-900:])
         print((r.stderr or "")[-400:])
@@ -300,9 +341,11 @@ def main():
 
     write_stl(os.path.join(SUITE, "D1_ladder.stl"), build_ladder())
     write_stl(os.path.join(SUITE, "D2_weave.stl"), build_core())
+    write_stl(os.path.join(SUITE, "D3_dense.stl"), build_core())   # same shape, denser stride
     print(f"D1_ladder: r_out {R_OUT}, wall steps {STEPS} beads "
           f"({[round(n * SP, 3) for n in STEPS]} mm), {STEP_H} mm each; gate flips between 6 and 5")
     print(f"D2_weave:  annulus r_out {CORE_R} / bore {CORE_BORE}, h {CORE_H} - the woven lattice")
+    print(f"D3_dense:  same annulus at density {DENSE_PCT}% - the dynamic-density preview")
 
     dense  = analyse(slice_plate(0, "PlateD_dense", False), quiet=True)
     sparse = analyse(slice_plate(density, OUTNAME, True))

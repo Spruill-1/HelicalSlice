@@ -509,3 +509,37 @@ designing deliberately rather than improvising.
 **Practical guidance meanwhile:** the woven infill earns its lattice on LARGE, SOLID sections.
 On a thin or few-ring interior most rings are shell-adjacent and it degenerates toward
 concentric tubes; there, higher density (more kept rings) helps more than any weave setting.
+
+### W7 step 2 (DESIGNED, not implemented): dynamic density floor
+
+David's idea, and it targets the failure mode exactly. A lattice needs enough buried rings to
+BE a lattice: with too few, most kept rings are shell-adjacent, W2's shell clamp caps their
+swing, and the weave degenerates into concentric tubes. So set the stride from the ring budget,
+not from density alone:
+
+    n_buried = rings between the shells
+    K_eff    = clamp(n_buried / MIN_LATTICE_RINGS, 2, K_from_density)
+
+The shape is right because it is FREE where the lattice already works. The solid disc has ~35
+buried rings, so a floor of 6 needs K <= 5 and it keeps its requested K = 4 - no change, no
+extra material. The thin annulus has 15 and densifies. Material is spent only where the lattice
+would otherwise fail to form, which is also where there is least area to spend it on.
+
+Measured on the 7.5 mm-wall annulus (tie fraction includes ties to the shells):
+
+| floor | K | material | tie |
+|---|---|---|---|
+| none (today) | 4 | 3.94 g | 16.2% |
+| 4 rings | 3 | 4.25 g (+8%) | ~19% |
+| 6 rings | 2 | 5.10 g (+29%) | 22.3% |
+| *solid disc reference* | *4* | *unchanged* | *26.7%* |
+
+Suggested default: a floor of 4 - most of the benefit for a third of the cost - with the floor
+exposed rather than hard-coded.
+
+**Deliberately not implemented yet.** It overrides the density the user asked for (request 25%
+on a thin wall, get 33-50% there), and the open question is whether 6 points of tie fraction is
+visible in plastic at all. This whole W7 thread has been wrong-until-corrected-by-a-print, so
+the density comparison goes on the bench BEFORE a policy is built around the number. When it is
+implemented it must report through the W5 degrade_note ("interior only 15 rings, densified
+stride 4 -> 3 so the weave can tie") rather than silently inflating a part.
