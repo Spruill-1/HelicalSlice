@@ -465,3 +465,47 @@ Building that detector took three passes and both dead ends are worth knowing: c
 shared by two rings cannot say which slot a later run meant (49 false hits), and the point ON
 a width-run boundary belongs to both ExtrusionPaths and legitimately carries either width
 (2 more). Excluding both leaves zero.
+
+### W7 (2026-08-24): the weave's lateral tie is geometry-dependent
+
+Printed section of a thick woven annulus showed concentric wavy cylinders joined at points -
+top-down support, almost no lateral tie. Measured per adjacent ring pair: 13.0% of the
+circumference with bead edges touching, 5.1% with real overlap, one mid pair at 0.1%.
+
+**Cause (arithmetic, not a bug).** The drive amplitude equalled the contact bound, so the
+closest approach is exactly one bead spacing at the instant the sine peaks - peak meets valley
+at a tangent POINT. Contact needs `sin >= (K*spacing - width)/(2*amp)` ~ 0.98, about 6% of
+every period, and it is scale-free: sweeping the lobe count over its whole range moved bonding
+only 13.5% -> 9.6% (finer lobes are WORSE - they sweep through the approach faster). Neither
+the amplitude nor the bound has changed since the original commit, so it never was a
+regression, and no user setting escapes it.
+
+**Fix (fed6bae35d):** the drive now overshoots the bound 1.6x and is CLIPPED to it, so each
+meeting is a parallel run at one spacing rather than a graze. Contact holds while
+`|sin| >= 1/overshoot`, predicting ~28% of each period.
+
+**Why the first measurement missed that prediction, and what it means.** On the thick annulus
+the change gave only 14.0% touching, against 28% predicted. The annulus's 7.5 mm wall holds
+about FOUR kept interior rings, so most of them are shell-adjacent - and W2's shell clamp caps
+their outward swing, which is exactly what suppresses the weave. On a SOLID disc (no bore,
+r 15 mm, same settings) where shell-adjacent rings are a small minority, bonding is 26.7%,
+matching the prediction, and it rises toward the centre:
+
+| radius band | edges touching |
+|---|---|
+| 3-6 mm | 30.9% |
+| 6-9 mm | 30.3% |
+| 9-12 mm | 23.2% |
+| 12-15 mm | 25.5% |
+
+That radial trend is the remaining design question. Lobes are a fixed ANGULAR count, so the
+cell aspect ratio - arc wavelength against ring pitch - drifts with radius: equiaxed cells and
+a real net near the centre, long thin cells and tube-like behaviour far out. Making the lobe
+count scale with radius (constant arc wavelength) would hold the cell shape across the part.
+Each ring must close, so the count has to stay integral per ring, which means adjacent rings
+would carry different counts and meet on a beat rather than everywhere in phase - worth
+designing deliberately rather than improvising.
+
+**Practical guidance meanwhile:** the woven infill earns its lattice on LARGE, SOLID sections.
+On a thin or few-ring interior most rings are shell-adjacent and it degenerates toward
+concentric tubes; there, higher density (more kept rings) helps more than any weave setting.
