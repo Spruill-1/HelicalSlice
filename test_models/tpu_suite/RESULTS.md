@@ -1115,3 +1115,83 @@ should be a deliberate call rather than a quiet fix.
 
 **Next:** reprint PlateL to see whether the columns actually merge in plastic. Then W4
 (`force_solid` layers keeping adaptive beading - the printed doubled bore lip), then W6.
+
+## The peel test (2026-08-25): the anchor ring is the peel plane
+
+With the bottom shell removed, the dense de-lid object **peels apart into three concentric
+sections**. That is a different kind of evidence from everything before it: a peel finds
+separation surfaces at particular RADII, and every metric in this campaign so far has been
+per-azimuth. The weld map cannot see a cylinder of poor bond, because such a cylinder is equally
+unbraced at every azimuth.
+
+Three measurements, in order:
+
+1. **It is not a void.** Radial coverage (what fraction of azimuths and heights carry material at
+   each radius) never falls below ~32% anywhere in the wall. There is no empty cylinder. So the
+   separation is beads that touch without bonding.
+2. **The infill-to-shell interface is an order of magnitude weaker than the interior.** In
+   contact at 4.5% of samples against 32% for infill-to-infill, and that ratio held at every
+   Z-wave amplitude tested (0, 0.20, 0.45).
+3. **The cause: the anchor ring does not stay anchored.** The sparsifier deliberately keeps a
+   ring adjacent to each shell so the lattice ties to both faces - but that ring is woven like
+   any other, and its swing toward its inner neighbour carries it off the shell.
+
+| L2 dense, anchor to shell | bonded | median gap | p90 gap |
+|---|---|---|---|
+| bore face | **43.8%** | 0.454 mm | 0.603 mm |
+| outer face | **42.6%** | 0.450 mm | 0.603 mm |
+
+One and a half spacings at the 90th percentile, at a FIXED radius, repeated every layer. That is
+a peel surface, and there is exactly one at each face - hence three sections.
+
+### Two corrections to earlier records
+
+- **The weld map takes no account of Z.** Two beads binned into the same layer can be most of a
+  layer apart vertically and still be counted as welded. Measured dZ at contact is 0.35-0.64 of
+  a layer. Every weld-map figure quoted before this therefore OVERSTATES bonding. The
+  version-to-version comparisons remain valid - zamp was constant across all of them - but the
+  absolute percentages are not a measure of fused material.
+- **The Z stagger between radially adjacent rings is inherent, not a bug.** At zamp = 0 the
+  interior still shows 0.36-0.50 of a layer between neighbours, because a CONTINUOUS shell ramps
+  in Z as it spirals inward. Radially adjacent beads never meet flat. This is the same effect the
+  campaign has been calling bricklaying; it cannot be removed without giving up continuity, and
+  a quadrature Z wave cannot fix it either - the simulation gives ~0.28 of a layer at contact
+  even with zero per-ring drift, because W7 deliberately widened contact from a point to a run
+  and the Z wave keeps sweeping throughout that run.
+
+### The fix, designed and measured but NOT landed
+
+Pin the anchor ring: a kept ring that neighbours a shell does not weave at all. It stays
+concentric, welded to that shell the whole way round, and its inner neighbour covers the whole of
+their gap rather than half - exactly as if the pinned ring were itself a shell. Also removes an
+old `min(c, 0.49*gap)` clamp in `gap_cap`, which was not a safety net but a leak: `share*(gap -
+spacing)` already lands a pair one spacing apart at full excursion, and the 0.49 clamp capped the
+excursion below what contact needs whenever a share-1.0 gap exceeded about two slots.
+
+Patch kept at `pin_anchor_rings.patch` (54 lines). Measured:
+
+- **The radial peel plane is gone.** Anchor-to-shell gap becomes 0.400 mm median with a p90 of
+  0.401 - one spacing, constant, all the way round, both faces, both densities.
+- **But bonded only reaches 40-61%**, because the pinned ring is still tagged as infill and so
+  still carries the Z wave, which lifts it off the shell vertically. The radial peel plane has
+  been traded for a vertical one.
+- **And the sparse object regresses badly**: 28.3% -> 48.9% of azimuths with no weld, welds per
+  azimuth 1.17 -> 0.70. Pinning two of L1's four infill rings leaves only two that weave, across
+  gaps of 5 slots.
+- The weld regression test fails on its sampling guard, correctly: pinning makes the next ring
+  cover a whole gap, so it crosses the nominal midpoint and breaks the band-assignment premise
+  the test documents as its own precondition.
+
+### What has to be settled before this lands
+
+1. **Exclude the pinned ring from the Z wave.** It needs to be tagged as shell rather than
+   infill, which is the `chain.woven_infill ? woven.shell_loops : 0` argument at the
+   spiralize_rings call. Tagging it shell also changes its extrusion role and the over-extrusion
+   cap, which is arguably correct - it IS functionally part of the shell now - but is a wider
+   change than the Z wave alone and needs the fence and a surface check.
+2. **The sparse regression is really the stride bug.** L1's kept rings sit 5 slots apart because
+   the delivered stride is (span-1)/(m-1), not K. At that spacing there is not enough material to
+   build a lattice once two rings are pinned. Fixing the placement so the stride matches the
+   requested density costs about one extra ring per chain and changes default output for every
+   sparse part - the deliberate call already flagged.
+3. Re-derive the weld test's ring identity, which pinning invalidates on that wall.
