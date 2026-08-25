@@ -996,3 +996,61 @@ Off by default (`continuous_shell_interior_serpentine`), fence clean, no existin
 Nothing here is print-validated yet - the numbers above are all geometry. The next physical step
 is a plate carrying the annulus, the solid section and the crescent with the lid off, peeled the
 same way the ring lattice was.
+
+### PlateN (2026-08-25): the serpentine's first physical test, with a control
+
+Everything known about the serpentine was geometry. This plate is the first evidence in plastic,
+and it carries its own control: **N0 and N1 are the same STL**, the de-lid annulus, differing only
+in whether the serpentine is on. PlateG already taught this campaign that an uncontrolled result
+is unattributable - an "enormous strength improvement" that turned out to be present in the
+untouched part too - so the comparison is on one plate, one filament, one session.
+
+    N0_rings      annulus r10 / bore 2.5, ring lattice          <- the control
+    N1_serp       the same STL with the serpentine on
+    N2_solid      disc r8, NO bore: sweeps to the medial terminus and back
+    N3_crescent   concave, centroid OUTSIDE the material
+    N4_ecc        bore offset 2 mm: wall thickness varies all the way round
+    N5_lobed      5-lobe outer wall against a round bore
+    N6_thin       too thin to traverse: must decline and print sanely
+
+14.23 g, 72 min, lids off so the interior is visible without cutting.
+
+### The measure, and the one that did not work
+
+The obvious statistic - count direction reversals in depth - does not separate these generators
+at all, and reported them BACKWARDS: 121 reversals for the ring lattice against 61 for the
+serpentine. The lattice undulates six times a revolution on every one of its rings, so it racks
+up reversals without ever crossing the wall. What separates them is the SPAN of each monotonic
+run: a woven ring turns back within about twice its weave amplitude, a traverse runs face to face.
+
+| object | wall | deep runs (a monotonic run crossing more than half the wall) |
+|---|---|---|
+| N0_rings, the control | 7.07 mm | **0** |
+| N1_serp, same STL | 7.09 mm | **52** |
+| N2_solid | 7.61 mm | 39 |
+| N3_crescent | 13.97 mm | 17 |
+| N4_ecc | 9.87 mm | 44 |
+| N5_lobed | 7.88 mm | 49 |
+
+Zero against fifty-two on identical geometry. The ring lattice cannot cross its own wall, which
+is the whole reason printed parts peeled into concentric sections, and every non-round section
+traverses too.
+
+### Meshes are validated, not assumed
+
+Nothing here needs a general polygon-with-holes tessellator: a tube is capped by a strip between
+its two loops on a common parameter, a solid section by a fan from an anchor. Both are checked -
+every edge shared by exactly two triangles, no degenerate triangles, and for a fan, that the
+anchor actually sees the whole boundary. That check earned its place immediately: it caught the
+crescent's bite arc running the wrong way round its circle and carrying a wrong y-coordinate,
+before the mesh reached the plate. An unnoticed non-manifold mesh is a whole wasted print.
+
+### What this plate does NOT settle
+
+Everything above is still G-code. The serpentine's claim is that a crack at any depth must sever
+traverses rather than separate, and only the peel answers that. **Peel N0 and N1 the same way**,
+after removing the bottom shell; the rest are there to show the generator survives shapes the
+angular formulation could never have handled, not to be peeled.
+
+N6 is the decline case: a 1 mm wall has nothing to traverse, so it should fall back to the ring
+lattice and print normally. Its "deep runs" reading is not meaningful at that thickness.
