@@ -2439,45 +2439,72 @@ TEST_CASE("Every woven neighbour pair reaches a weld, whatever its gap", "[Conti
                 - *std::min_element(buried.begin(), buried.end()) > 0.5 * sp);
     }
 
-    // Weave on. Rings are identified by the nominal BAND they lie in - the interval between the
-    // midpoints to either nominal neighbour. That is sound here and not in general: a ring's
-    // excursion toward a mobile neighbour is half the gap's excess over one spacing, which is
-    // strictly less than half the gap, so it can never leave its band. (A ring facing an
-    // immovable shell across a wide gap covers the whole excess and COULD cross a midpoint,
-    // which is why the wall above is one whose buried pairs are all infill-to-infill.) A
-    // junction hop landing in a band puts a second crossing in it; those bands are skipped for
-    // that ray rather than guessed at, and the surviving count is asserted.
+    // Weave on. Rings are identified by RANK - the k-th crossing outward-in is ring k - on the
+    // rays that show the full set. Rank is used rather than the nominal band each ring sits
+    // nearest, because neither radius-based scheme survives this geometry: a ring facing a ring
+    // that cannot move covers the WHOLE of their gap rather than half, so it finishes one
+    // spacing from its neighbour, which for a gap of two slots is exactly on the midpoint. It
+    // then lands in its neighbour's band, and matching on nearest-nominal picks the wrong ring
+    // for both. Rank cannot be fooled that way, since the rings never cross; it only needs the
+    // ray to show every ring, so rays carrying an extra crossing from a junction hop are
+    // dropped, and the surviving count is asserted.
     ExtrusionEntityCollection e_w;
     const std::vector<ExtrusionPath *> woven = cs_paths(surfaces, flow, cfg, e_w);
     const int NR = 720;
     std::vector<double> closest(nominal.size() - 1, 1e9);
-    std::vector<int>    samples(nominal.size() - 1, 0);
+    std::vector<double> widest(nominal.size() - 1, 0.0);
+    std::vector<int>    tied(nominal.size() - 1, 0);      // rays where this pair is within contact
+    int usable = 0;
     for (int k = 0; k < NR; ++k) {
         const std::vector<double> r = ray_cross(woven, -M_PI + (k + 0.5) * (2.0 * M_PI / NR));
-        std::vector<double> band(nominal.size(), 0.0);
-        std::vector<int>    cnt(nominal.size(), 0);
-        for (const double v : r) {
-            for (size_t i = 0; i < nominal.size(); ++i) {
-                const double lo = (i == 0) ? -1e9 : 0.5 * (nominal[i - 1] + nominal[i]);
-                const double hi = (i + 1 == nominal.size()) ? 1e9 : 0.5 * (nominal[i] + nominal[i + 1]);
-                if (v >= lo && v < hi) { band[i] = v; ++cnt[i]; break; }
-            }
+        if (r.size() != nominal.size()) continue;
+        ++usable;
+        for (size_t i = 0; i + 1 < r.size(); ++i) {
+            closest[i] = std::min(closest[i], r[i + 1] - r[i]);
+            widest[i]  = std::max(widest[i],  r[i + 1] - r[i]);
+            if (r[i + 1] - r[i] <= 1.15 * sp) ++tied[i];
         }
-        for (size_t i = 0; i + 1 < nominal.size(); ++i)
-            if (cnt[i] == 1 && cnt[i + 1] == 1) {
-                closest[i] = std::min(closest[i], band[i + 1] - band[i]);
-                ++samples[i];
-            }
     }
+    INFO("rays showing the full ring set: " << usable << " of " << NR);
+    REQUIRE(usable > NR / 2);
 
     for (size_t i = 0; i < closest.size(); ++i) {
         INFO("pair " << i << " (nominal " << gaps[i] / sp << " slots) closes to "
-             << closest[i] / sp << " slots at best, over " << samples[i] << " of " << NR << " rays");
-        REQUIRE(samples[i] > 3 * NR / 4);        // the sweep really did see this pair all round
+             << closest[i] / sp << " slots at best");
         // One spacing is contact: the distance any two neighbouring beads sit at. The tolerance
         // covers the polygon's angular sampling, not a weaker claim.
         REQUIRE(closest[i] <= 1.10 * sp);
     }
+
+    // The shell tie must hold ALL THE WAY ROUND, not merely somewhere.
+    //
+    // A gap that closes at its lobe peaks and opens between them is a fine lattice joint in the
+    // interior, and a fracture surface at the face: the shells are the only radii where the same
+    // gap repeats identically on every layer, so an intermittent tie there stacks into a
+    // cylinder of weak bond rather than averaging out. The de-lid part with a woven anchor ring
+    // was tied over 43% of its circumference and peeled apart into concentric sections in the
+    // hand. So for a gap of about one spacing - which is what the sparsifier leaves between a
+    // shell and the ring anchoring the lattice to it - assert the WIDEST it ever opens, not the
+    // closest it ever comes.
+    int anchors = 0;
+    for (size_t i = 0; i < widest.size(); ++i) {
+        // The ANCHOR pair: about one spacing on one side and a lattice gap on the other. Pairs
+        // that are narrow on both sides are two shell rings, which never move and are not the
+        // claim being made here.
+        if (gaps[i] > 1.5 * sp) continue;
+        const bool lattice_beyond = (i > 0 && gaps[i - 1] > 1.5 * sp) ||
+                                    (i + 1 < gaps.size() && gaps[i + 1] > 1.5 * sp);
+        if (!lattice_beyond) continue;
+        ++anchors;
+        INFO("shell-side pair " << i << " (nominal " << gaps[i] / sp << " slots) is tied on "
+             << (100.0 * tied[i] / usable) << "% of rays, opening to " << widest[i] / sp
+             << " slots at worst");
+        // A fraction, not the worst case: one stray crossing off a junction hop should not
+        // decide this, but a tie that lapses for a fifth of the circumference must.
+        REQUIRE(tied[i] >= (95 * usable) / 100);
+    }
+    INFO("shell-side pairs found: " << anchors);
+    REQUIRE(anchors >= 2);        // one tie at each face
 }
 
 TEST_CASE("Continuous shell density-0 signature table", "[.][ContinuousShellSig]")

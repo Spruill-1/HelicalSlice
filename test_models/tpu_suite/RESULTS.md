@@ -1195,3 +1195,77 @@ Patch kept at `pin_anchor_rings.patch` (54 lines). Measured:
    requested density costs about one extra ring per chain and changes default output for every
    sparse part - the deliberate call already flagged.
 3. Re-derive the weld test's ring identity, which pinning invalidates on that wall.
+
+## Pinning the anchor ring, and honouring the density (2026-08-25)
+
+Both changes from the peel diagnosis are now in, together, because neither stands alone.
+
+**Pin the anchor ring.** A kept ring that neighbours a shell no longer weaves. It stays
+concentric, welded to that shell the whole way round, and its inner neighbour covers the whole of
+their gap rather than half - as if the pinned ring were itself a shell. The `min(c, 0.49*gap)`
+clamp in `gap_cap` goes with it: `share*(gap - spacing)` already lands a pair exactly one spacing
+apart at full excursion, so the clamp was not a safety net but a leak, capping the excursion
+below what contact needs whenever a share-1.0 gap exceeded about two slots.
+
+**Honour the requested density.** The ring count was `(span + K/2)/K`, which counts rings as if
+they were unanchored. Both ends ARE anchored, so m rings make m-1 gaps across span-1 slots and
+the delivered stride is `(span-1)/(m-1)`. The count is now chosen by searching the span for the m
+whose delivered stride is closest to K. Rings sit on integer slots, so an exact K is not always
+reachable - on the sparse de-lid object the best available moves 4.59 to 3.44 against a requested
+4.0 - but the dense object was already optimal at 1.97 against 2.0 and is untouched.
+
+### Results
+
+| anchor to shell | printed | now |
+|---|---|---|
+| L2 bore | 54% in contact, p90 gap 0.603 mm | **100%**, p90 0.401 mm |
+| L2 outer | 51%, p90 0.603 mm | **100%**, p90 0.401 mm |
+| L1 bore | 60%, p90 1.203 mm | **100%**, p90 0.401 mm |
+| L1 outer | 92%, p90 0.456 mm | **100%**, p90 0.401 mm |
+
+One spacing, constant, all the way round, both faces, both densities: the peel surface is gone
+from the geometry. Welds per azimuth rise from 3.68 to 4.76 (sparse) and 4.59 to 5.83 (dense).
+5.34 g -> 5.43 g (+1.7%), 29 min. Density-0 fence byte-identical; full suite green at 173 cases.
+
+### A metric that was lying, and how it was caught
+
+The earlier weld map counted a pair as welded when its centreline gap was at most the mean bead
+width. Beads sit one spacing apart when adjacent - 0.3963 mm against a 0.40 mm width - so the
+threshold sat exactly where the data lands, and which side a pair fell on was numerical noise.
+Read at that threshold, pinning looked like a REGRESSION on the sparse object (28.3% -> 48.9% of
+azimuths unwelded). Read at 1.15x, every variant has 0.0% unwelded and pinning is the clear
+winner. The ordering at 1.00x was an artifact.
+
+Consequences, stated plainly:
+
+- **Any "% of azimuths with no weld" figure in this file is threshold-dominated** and should not
+  be quoted. The stable statistic is welds per azimuth at a tolerant threshold.
+- The per-gap amplitude work that preceded this still stands, but on its own evidence - it took
+  a pair that could never meet at any setting from 2.07 slots to 1.0, which is a large,
+  threshold-insensitive change - not on the dead-azimuth percentages quoted alongside it.
+- A knife-edge threshold is not a small inaccuracy. It inverted a conclusion.
+
+### Tests
+
+`Every woven neighbour pair reaches a weld, whatever its gap` gained a second claim: the
+shell-side tie must hold ALL THE WAY ROUND, asserted as the fraction of rays within contact
+rather than the worst case, since one stray crossing off a junction hop should not decide it.
+Verified to fail with the pin disabled - tied on 49.8% of rays, opening to 2.74 slots, which
+matches the 43% measured on the printed part.
+
+Ring identity in that test also had to change again, to RANK on rays showing the full set (715 of
+720). Pinning is what broke the previous scheme: a ring facing a ring that cannot move covers the
+whole of their gap, so for a two-slot gap it finishes exactly on the midpoint and lands in its
+neighbour's band. That is the fourth identity scheme this one test has needed; the three that
+failed are recorded above and in the test's own comments.
+
+### Still open
+
+- The pinned ring is still tagged infill, so it still carries the Z wave and is lifted off the
+  shell vertically even though it is now radially perfect. Tagging it shell (the
+  `chain.woven_infill ? woven.shell_loops : 0` argument at the spiralize_rings call) would fix
+  that, but also changes its extrusion role and the over-extrusion cap - a wider change needing
+  the fence and a surface check.
+- **Next print: peel the reprinted part, both objects.** The geometry no longer has a peel
+  surface; whether the plastic agrees is the question, and the sparse object should be peeled
+  too, which the last round did not do.

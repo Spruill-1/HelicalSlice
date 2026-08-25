@@ -1694,8 +1694,23 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
                     const size_t span = last - first + 1;
                     // At least two where the span allows, so BOTH shells are tied; that floor is
                     // also what stops a thin interior degenerating into one ring down the middle.
-                    const size_t m = std::min(span, std::max<size_t>(span > 1 ? 2 : 1,
-                                                                     (span + K / 2) / K));
+                    //
+                    // Pick the count that delivers the requested STRIDE, not the count that
+                    // divides the span. Both ends are anchored, so m rings make m-1 gaps across
+                    // span-1 slots and the delivered stride is (span-1)/(m-1) - which equals K
+                    // only when the span happens to divide. `(span + K/2)/K` counts rings as if
+                    // they were unanchored, and on the de-lid part shipped 4.67 slots against a
+                    // requested 4: about 17% sparser than the density asked for, and wide enough
+                    // that once the shell anchors are pinned there is not enough left to build a
+                    // lattice. The span is small, so search it rather than juggle rounding.
+                    size_t m = 1;
+                    if (span > 1) {
+                        double best = std::numeric_limits<double>::max();
+                        for (size_t cand = 2; cand <= span; ++cand) {
+                            const double err = std::abs(double(span - 1) / double(cand - 1) - double(K));
+                            if (err < best - 1e-9) { best = err; m = cand; }   // ties keep the sparser
+                        }
+                    }
                     for (size_t j = 0; j < m; ++j)
                         keep[first + (m == 1 ? (span - 1) / 2
                                              : (j * (span - 1) + (m - 1) / 2) / (m - 1))] = 1;
@@ -1759,13 +1774,38 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
                 for (size_t j = 0; j < cc.loops.size(); ++j)
                     prof[j] = AngularProfile::build(cc.loops[j], centre);
                 // Rings run outermost (index 0) inward, so j-1 is the outward neighbour.
+                // PIN the ring that hugs a shell. The sparsifier deliberately keeps a ring
+                // adjacent to each shell so the lattice ties to both faces - but that ring was
+                // woven like any other, and its swing toward its INNER neighbour carried it off
+                // the shell. Measured on the printed de-lid part: bonded to the shell over only
+                // 43.8% (bore) and 42.6% (outer) of the circumference, opening to 0.603 mm - one
+                // and a half spacings - at the 90th percentile. An intermittent tie at a FIXED
+                // radius, repeated every layer, is a peel surface, and there is one at each face.
+                // The part duly came apart in the hand into three concentric sections.
+                //
+                // So a kept ring that neighbours a shell does not weave at all. It stays
+                // concentric, welded to that shell the whole way round, and anchors the lattice;
+                // its inner neighbour covers the whole of their gap instead of half, exactly as
+                // if the pinned ring were itself a shell.
+                std::vector<char> pinned(cc.loops.size(), 0);
+                for (size_t j = 0; j < cc.loops.size(); ++j) {
+                    if (!kept_infill[j]) continue;
+                    if ((j > 0 && !kept_infill[j - 1]) ||
+                        (j + 1 < cc.loops.size() && !kept_infill[j + 1]))
+                        pinned[j] = 1;
+                }
                 auto gap_cap = [&](size_t j, size_t nb) {
-                    const double share = (kept_infill[nb] != 0) ? 0.5 : 1.0;   // does it meet us halfway?
+                    // Half each when both move; all of it when the neighbour cannot.
+                    const double share = (kept_infill[nb] != 0 && !pinned[nb]) ? 0.5 : 1.0;
                     std::vector<double> c(prof[j].r.size(), 0.0);
                     for (size_t b = 0; b < c.size(); ++b) {
+                        // share*(gap - spacing) already lands the pair exactly one spacing apart
+                        // at full excursion, so it cannot cross and needs no further clamp. An
+                        // earlier `min(c, 0.49*gap)` here was not a safety net but a leak: on a
+                        // gap of 2 spacings it capped the excursion below what contact needs, so
+                        // the pair could never meet however the wave was tuned.
                         const double gap = std::abs(prof[nb].r[b] - prof[j].r[b]);
                         c[b] = std::max(0.0, woven.weave * share * (gap - double(spacing)));
-                        c[b] = std::min(c[b], 0.49 * gap);                     // never past the neighbour
                     }
                     return c;
                 };
@@ -1819,7 +1859,7 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
                 const double layer_phase = double(layer_index) * woven.dphase;
                 size_t infill_ring = 0;
                 for (size_t j = 0; j < cc.loops.size(); ++j) {
-                    if (!kept_infill[j]) continue;   // weave only the thinned infill, not the solid shells
+                    if (!kept_infill[j] || pinned[j]) continue;   // shells, and the rings anchoring them, stay put
                     const double phase = layer_phase + double(infill_ring) * (M_PI + drift);
                     ++infill_ring;
                     // Outward and inward budgets differ whenever the gaps either side differ -
