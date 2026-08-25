@@ -1680,9 +1680,30 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
             Polygons kept; std::vector<char> kept_infill;
             std::vector<size_t> kept_slot; std::vector<float> kept_w;
             kept.reserve(n); kept_infill.reserve(n);
+            // WHICH buried rings survive. A fixed stride anchors the pattern at the outer shell
+            // and dumps the whole remainder at the bore: printed on a 3.17 mm wall, the infill
+            // tied the outer shell at 0.508 mm and stood 1.265 mm off the bore shell, so the
+            // lattice joined one face and floated free of the other. Distribute the kept rings
+            // across the buried span INCLUSIVE OF BOTH ENDS instead, so each shell gets an
+            // adjacent ring and the leftover is shared through the middle.
+            std::vector<char> keep(n, 0);
+            {
+                const size_t first = sl;
+                const size_t last  = annular ? (n - sl - 1) : (n - 2);
+                if (n > 2 * sl && last >= first) {
+                    const size_t span = last - first + 1;
+                    // At least two where the span allows, so BOTH shells are tied; that floor is
+                    // also what stops a thin interior degenerating into one ring down the middle.
+                    const size_t m = std::min(span, std::max<size_t>(span > 1 ? 2 : 1,
+                                                                     (span + K / 2) / K));
+                    for (size_t j = 0; j < m; ++j)
+                        keep[first + (m == 1 ? (span - 1) / 2
+                                             : (j * (span - 1) + (m - 1) / 2) / (m - 1))] = 1;
+                }
+            }
             for (size_t i = 0; i < n; ++i) {
                 const bool inf = is_infill(i);
-                if (!inf || (i - sl) % K == 0) {   // keep every shell/terminus ring + every K-th infill ring
+                if (!inf || keep[i]) {             // keep every shell/terminus ring + the chosen infill
                     kept_infill.push_back(inf ? char(1) : char(0));
                     // The slot map and any per-ring widths are compacted in LOCKSTEP with the
                     // rings. Without this a surviving ring would read the widths of whatever

@@ -924,3 +924,46 @@ shell, by the junction hops, and that is the mode working as designed - one cont
 has to connect the lattice to the shells somehow. A cut section cannot distinguish "bonded by
 a hop" from "over-extruded against the shell" by eye, which is why the G-code measurement had
 to be the arbiter, and why it had to be a per-layer one.
+
+### PlateD reprint printed (2026-08-25): W3 confirmed, and the bore-side gap found
+
+Three objects: D1_ladder (post-W3), D2_weave at density 25, D3_dense at density 50 via a
+per-object override.
+
+**Denser is better, by eye.** David's call on D2 vs D3: the denser small model is the better of
+the two. That is the dynamic-density question answered in the direction the measurement
+predicted (16.0% of the circumference tied at stride 4 against 22.5% at stride 2), so the
+ring-count floor is worth building rather than just recording.
+
+**The lattice joined the outer wall and floated free of the bore.** David: "the thickest two
+layers have the infill join into the outer wall correctly, it leaves a gap between the 'foam'
+and the inner wall". Measured on the printed file, and the cause is exact: kept rings were
+chosen by `(i - sl) % K == 0`, which ANCHORS the pattern at the outer shell and dumps the whole
+remainder at the bore.
+
+| wall | outer shell -> infill | infill -> bore shell |
+|---|---|---|
+| 8 beads | 0.508 mm | **1.265 mm** |
+| 7 beads | 0.504 mm | **0.702 mm** |
+| 6 beads | 0.516 mm | 0.495 mm |
+| 5 beads | 0.378 mm | 0.378 mm (below the gate, solid) |
+
+The asymmetry tracks `n_buried mod K` exactly, which is why it shrinks as the wall thins.
+
+Fixed by distributing the kept rings across the buried span inclusive of BOTH ends, with a
+floor of two so each shell always gets an adjacent ring:
+
+| wall | outer -> infill | infill -> bore |
+|---|---|---|
+| 8 beads | 0.523 mm | **0.397 mm** |
+| 7 beads | 0.529 mm | **0.400 mm** |
+| 6 beads | 0.397 mm | 0.396 mm |
+
+Both faces now tie at one bead spacing. Cost on this plate: 17.09 g -> 17.75 g (+3.9%), all of
+it the extra ring the floor adds on the thick steps. Density-0 fence byte-identical on all 20
+rows; full suite green.
+
+**Still unanswered, and it needs a different print:** how well the rings lock to each other
+BETWEEN layers. A section shows in-plane structure and the top shows one layer; David's point
+stands that a de-lidded print - top shells suppressed so the lattice is open to view from above
+through several layers - is what would actually show the inter-layer lock.
