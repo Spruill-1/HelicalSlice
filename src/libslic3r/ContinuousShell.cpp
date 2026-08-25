@@ -29,6 +29,7 @@ struct WovenInfill {
     double dphase      = 0.9;       // per-layer phase advance (rad)
     double zamp        = 0.0;       // Z amplitude, fraction of layer_height
     double zphase      = 1.5708;    // quadrature offset (rad) between the radial and Z waves
+    bool   serpentine  = false;     // radial-traverse interior instead of concentric rings
     double solid_stagger = 0.0;     // radial inward shift (scaled) of a SOLID cap's interior rings this layer
 };
 WovenInfill woven_infill_params(const PrintRegionConfig *config)
@@ -58,6 +59,7 @@ WovenInfill woven_infill_params(const PrintRegionConfig *config)
         w.weave = 0.0;                                                  // plain concentric sparse rings
         w.zamp  = 0.0;
     }
+    w.serpentine = config->continuous_shell_interior_serpentine.value;
     return w;
 }
 
@@ -1554,6 +1556,170 @@ struct ContourChain {
     std::vector<size_t> ring_slot;
 };
 
+// RADIAL-TRAVERSE INTERIOR.
+//
+// The concentric lattice has no radial members. Its only radial connections are the places where
+// two undulating rings happen to touch, so between them lies a continuous cylindrical void - and
+// a peel needs exactly one such surface. Printed de-lid parts came apart into concentric sections
+// along those voids at every density tried, and three successive fixes only moved the void to
+// whichever interface tied least (measured: 0.8% of one interface's circumference tied, against
+// 74% two rings away). The void is a property of the generator, not of its tuning.
+//
+// A serpentine sweeping across the wall has the opposite property: every traverse crosses every
+// ring, so a crack anywhere in the depth must sever traverses rather than merely separate. On the
+// de-lid geometry at density 25 that is 24 members at every radius against 0 to 1 at the ring
+// lattice's worst, for the same path length - both lay the same area of bead.
+//
+// It is built in RING-INDEX space, not in angle about a centroid. Angle would have confined this
+// to star-shaped single-bore sections, which is a small share of what the slicer meets: the
+// marching already produces the rings for concave outlines, multi-bore walls, and solid sections
+// that close on a medial terminus, and a serpentine is just a path that crosses those rings
+// instead of following one. So the traverse is a function of NORMALISED ARC LENGTH along the
+// rings, and every topology the marching can produce is carried for free.
+//
+// It closes on itself after one circuit, so it enters the chain as a single ring and every piece
+// of downstream machinery - chaining, junctions, the arc-length Z ramp, the seam - is unchanged.
+
+// Equal-arc-length resample of `ring` to `S` points, starting at the point nearest `anchor` and
+// wound the same way as `reference_ccw`. Correspondence between successive rings is what the
+// traverse interpolates along, so both the start and the direction have to agree; without that
+// the bore-side rings, which the marching stores with the opposite winding, would be traversed
+// backwards and the serpentine would shear across the wall instead of crossing it.
+std::vector<Point> resample_ring(const Polygon &ring, size_t S, const Point &anchor, bool reference_ccw)
+{
+    Polygon r = ring;
+    if (r.is_counter_clockwise() != reference_ccw)
+        r.reverse();
+    const size_t m = r.points.size();
+    std::vector<double> cum(m + 1, 0.0);
+    for (size_t i = 0; i < m; ++i)
+        cum[i + 1] = cum[i] + (r.points[(i + 1) % m] - r.points[i]).cast<double>().norm();
+    const double total = cum[m];
+    std::vector<Point> out;
+    if (total < 1e-9) { out.assign(S, r.points.empty() ? anchor : r.points.front()); return out; }
+    // Where along the ring the anchor sits, so all rings start from the same place on the wall.
+    double best = std::numeric_limits<double>::max(), off = 0.0;
+    for (size_t i = 0; i < m; ++i) {
+        const double d = (r.points[i] - anchor).cast<double>().squaredNorm();
+        if (d < best) { best = d; off = cum[i]; }
+    }
+    out.reserve(S);
+    size_t seg = 0;
+    for (size_t k = 0; k < S; ++k) {
+        double t = off + total * double(k) / double(S);
+        if (t >= total) t -= total;
+        while (seg + 1 < m && cum[seg + 1] < t) ++seg;
+        while (seg > 0 && cum[seg] > t) --seg;
+        const double span = cum[seg + 1] - cum[seg];
+        const double f = (span > 1e-9) ? (t - cum[seg]) / span : 0.0;
+        const Vec2d a = r.points[seg].cast<double>();
+        const Vec2d b = r.points[(seg + 1) % m].cast<double>();
+        const Vec2d p = a + (b - a) * f;
+        out.emplace_back(coord_t(std::llround(p.x())), coord_t(std::llround(p.y())));
+    }
+    return out;
+}
+
+bool apply_radial_serpentine(ContourChain &cc, const WovenInfill &woven, coord_t spacing,
+                             size_t layer_index, std::string *degrade_note)
+{
+    const size_t sl = woven.shell_loops;
+    const size_t n  = cc.loops.size();
+    const bool annular = cc.has_bore;
+    // The buried rings, exactly as the sparsifier defines them: a solid skin of shell_loops on
+    // every free face, and for a solid section the medial terminus stays put as well.
+    const size_t first = sl;
+    const size_t last  = annular ? (n - sl - 1) : (n - 2);
+    if (n <= 2 * sl || last < first + 1) {
+        if (degrade_note) *degrade_note = "serpentine declined: fewer than two buried rings to traverse";
+        return false;
+    }
+    const size_t M = last - first;                  // rings the traverse sweeps across
+
+    // Traverses per circuit, from the requested density. Each traverse lays about one band
+    // thickness of bead and there are 2N of them, so the fill fraction is 2*N*spacing/perimeter
+    // whatever the band depth. Checked against the geometric prototype: 12.3 predicted, 12
+    // delivering the requested 25%.
+    const double perim = cc.loops[first + M / 2].length() * 1.0;
+    const double density = 1.0 / double(std::max<size_t>(1, woven.stride));
+    const size_t N = std::max<size_t>(3, size_t(std::lround(density * perim / (2.0 * double(spacing)))));
+
+    // Sample densely enough that the reversal at each face is a corner and not a chord.
+    const size_t per_traverse = std::max<size_t>(8, size_t(double(M) * 4.0));
+    const size_t S = std::max<size_t>(2 * N * per_traverse, 256);
+
+    const bool ccw = cc.loops[first].is_counter_clockwise();
+    const Point anchor = cc.loops[first].points.empty() ? Point(0, 0) : cc.loops[first].points.front();
+    std::vector<std::vector<Point>> band;
+    band.reserve(M + 1);
+    for (size_t j = first; j <= last; ++j) {
+        band.push_back(resample_ring(cc.loops[j], S, anchor, ccw));
+        if (band.back().size() != S) {
+            if (degrade_note) *degrade_note = "serpentine declined: a buried ring would not resample";
+            return false;
+        }
+    }
+
+    // The traverse interpolates between CORRESPONDING points of successive rings, which is only
+    // meaningful while the chain really is a linear stack of nested rings. It is not always: a
+    // section with more than one bore has three faces, not two, and a band that pinches or splits
+    // breaks the nesting. Those are decomposed or declined upstream, but "upstream handles it" is
+    // exactly the kind of assumption this subsystem has been caught on before, so check it here
+    // rather than trust it. Corresponding points on adjacent rings sit about one ring gap apart;
+    // if any pair is far outside that, the correspondence is not a crossing of the wall and the
+    // traverse would cut across the section instead. Decline, loudly.
+    double worst_step = 0.0;
+    for (size_t k = 0; k + 1 < band.size(); ++k)
+        for (size_t i = 0; i < S; ++i)
+            worst_step = std::max(worst_step, (band[k + 1][i] - band[k][i]).cast<double>().norm());
+    if (worst_step > 4.0 * double(spacing)) {
+        if (degrade_note)
+            *degrade_note = "serpentine declined: rings do not correspond (chain is not a simple "
+                            "nested stack - multi-bore or pinched section)";
+        return false;
+    }
+
+    const double phase = double(layer_index) * woven.dphase;   // successive layers cross
+    Polygon serp;
+    serp.points.reserve(S);
+    for (size_t i = 0; i < S; ++i) {
+        const double u = double(i) / double(S);
+        // Triangle wave over the ring stack: constant crossing speed, so the bead is spread
+        // evenly through the depth instead of dwelling at the faces the way a sine would.
+        const double x   = double(N) * u + phase / (2.0 * M_PI);
+        const double tri = 4.0 * std::abs(x - std::floor(x + 0.5)) - 1.0;      // [-1, 1]
+        const double f   = 0.5 * (tri + 1.0) * double(M);                      // [0, M]
+        const size_t k   = std::min(size_t(f), M - 1);
+        const double t   = f - double(k);
+        const Vec2d a = band[k][i].cast<double>();
+        const Vec2d b = band[k + 1][i].cast<double>();
+        const Vec2d p = a + (b - a) * t;
+        serp.points.emplace_back(coord_t(std::llround(p.x())), coord_t(std::llround(p.y())));
+    }
+
+    // [outer shells | serpentine | inner shells or terminus]. The slot map and any per-ring
+    // widths are compacted in lockstep, as everywhere else: the serpentine spans every buried
+    // slot, so it takes the outermost buried slot's entry rather than inventing one.
+    Polygons kept;
+    std::vector<size_t> kept_slot;
+    std::vector<float>  kept_w;
+    auto take = [&](size_t j) {
+        kept.push_back(std::move(cc.loops[j]));
+        if (!cc.ring_slot.empty())   kept_slot.push_back(cc.ring_slot[j]);
+        if (!cc.ring_widths.empty()) kept_w.push_back(cc.ring_widths[j]);
+    };
+    for (size_t j = 0; j < first; ++j) take(j);
+    kept.push_back(std::move(serp));
+    if (!cc.ring_slot.empty())   kept_slot.push_back(cc.ring_slot[first]);
+    if (!cc.ring_widths.empty()) kept_w.push_back(cc.ring_widths[first]);
+    for (size_t j = last + 1; j < n; ++j) take(j);
+    cc.loops = std::move(kept);
+    if (!cc.ring_slot.empty())   cc.ring_slot   = std::move(kept_slot);
+    if (!cc.ring_widths.empty()) cc.ring_widths = std::move(kept_w);
+    cc.woven_infill = true;
+    return true;
+}
+
 // One definition of "this chain has buried rings to thin", used by the sparsifier and by the
 // C-lite deficit correction that must stand aside for it. They were two separate expressions
 // and had to agree; now they cannot drift.
@@ -1637,6 +1803,12 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
                         size_t layer_index, std::string *degrade_note)
 {
     if (!woven.enabled || cc.loops.size() <= 2)
+        return;
+    // The radial serpentine replaces the whole buried interior, so it is decided before any of
+    // the ring-lattice machinery runs. It declines rather than degrades - a section without a
+    // bore, or too thin to sweep, falls through to the ring lattice below with a note.
+    if (woven.serpentine && woven.stride > 1 &&
+        apply_radial_serpentine(cc, woven, spacing, layer_index, degrade_note))
         return;
     if (woven.stride > 1 && !chain_thick_enough(cc, woven) && degrade_note)
         *degrade_note = "continuous shell: wall too thin to sparsify - printed solid";

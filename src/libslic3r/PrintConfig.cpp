@@ -6125,6 +6125,25 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
+    def = this->add("continuous_shell_interior_serpentine", coBool);
+    def->label = L("Continuous shell radial serpentine");
+    def->category = L("Strength");
+    def->tooltip = L("Fills the BURIED interior of a continuous-shell tube wall with one serpentine that "
+                     "sweeps back and forth ACROSS the wall as it goes round, instead of concentric rings "
+                     "that undulate.\n\n"
+                     "The concentric lattice has no radial members: its only radial connections are where two "
+                     "rings happen to touch, so a continuous cylindrical void always sits between them. "
+                     "Printed parts peel apart into concentric sections along exactly those voids, and no "
+                     "amount of tuning removes the void - it only moves to whichever interface ties least. "
+                     "Every traverse of a serpentine crosses every radius, so a crack at any radius has to "
+                     "sever the traverses rather than merely separate: measured on the de-lid geometry at "
+                     "density 25, 24 members at every radius against 0 to 1 at the ring lattice's worst, for "
+                     "the same path length.\n\n"
+                     "Needs a bore and a wall thick enough to sweep; other sections keep the ring lattice. "
+                     "Requires continuous_shell_infill_density above 0. Off by default.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("continuous_shell_junction_ramp", coPercent);
     def->label = L("Continuous shell junction ramp");
     def->category = L("Strength");

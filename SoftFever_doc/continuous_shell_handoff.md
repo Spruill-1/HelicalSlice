@@ -919,3 +919,80 @@ Three metrics in a row have flattered this subsystem: tie fraction (per-pair, bl
 any azimuth is braced), welds per azimuth (blind to radius, so blind to peel surfaces), and both
 at a knife-edge threshold. The statistic that matches the hand is **tie fraction per interface,
 in radial order, worst-first**. A mean over interfaces hides a free cylinder; a peel does not.
+
+### Radial-traverse interior (2026-08-25): the generator that has radial members
+
+The ring lattice cannot be made peel-resistant, because its only radial connections are where two
+rings happen to touch and a continuous cylindrical void always sits between them. The serpentine
+replaces the buried interior with one path that sweeps ACROSS the wall as it goes round, so every
+traverse crosses every ring and a crack at any depth must sever traverses rather than separate.
+
+Geometric prototype first, before any C++, on the de-lid geometry at density 25:
+
+| | ring lattice | serpentine |
+|---|---|---|
+| members a crack must sever, WORST depth | 0 to 1 | **24** |
+| ...at every other depth | 0 to 74, wildly uneven | 24, uniform |
+| path length for the same fill | 1.00x | 1.01x |
+
+min equals mean by construction, and it costs nothing: both lay the same area of bead. The
+density law falls out clean - **N = density x perimeter / (2 x spacing)** - and the prototype
+confirmed it (12.3 predicted, 12 delivering the requested 25%).
+
+### Built in ring-index space, not in angle
+
+The first cut parameterised the traverse by angle about a centroid, which would have confined it
+to star-shaped single-bore sections. That is a small share of what the slicer meets, so it was
+thrown away and rebuilt as a function of NORMALISED ARC LENGTH along the rings the marching
+already produces: the traverse interpolates between corresponding points of successive rings.
+Every topology the marching can produce is then carried for free, and nothing depends on a
+centroid - which matters, since a crescent's centroid lies outside its own material.
+
+Tested on four topologies, all green:
+
+| topology | result |
+|---|---|
+| annulus | 30 wall crossings against the ring lattice's 2 |
+| solid, no bore | sweeps to the medial terminus; 39% of solid length, so it really sparsifies |
+| crescent, centroid OUTSIDE the material | 0 emitted points outside the section |
+| two bores | refused identically with the option on and off |
+
+Plus a byte-identity test at densities 0, 25 and 50 with the option off, and the density-0 fence.
+Full suite green at 175 cases.
+
+### Multi-bore, and the Voronoi cells
+
+A two-bore section has THREE faces, so it is not a linear stack of nested rings and the
+serpentine's correspondence between successive rings is meaningless on it. Measured rather than
+assumed: continuous shell **refuses such a section outright today**, and has since long before
+this work - the marching gives up when a band carries more than one hole. The serpentine neither
+worsens nor papers over that, which is what the test asserts.
+
+"Upstream handles it" is the kind of assumption this subsystem has been caught on repeatedly, so
+the generator also checks it directly: after resampling, corresponding points on adjacent rings
+must sit within about one ring gap. If any pair is far outside that, the chain is not a nested
+stack, the traverse would cut across the section rather than through the wall, and it declines
+with a note instead of emitting nonsense.
+
+**The Voronoi cell pipeline is the right partner, and the fit is exact.** On
+`continuous-shell-multibore-and-infill`, `partition_bores` splits a multi-hole section by a
+Voronoi partition of the hole centroids, recursing until every cell holds exactly one bore - and
+a single-bore cell IS the linear stack the serpentine requires. So the serpentine needs no
+knowledge of cells at all. That is asserted now, while the two pieces are still built apart,
+rather than discovered at merge time: a test partitions a two-bore section by hand along the
+bisector (which for symmetric bores IS the Voronoi boundary) and confirms the cell traverses
+properly - 26 wall crossings, no point outside.
+
+**The integration risk to carry into that merge**, written down while it is fresh: a cut line
+between two cells is an ARTIFICIAL face, not a real surface. The serpentine turns at it, so two
+adjacent cells' interiors do not connect across the cut - which recreates exactly the failure
+this whole generator exists to remove, only at the cut instead of between rings. The branch
+already registers cut-line survivors for an "interface weave"; that weave is what must bond
+across cuts, and the merge is not done until a peel across a cut line has been printed.
+
+### Status
+
+Off by default (`continuous_shell_interior_serpentine`), fence clean, no existing profile moves.
+Nothing here is print-validated yet - the numbers above are all geometry. The next physical step
+is a plate carrying the annulus, the solid section and the crescent with the lid off, peeled the
+same way the ring lattice was.

@@ -2507,6 +2507,209 @@ TEST_CASE("Every woven neighbour pair reaches a weld, whatever its gap", "[Conti
     REQUIRE(anchors >= 2);        // one tie at each face
 }
 
+TEST_CASE("Radial serpentine crosses the wall on every topology the marching produces",
+          "[ContinuousShell]") {
+    // The concentric lattice has no radial members, so a continuous void always sits between two
+    // rings and a printed part peels apart along it. The serpentine's claim is that no such
+    // surface can exist, because every traverse crosses every ring.
+    //
+    // The claim has to hold for what the slicer actually meets, not just for a round tube: this
+    // exercises an annulus, a SOLID section closing on a medial terminus, a CONCAVE outline whose
+    // centroid tells you nothing, and a wall with TWO bores. That is why the generator works in
+    // ring-index space rather than in angle about a centroid - angle would have confined it to
+    // the first case.
+    Flow flow(0.5f, 0.25f, 0.5f);
+
+    // Oscillation is measured against the two faces, never by ray casting, because a ray from a
+    // centroid is meaningless on a crescent. For each point take (distance to the outer surface
+    // minus distance to the innermost surface); a path crossing the wall changes its sign once
+    // per traverse, whatever shape the wall is.
+    auto traverses = [](const std::vector<ExtrusionPath *> &paths,
+                        const Polygon &outer, const Polygon &inner) {
+        std::vector<double> sig;
+        for (const ExtrusionPath *p : paths)
+            for (const Point3 &q : p->polyline.points) {
+                const Point pt(q.x(), q.y());
+                double dout = std::numeric_limits<double>::max();
+                double din  = std::numeric_limits<double>::max();
+                for (const Point &o : outer.points) dout = std::min(dout, (o - pt).cast<double>().norm());
+                for (const Point &o : inner.points) din  = std::min(din,  (o - pt).cast<double>().norm());
+                sig.push_back(dout - din);
+            }
+        int flips = 0;
+        for (size_t i = 1; i < sig.size(); ++i)
+            if ((sig[i - 1] < 0.0) != (sig[i] < 0.0)) ++flips;
+        return flips;
+    };
+
+    auto run = [&](const ExPolygon &shape, bool serp, ExtrusionEntityCollection &e) {
+        PrintRegionConfig cfg;
+        cfg.continuous_shell_infill_density.value          = 25;
+        cfg.continuous_shell_interior_serpentine.value     = serp;
+        Surfaces surfaces{ Surface(stInternal, shape) };
+        return cs_paths(surfaces, flow, cfg, e);
+    };
+
+    auto ring_poly = [](double r, double cx, double cy, int nseg, bool ccw) {
+        Polygon p;
+        for (int i = 0; i < nseg; ++i) {
+            const double a = 2.0 * M_PI * (ccw ? i : nseg - 1 - i) / nseg;
+            p.points.emplace_back(coord_t(scale_(cx + r * std::cos(a))),
+                                  coord_t(scale_(cy + r * std::sin(a))));
+        }
+        return p;
+    };
+
+    SECTION("annulus: the traverse count follows the requested density") {
+        ExPolygon ann = make_annulus(12.0, 8.0);
+        ExtrusionEntityCollection e_on, e_off;
+        const int on  = traverses(run(ann, true,  e_on),  ann.contour, ann.holes.front());
+        const int off = traverses(run(ann, false, e_off), ann.contour, ann.holes.front());
+        INFO("serpentine " << on << " wall crossings, ring lattice " << off);
+        // The ring lattice crosses the mid-wall only where the chain steps between rings - a
+        // handful of junctions. The serpentine crosses on every traverse.
+        REQUIRE(on > 8 * std::max(off, 1));
+    }
+
+    SECTION("solid section: sweeps to the medial terminus and back") {
+        Polygon disc = ring_poly(10.0, 0.0, 0.0, 240, true);
+        ExPolygon solid;
+        solid.contour = disc;
+        ExtrusionEntityCollection e;
+        const std::vector<ExtrusionPath *> paths = run(solid, true, e);
+        REQUIRE_FALSE(paths.empty());
+        // No bore, so there is no inner surface to measure against; the claim here is only that
+        // the section still builds and still sparsifies rather than silently printing solid.
+        ExtrusionEntityCollection e_dense;
+        PrintRegionConfig dense;
+        dense.continuous_shell_infill_density.value = 0;
+        Surfaces sd{ Surface(stInternal, solid) };
+        double len_sparse = 0.0, len_dense = 0.0;
+        for (const ExtrusionPath *p : paths) len_sparse += p->polyline.length();
+        for (const ExtrusionPath *p : cs_paths(sd, flow, dense, e_dense)) len_dense += p->polyline.length();
+        INFO("solid section: sparse " << len_sparse << " vs dense " << len_dense);
+        REQUIRE(len_sparse < 0.9 * len_dense);
+    }
+
+    SECTION("concave outline: no centroid is used, so a crescent is fine") {
+        // A crescent: a disc with a big off-centre bite taken out of it. Its centroid lies
+        // outside the material, so every angular scheme fails on it.
+        Polygon outer = ring_poly(12.0, 0.0, 0.0, 240, true);
+        Polygon bite  = ring_poly(9.0, 8.0, 0.0, 240, false);
+        ExPolygons cres = diff_ex(Polygons{outer}, Polygons{bite});
+        REQUIRE(cres.size() == 1);
+        ExtrusionEntityCollection e;
+        const std::vector<ExtrusionPath *> paths = run(cres.front(), true, e);
+        REQUIRE_FALSE(paths.empty());
+        // Truthfulness: every emitted point must lie inside the section.
+        size_t outside = 0;
+        for (const ExtrusionPath *p : paths)
+            for (const Point3 &q : p->polyline.points)
+                if (!cres.front().contains(Point(q.x(), q.y()))) ++outside;
+        INFO(outside << " points outside the crescent");
+        REQUIRE(outside == 0);
+    }
+
+    SECTION("two bores: refused by the subsystem, and the serpentine does not change that") {
+        // Recorded because it is the obvious question to ask of a wall generator, and the answer
+        // is not the one the name suggests. A section with two bores has THREE faces, so it is
+        // not a linear stack of nested rings, and continuous shell declines it outright - the
+        // marching gives up when a band carries more than one hole. That predates the serpentine
+        // by the whole project. What is asserted here is only that the serpentine does not make
+        // it worse or paper over it: the section is refused identically either way, with the same
+        // reason. Supporting it needs the Voronoi-cell partition that splits such a section into
+        // one-bore cells, each of which IS a linear stack; that is separate work.
+        Polygon outer = ring_poly(14.0, 0.0, 0.0, 300, true);
+        Polygon h1 = ring_poly(3.5, -6.0, 0.0, 160, false);
+        Polygon h2 = ring_poly(3.5,  6.0, 0.0, 160, false);
+        ExPolygons two = diff_ex(Polygons{outer}, Polygons{h1, h2});
+        REQUIRE(two.size() == 1);
+        REQUIRE(two.front().holes.size() == 2);
+        Surfaces surfaces{ Surface(stInternal, two.front()) };
+
+        auto attempt = [&](bool serp) {
+            PrintRegionConfig cfg;
+            cfg.continuous_shell_infill_density.value      = 25;
+            cfg.continuous_shell_interior_serpentine.value = serp;
+            ExtrusionEntityCollection e;
+            std::string reason;
+            const bool built = ContinuousShellPathBuilder::build_cross_section(
+                surfaces, flow, 0.25, &cfg, e, &reason, false, 3, false);
+            return std::make_pair(built, reason);
+        };
+        const auto off = attempt(false);
+        const auto on  = attempt(true);
+        INFO("serpentine off: built=" << off.first << " reason=" << off.second);
+        INFO("serpentine on:  built=" << on.first  << " reason=" << on.second);
+        REQUIRE(off.first == on.first);
+        REQUIRE(off.second == on.second);
+        REQUIRE_FALSE(on.first);          // the pre-existing refusal, unchanged
+    }
+
+    SECTION("two bores, PARTITIONED into cells: the serpentine needs no knowledge of cells") {
+        // The multi-bore pipeline on continuous-shell-multibore-and-infill splits a multi-hole
+        // section by a Voronoi partition of the hole centroids, recursing until every cell holds
+        // exactly ONE bore. A single-bore cell is precisely the linear stack of nested rings the
+        // serpentine already requires, so the two compose without the serpentine knowing that
+        // cells exist - and that is the claim worth pinning down NOW, while the two pieces are
+        // still being built apart, rather than discovering at merge time that the interior
+        // generator baked in an assumption the partition breaks.
+        //
+        // The partition here is done by hand - the perpendicular bisector of two symmetric bores
+        // IS their Voronoi boundary - so this tests the CONTRACT, not that branch's code.
+        Polygon outer = ring_poly(14.0, 0.0, 0.0, 300, true);
+        Polygon h1 = ring_poly(3.5, -6.0, 0.0, 160, false);
+        Polygon h2 = ring_poly(3.5,  6.0, 0.0, 160, false);
+        ExPolygons two = diff_ex(Polygons{outer}, Polygons{h1, h2});
+        Polygon left_half;
+        left_half.points.emplace_back(coord_t(scale_(-20.0)), coord_t(scale_(-20.0)));
+        left_half.points.emplace_back(coord_t(0),               coord_t(scale_(-20.0)));
+        left_half.points.emplace_back(coord_t(0),               coord_t(scale_(20.0)));
+        left_half.points.emplace_back(coord_t(scale_(-20.0)), coord_t(scale_(20.0)));
+        ExPolygons cells = intersection_ex(ExPolygons{two.front()}, ExPolygons{ExPolygon(left_half)});
+        REQUIRE(cells.size() == 1);
+        REQUIRE(cells.front().holes.size() == 1);          // one bore per cell, as the partition promises
+
+        PrintRegionConfig cfg;
+        cfg.continuous_shell_infill_density.value      = 25;
+        cfg.continuous_shell_interior_serpentine.value = true;
+        Surfaces surfaces{ Surface(stInternal, cells.front()) };
+        ExtrusionEntityCollection e;
+        const std::vector<ExtrusionPath *> paths = cs_paths(surfaces, flow, cfg, e);
+        size_t outside = 0;
+        for (const ExtrusionPath *p : paths)
+            for (const Point3 &q : p->polyline.points)
+                if (!cells.front().contains(Point(q.x(), q.y()))) ++outside;
+        INFO(outside << " points outside the cell");
+        REQUIRE(outside == 0);
+        // And it really did traverse rather than fall back: the cell's own faces are its outer
+        // arc and its bore, and the path must cross between them many times.
+        const int flips = traverses(paths, cells.front().contour, cells.front().holes.front());
+        INFO("cell wall crossings: " << flips);
+        REQUIRE(flips > 8);
+    }
+}
+
+TEST_CASE("Radial serpentine is inert when its option is off", "[ContinuousShell]") {
+    // The whole feature is new geometry in the buried interior, so the one thing that must be
+    // true of every existing profile is that nothing moves until it is asked for.
+    Flow flow(0.5f, 0.25f, 0.5f);
+    for (int density : {0, 25, 50}) {
+        ExPolygon ann = make_annulus(12.0, 8.0);
+        Surfaces surfaces{ Surface(stInternal, ann) };
+        PrintRegionConfig a, b;
+        a.continuous_shell_infill_density.value = density;
+        b = a;
+        b.continuous_shell_interior_serpentine.value = false;
+        ExtrusionEntityCollection ea, eb;
+        const CsSig sa = cs_signature(surfaces, flow, a);
+        const CsSig sb = cs_signature(surfaces, flow, b);
+        INFO("density " << density);
+        REQUIRE(sa.pts.size() == sb.pts.size());
+        REQUIRE(sa.pts == sb.pts);
+    }
+}
+
 TEST_CASE("Continuous shell density-0 signature table", "[.][ContinuousShellSig]")
 {
     const Flow flow(0.5f, 0.25f, 0.5f);
