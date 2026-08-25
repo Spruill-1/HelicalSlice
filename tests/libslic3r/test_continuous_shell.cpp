@@ -814,6 +814,7 @@ TEST_CASE("Continuous shell infill weave frequency sets the lobe count, amplitud
     // interlock). On a round part a higher setting makes the interior rings oscillate radially more
     // times per revolution, so counting the radial in/out reversals of the interior fill is a direct,
     // sensitive proxy for the lobe count (bead length is not - the shape-aware clamp trims wiggle).
+    // Amplitude is not a free variable: the weave saturates against its contact bound by design.
     const Point center(10000000, 10000000);
     Polygon circ;
     for (int i = 0; i < 96; ++i) {
@@ -837,10 +838,24 @@ TEST_CASE("Continuous shell infill weave frequency sets the lobe count, amplitud
             const double r = (Point(q.x(), q.y()) - center).cast<double>().norm() * SCALING_FACTOR;
             if (r >= 2.0 && r <= 6.0) rad.push_back(r);
         }
-        int rev = 0;                                           // count in/out reversals (2 per lobe per ring)
-        for (size_t i = 2; i < rad.size(); ++i) {
-            const double d0 = rad[i-1] - rad[i-2], d1 = rad[i] - rad[i-1];
-            if (d0 != 0.0 && d1 != 0.0 && ((d0 > 0.0) != (d1 > 0.0))) ++rev;
+        // Count in/out reversals (2 per lobe per ring), tracking the last NON-ZERO direction
+        // rather than comparing neighbouring deltas. The weave saturates against its contact
+        // bound, so a lobe peak is a PLATEAU of equal radii, and a reversal that happens across
+        // one is invisible to a test that needs two consecutive non-zero deltas - which made
+        // this read 12 lobes as FEWER reversals than 6.
+        int rev = 0, dir = 0;
+        for (size_t i = 1; i < rad.size(); ++i) {
+            const double d = rad[i] - rad[i-1];
+            // A DEADBAND, not a zero test. A saturated lobe peak is a plateau carrying
+            // micron-scale numerical wiggle, and counting that as direction changes swamps the
+            // real lobes - badly enough to read 12 lobes as fewer reversals than 6, because
+            // coarser lobes give fewer but WIDER plateaus and so more spurious flips.
+            if (std::abs(d) < 0.02)
+                continue;
+            const int nd = d > 0.0 ? 1 : -1;
+            if (dir != 0 && nd != dir)
+                ++rev;
+            dir = nd;
         }
         return rev;
     };
