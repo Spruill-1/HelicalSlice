@@ -14,19 +14,32 @@ import os
 import sys
 
 
+_DECISION = None
+
+
 def resolve_outdir(suite, argv=None):
     """Return (output_dir, publishing). Consumes `--publish` from argv so the caller's own
-    argument parsing does not have to know about it."""
+    argument parsing does not have to know about it.
+
+    MEMOIZED, and that matters: several builders import each other for shared helpers, and an
+    imported module runs its own resolve_outdir at import time. Without this the helper's call
+    ate `--publish` before the importing tool's call ever saw it, so `--publish` silently
+    produced a verify-only run - the exact failure this module exists to prevent, one level up."""
+    global _DECISION
+    if _DECISION is not None:
+        return _DECISION
     argv = sys.argv if argv is None else argv
     if "--publish" in argv:
         argv.remove("--publish")
         out = os.path.join(suite, "sliced")
         print(f"[publish] writing the printable artifact to {out}")
-        return out, True
+        _DECISION = (out, True)
+        return _DECISION
     out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_verify")
     os.makedirs(out, exist_ok=True)
     print(f"[verify]  writing to {out} - sliced/ untouched (pass --publish to update it)")
-    return out, False
+    _DECISION = (out, False)
+    return _DECISION
 
 
 def inject_env(outdir):

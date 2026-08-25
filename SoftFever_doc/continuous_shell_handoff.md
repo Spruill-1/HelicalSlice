@@ -543,3 +543,49 @@ visible in plastic at all. This whole W7 thread has been wrong-until-corrected-b
 the density comparison goes on the bench BEFORE a policy is built around the number. When it is
 implemented it must report through the W5 degrade_note ("interior only 15 rings, densified
 stride 4 -> 3 so the weave can tie") rather than silently inflating a part.
+
+### W7 step 2: the ring-count floor is NOT worth building (2026-08-25)
+
+Costed before implementing, and the numbers killed it. Kept infill rings m against a floor:
+
+| geometry | buried span | natural m | floor 2 | floor 4 | floor 6 |
+|---|---|---|---|---|---|
+| D2_weave, 7.5 mm wall | 15 | 4 | 4 | **4** | 6 |
+| D3_dense, same at density 50 | 15 | 8 | 8 | 8 | 8 |
+| ladder 8-bead step | 4 | 1 | 2 | 4 (= solid) | 4 |
+| solid disc r15 | 34 | 9 | 9 | 9 | 9 |
+
+**A floor would not have changed D2 at all.** D3 was preferred because it is denser everywhere
+(m = 8 against 4), not because a floor fired. The floor's real reach is a thin interior whose
+natural stride leaves ONE lonely ring - and that case is already handled by the floor of two
+that came with the bore-gap fix (7119045180). Floor 4 mostly turns 3-4 bead interiors solid;
+floor 6 does change D2, but that is just "use a higher density", which is an existing knob.
+
+So the mechanism is done at m >= 2 and the lever for thick interiors is density. Recorded
+rather than built, to avoid machinery that does not do the thing it was wanted for.
+
+### PlateL: the de-lid plate (2026-08-25)
+
+`sliced/PlateL_delid.gcode.3mf` (5.18 g, 28 min). Everything the woven infill has been judged
+on so far shows the wrong thing: a section shows in-plane structure, a top view shows one
+layer. Neither shows whether consecutive layers LOCK - which is what the Z-wave and the
+per-layer phase advance exist to do, and the one claim in this subsystem with no physical
+evidence behind it.
+
+`top_shell_layers = 0` leaves the lattice open from above, so several layers are visible
+through each other. Two objects, same annulus (r_out 10 / bore 2.5, 12 mm):
+
+    L1_open25   density 25, stride 4
+    L2_open50   density 50, stride 2, via a per-object override
+
+Density is the comparison because density is the axis known to matter (PlateD: denser
+preferred by eye), and because the floor turns out not to be.
+
+Checked before publishing: the top layer runs 0.62-0.66x the length of a mid layer, so there
+really is no solid skin - a lid would run several times longer.
+
+**Also fixed a bug in the publish guard itself.** Builders import each other for shared
+helpers, and an imported module runs its own `resolve_outdir` at import time, which CONSUMED
+`--publish` from argv before the importing tool's call saw it. `--publish` therefore produced
+a silent verify-only run - the very failure the guard exists to prevent, one level up. The
+decision is now memoized.
