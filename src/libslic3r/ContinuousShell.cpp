@@ -1763,10 +1763,20 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
                 // Per-ring anti-phase: each successive infill ring flips by pi so neighbours interlock.
                 // The per-LAYER advance (dphase) still rotates the whole lattice so stacked layers weave.
                 const double layer_phase = double(layer_index) * woven.dphase;
+                // Per-ring phase DRIFT on top of the anti-phase alternation. With a pure pi offset
+                // every pair reaches its closest approach at the SAME azimuths, so the untied gaps
+                // between lobes line up across every radius and the lattice behaves as a bundle of
+                // columns rather than a foam. Printed on a de-lidded part: ties covered 39% of the
+                // circumference in six ~22 deg bands, separated by ~24 deg gaps running clean through
+                // the wall. Walking each successive ring a further 2*pi/m staggers those bands
+                // radially, so a gap at one radius is covered by a tie at the next.
+                size_t n_infill = 0;
+                for (const char c : kept_infill) n_infill += (c != 0) ? 1 : 0;
+                const double drift = 2.0 * M_PI / double(std::max<size_t>(2, n_infill));
                 size_t infill_ring = 0;
                 for (size_t j = 0; j < cc.loops.size(); ++j) {
                     if (!kept_infill[j]) continue;   // weave only the thinned infill, not the solid shells
-                    const double phase = layer_phase + double(infill_ring) * M_PI;
+                    const double phase = layer_phase + double(infill_ring) * (M_PI + drift);
                     ++infill_ring;
                     for (Point &p : cc.loops[j].points) {
                         const Vec2d d = p.cast<double>() - centre;

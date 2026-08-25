@@ -967,3 +967,41 @@ rows; full suite green.
 BETWEEN layers. A section shows in-plane structure and the top shows one layer; David's point
 stands that a de-lidded print - top shells suppressed so the lattice is open to view from above
 through several layers - is what would actually show the inter-layer lock.
+
+### PlateL de-lid printed (2026-08-25): the lattice is a bundle of columns, and why
+
+David: "the infill foam has become a set of 'columns' where multiple adjacent tubes connect
+properly to form the foam. However, the foam does not connect these different columns together
+- either in the less or more dense print."
+
+The de-lid was the right instrument: a section shows in-plane structure and a top view shows
+one layer, and neither could have shown this.
+
+**Measured cause.** Adjacent rings alternate phase by exactly pi, so EVERY pair reaches its
+closest approach at the same set of azimuths - pair (0,1) where the sine peaks, pair (1,2)
+where it troughs, repeating each lobe. The untied gaps therefore LINE UP across every radius,
+and those aligned gaps are the column walls. One layer, 360 azimuth samples:
+
+| | azimuths with a tie | tie bands | band width | untied gaps |
+|---|---|---|---|---|
+| L1 density 25 | 39% | 9 | six at ~22 deg | mean 24 deg |
+| L2 density 50 | 66% | 20 | six at ~27-30 deg | mean 6 deg |
+
+Six wide bands, one per lobe, exactly as the phase rule predicts.
+
+**Fix: a per-ring phase DRIFT of 2*pi/m on top of the anti-phase alternation**, so each
+successive ring's tie band walks around the circumference and a gap at one radius is covered by
+a tie at the next. Measured over the same layers:
+
+| | azimuths with a tie | tie bands/layer |
+|---|---|---|
+| L1 density 25 | 36.7% -> **66.7%** | 9.6 -> 14.1 |
+| L2 density 50 | 61.3% -> **70.2%** | 21.1 -> 18.5 |
+
+The sparse case nearly doubles and its ties break into more, smaller, radially staggered bands.
+It costs nothing: 5.18 g -> 5.19 g, same 28 min, because it only moves phase. Density-0 fence
+byte-identical on all 20 rows; full suite green.
+
+Note what this does NOT prove: tie fraction is a G-code measure of where beads come within a
+bead width of each other. Whether the staggered ties actually bond in plastic, and whether the
+columns disappear, needs the reprinted de-lid part.
