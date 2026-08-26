@@ -1943,177 +1943,131 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
             if (!cc.ring_widths.empty()) cc.ring_widths = std::move(kept_w);
             cc.woven_infill = true;   // spiralize_rings should tag [shell | infill | shell] accordingly
 
-            if (woven.weave > 0.0 && cc.star_ok) {
-                // Radial amplitude sized so that ANTI-PHASE neighbours just touch. Sparse rings
-                // sit K*spacing apart; giving consecutive infill rings a pi phase offset makes ring
-                // j bulge OUT where ring j+1 bulges IN, so their closest approach is
-                // K*spacing - 2*amp. Targeting a one-bead centre gap (amp = weave*(K-1)/2*spacing)
-                // brings the bead EDGES into contact at the lobe peaks - the rings knit into one
-                // connected in-plane lattice ("lobes along a slice") instead of separate wavy tubes,
-                // while the valleys stay open for the sparse voids. Capped below half the spacing so
-                // they never cross.
-                // CONTACT BOUND: the closest anti-phase neighbours may come. One bead spacing
-                // is simply "adjacent" - the distance any two neighbouring beads sit at - and it
-                // is the most they may close without CROSSING, which would retrace ground already
-                // laid in this layer and blob.
-                // AMPLITUDE IS SIZED PER GAP, not from the nominal stride.
+            if (woven.weave > 0.0) {
+                // THE WEAVE, LOCAL TO EACH POINT.
                 //
-                // It used to be one scalar, min(weave*(K-1)/2, 0.49*K)*spacing, on the assumption
-                // that the kept rings sit exactly K spacings apart. They do not. The sparsifier
-                // distributes m rings across the buried span inclusive of both ends, and the span
-                // is rarely a multiple of K: on the de-lid part's sparse object the four kept
-                // rings sat 5, 4, 5 slots apart against an amplitude sized for 4.
+                // Two earlier formulations both failed, and for the same underlying reason - they
+                // needed a global frame for something that is purely local.
                 //
-                // One scalar cannot serve that. To weld across a 5-slot gap it must exceed
-                // (5*spacing - width)/2; to avoid CROSSING at the 4-slot gap it must stay under
-                // (4*spacing - width)/2. The second bound is the smaller, so the wide gaps never
-                // close at any setting - which is what the print showed: two rings welded to each
-                // other and to nothing else, a doublet floating between shells it touched neither
-                // of. No lobe count, phase or overshoot reaches it; a sweep of overshoot x drift
-                // through the slicer found a hard floor near 37% of azimuths with no weld
-                // anywhere across the wall depth.
+                // By ANGLE about the section centroid: a ring is only single-valued in angle if
+                // the centroid sees all of it, so the whole weave had to be gated on `star_ok`.
+                // Sections failing that got NO weave at all - thinned to the sparse stride but
+                // never displaced, leaving plain nested tubes with nothing tying them together,
+                // which is this subsystem's original failure mode. It sat undetected in the
+                // non-star path for the entire campaign because every plate until PlateP was
+                // star-shaped; PlateP's crescent was the first section to take it, and the one
+                // object on that plate that peeled.
                 //
-                // So measure the gap that actually exists, per ring and per angle, and size the
-                // excursion to close THAT. Two weaving neighbours approach each other, so each
-                // covers half the excess over one spacing; an immovable shell covers none, so its
-                // neighbour covers all of it. Both halves derive from the same measured gap, so
-                // opposed rings meet at exactly one spacing by construction and cannot cross.
-                // Per-ANGLE because adaptive beading makes those gaps vary around the ring.
-                std::vector<AngularProfile> prof(cc.loops.size());
-                for (size_t j = 0; j < cc.loops.size(); ++j)
-                    prof[j] = AngularProfile::build(cc.loops[j], centre);
-                // Rings run outermost (index 0) inward, so j-1 is the outward neighbour.
-                // PIN the ring that hugs a shell. The sparsifier deliberately keeps a ring
-                // adjacent to each shell so the lattice ties to both faces - but that ring was
-                // woven like any other, and its swing toward its INNER neighbour carried it off
-                // the shell. Measured on the printed de-lid part: bonded to the shell over only
-                // 43.8% (bore) and 42.6% (outer) of the circumference, opening to 0.603 mm - one
-                // and a half spacings - at the 90th percentile. An intermittent tie at a FIXED
-                // radius, repeated every layer, is a peel surface, and there is one at each face.
-                // The part duly came apart in the hand into three concentric sections.
+                // By normalised ARC LENGTH along each ring: no centroid needed, but it assumes
+                // equal fractions of arc length on adjacent rings lie across from each other.
+                // On a wall of varying thickness they do not - the outer ring is much longer than
+                // the inner one - so the correspondence check tripped and the ECCENTRIC object
+                // stopped being woven too.
                 //
-                // So a kept ring that neighbours a shell does not weave at all. It stays
-                // concentric, welded to that shell the whole way round, and anchors the lattice;
-                // its inner neighbour covers the whole of their gap instead of half, exactly as
-                // if the pinned ring were itself a shell.
-                std::vector<char> pinned(cc.loops.size(), 0);
-                for (size_t j = 0; j < cc.loops.size(); ++j) {
+                // What a point actually needs is its distance to the neighbouring ring and the
+                // direction to it. Both are local: take the NEAREST point on that ring. No
+                // parameterisation, no correspondence, no centroid, no star-shape assumption, and
+                // nothing to gate on. The nearest point is walked rather than searched - adjacent
+                // points on one ring have adjacent nearest points on the next - so it stays linear.
+                auto nearest_walk = [](const Points &from, const Points &to) {
+                    std::vector<size_t> idx(from.size(), 0);
+                    if (from.empty() || to.empty()) return idx;
+                    size_t k = 0;
+                    double best = std::numeric_limits<double>::max();
+                    for (size_t t = 0; t < to.size(); ++t) {
+                        const double d = (to[t] - from[0]).cast<double>().squaredNorm();
+                        if (d < best) { best = d; k = t; }
+                    }
+                    idx[0] = k;
+                    for (size_t i = 1; i < from.size(); ++i) {
+                        double cur = (to[k] - from[i]).cast<double>().squaredNorm();
+                        for (int guard = 0; guard < 64; ++guard) {
+                            const size_t kn = (k + 1) % to.size();
+                            const double dn = (to[kn] - from[i]).cast<double>().squaredNorm();
+                            if (dn < cur) { cur = dn; k = kn; continue; }
+                            const size_t kp = (k + to.size() - 1) % to.size();
+                            const double dp = (to[kp] - from[i]).cast<double>().squaredNorm();
+                            if (dp < cur) { cur = dp; k = kp; continue; }
+                            break;
+                        }
+                        idx[i] = k;
+                    }
+                    return idx;
+                };
+
+                const size_t NR = cc.loops.size();
+                // PIN the ring that hugs a shell: it stays concentric and welded to that shell the
+                // whole way round, anchoring the lattice, and its neighbour covers the whole of
+                // their gap instead of half. Without it the anchor's swing toward the interior
+                // carried it off the shell for half the circumference, and the printed part came
+                // apart into concentric sections along exactly that surface.
+                std::vector<char> pinned(NR, 0);
+                for (size_t j = 0; j < NR; ++j) {
                     if (!kept_infill[j]) continue;
-                    if ((j > 0 && !kept_infill[j - 1]) ||
-                        (j + 1 < cc.loops.size() && !kept_infill[j + 1]))
+                    if ((j > 0 && !kept_infill[j - 1]) || (j + 1 < NR && !kept_infill[j + 1]))
                         pinned[j] = 1;
                 }
-                auto gap_cap = [&](size_t j, size_t nb) {
-                    // Half each when both move; all of it when the neighbour cannot.
-                    const double share = (kept_infill[nb] != 0 && !pinned[nb]) ? 0.5 : 1.0;
-                    std::vector<double> c(prof[j].r.size(), 0.0);
-                    for (size_t b = 0; b < c.size(); ++b) {
-                        // share*(gap - spacing) already lands the pair exactly one spacing apart
-                        // at full excursion, so it cannot cross and needs no further clamp. An
-                        // earlier `min(c, 0.49*gap)` here was not a safety net but a leak: on a
-                        // gap of 2 spacings it capped the excursion below what contact needs, so
-                        // the pair could never meet however the wave was tuned.
-                        const double gap = std::abs(prof[nb].r[b] - prof[j].r[b]);
-                        // Aim each pair at 0.8 of a spacing, not exactly one.
-                        //
-                        // One spacing is where two adjacent beads sit, so aiming there gives the
-                        // tie ZERO margin: full closure lands at 0.396 mm against a 0.456 mm
-                        // contact threshold, a seventh of a bead, and any sub-tenth-millimetre
-                        // effect flips it. That is not a theoretical worry - it is why the wall
-                        // measured 16% tied at its worst interface while an idealised model of
-                        // this very law predicted a uniform 43%. The geometry was right all
-                        // along: amplitude, phase and duty cycle all check out against the model
-                        // on the printed part. What was wrong was aiming at the edge of contact.
-                        //
-                        // Overshooting makes the beads at a tie OVERLAP rather than merely touch,
-                        // which is what a weld wants anyway. Swept through the slicer: worst
-                        // interface 16.3% at 1.0, 21.7% at 0.9, 25.0% at 0.8, and it destabilises
-                        // by 0.7 (one interface collapses to 8% as excursions start to overrun).
-                        // Costs 0.9% material.
-                        c[b] = std::max(0.0, woven.weave * share * (gap - 0.8 * double(spacing)));
-                    }
-                    return c;
-                };
-                // The lobes must stay INSIDE the infill band: an outward bulge that crossed the
-                // solid outer shell would push nubs past the object surface (a rough wall); an
-                // inward one would invade the bore shell. The shell rings are un-perturbed, so
-                // clamp every infill point to the shell radius AT ITS OWN ANGLE - shape-aware, so
-                // it works for non-round cross-sections too (a mean radius would flatten corners).
-                // Redundant against the per-gap cap for a ring that neighbours a shell directly;
-                // a backstop for one that does not.
-                const AngularProfile outer_prof = AngularProfile::build(cc.loops[sl - 1], centre);
-                // A SOLID chain has no bore shell, but it does have a terminus ring, and it needs
-                // an inward bound just as much: without one the only thing stopping an inward lobe
-                // was max(rr, 1.0) - one scaled unit, a nanometre from the centroid - so the
-                // innermost kept ring could collapse onto the axis. A degenerate terminus profiles
-                // as zero, which floors the bound at one spacing from the centre: also correct.
-                const AngularProfile inner_prof = annular ? AngularProfile::build(cc.loops[cc.loops.size() - sl], centre)
-                                                          : AngularProfile::build(cc.loops.back(), centre);
-                // Both constants were chosen by sweeping them through the slicer against the
-                // measured weld map of the de-lid plate, not by derivation: 4.0 x 2 slots
-                // minimises the WORST of the two objects (28.3% / 25.7% of azimuths unwelded,
-                // against 34.9% / 17.5% at one slot), and the sparse object is the one that
-                // printed as disconnected. That makes them tuned on one plate at two densities;
-                // treat them as the current best estimate, not as settled.
+
                 const double overshoot   = 4.0;
                 const double drift_slots = 2.0;
-                // Saturating drive: overshoot the bound so the wave spends most of each period
-                // pinned flat against it. Neighbours weld wherever both are pinned in opposition,
-                // making the weld a parallel RUN rather than the tangent POINT a pure sine gives
-                // (measured on a section at drive = bound: 13% of the circumference with bead
-                // edges touching, 5% with real overlap). The un-welded remainder is the
-                // transition, 2*asin(1/overshoot)/pi of each period, and it is bounded below by
-                // resolution: the corner occupies 2*asin(1/overshoot)/lobes of arc, 0.51 mm at
-                // r = 6 with 6 lobes against a 0.196 mm point pitch, so raising it much further
-                // aliases the corner into a chord and hands the saturation back.
-                //
-                // Per-ring phase DRIFT staggers what the overshoot cannot remove. Every ring
-                // shares the same lobes*theta argument, so without it they all cross zero at the
-                // same azimuths and the transitions line up radially into a slot through the full
-                // wall depth. Each successive ring is walked one slot width clear of its
-                // neighbour's. It is capped, because two rings oppose fully only at a relative
-                // phase of exactly pi: a drift d shortens every weld window from
-                // (pi - 2*asin(1/overshoot)) to (pi - 2*asin(1/overshoot) - d). At 4 kept rings
-                // the old 2*pi/m was pi/2, which left a 7% window and printed as a sparse lattice
-                // that was not connected at all, while the dense object at half the drift was
-                // nearly right.
                 size_t n_infill = 0;
                 for (const char c : kept_infill) n_infill += (c != 0) ? 1 : 0;
                 const double drift = std::min(2.0 * M_PI / double(std::max<size_t>(2, n_infill)),
                                               drift_slots * 2.0 * std::asin(1.0 / overshoot));
                 const double layer_phase = double(layer_index) * woven.dphase;
+
+                // The rings are read from a snapshot so a ring already displaced this layer does
+                // not shift the gaps its neighbour is about to measure.
+                const Polygons before = cc.loops;
                 size_t infill_ring = 0;
-                for (size_t j = 0; j < cc.loops.size(); ++j) {
-                    if (!kept_infill[j] || pinned[j]) continue;   // shells, and the rings anchoring them, stay put
+                for (size_t j = 0; j < NR; ++j) {
+                    if (!kept_infill[j] || pinned[j]) continue;
                     const double phase = layer_phase + double(infill_ring) * (M_PI + drift);
                     ++infill_ring;
-                    // Outward and inward budgets differ whenever the gaps either side differ -
-                    // which, next to a shell, they always do.
-                    const std::vector<double> cap_out = (j > 0)
-                        ? gap_cap(j, j - 1) : std::vector<double>(prof[j].r.size(), 0.0);
-                    const std::vector<double> cap_in = (j + 1 < cc.loops.size())
-                        ? gap_cap(j, j + 1) : std::vector<double>(prof[j].r.size(), 0.0);
-                    const int NB = int(prof[j].r.size());
-                    for (Point &p : cc.loops[j].points) {
-                        const Vec2d d = p.cast<double>() - centre;
-                        const double r = d.norm();
-                        if (r < 1.0) continue;
-                        const double th = std::atan2(d.y(), d.x());
-                        int b = int((th + M_PI) / (2.0 * M_PI) * NB);
-                        b = ((b % NB) + NB) % NB;
-                        // Clipped, not scaled: the flat top IS the joint.
-                        const double e  = std::clamp(overshoot * std::sin(woven.lobes * th + phase), -1.0, 1.0);
-                        double       rr = r + e * (e >= 0.0 ? cap_out[b] : cap_in[b]);
-                        const double hi = outer_prof.sample_nearest(th) - double(spacing);
-                        const double lo = inner_prof.sample_nearest(th) + double(spacing);
-                        // A band narrower than two spacings cannot be woven without touching a
-                        // shell; leave those points where the plan put them rather than forcing
-                        // one bound and violating the other.
-                        rr = (lo <= hi) ? std::clamp(rr, lo, hi) : r;
-                        rr = std::max(rr, 1.0);
-                        p = Point(coord_t(std::llround(centre.x() + rr * std::cos(th))),
-                                  coord_t(std::llround(centre.y() + rr * std::sin(th))));
+                    const Points &me = before[j].points;
+                    if (me.size() < 8) continue;
+                    const std::vector<size_t> io = (j > 0)      ? nearest_walk(me, before[j - 1].points)
+                                                                : std::vector<size_t>();
+                    const std::vector<size_t> ii = (j + 1 < NR) ? nearest_walk(me, before[j + 1].points)
+                                                                : std::vector<size_t>();
+                    // The wave runs on arc length along this ring's OWN outline, so its lobe pitch
+                    // is a distance rather than an angle - the same lobe size at a bore as at an
+                    // outer wall, and meaningful on an outline that no ray can parameterise.
+                    std::vector<double> cum(me.size() + 1, 0.0);
+                    for (size_t i = 0; i < me.size(); ++i)
+                        cum[i + 1] = cum[i] + (me[(i + 1) % me.size()] - me[i]).cast<double>().norm();
+                    const double total = cum[me.size()];
+                    if (total < 1e-9) continue;
+
+                    Points moved(me.size());
+                    for (size_t i = 0; i < me.size(); ++i) {
+                        const Vec2d here = me[i].cast<double>();
+                        Vec2d out(0., 0.);
+                        double g_out = 0.0, g_in = 0.0;
+                        if (!io.empty()) {
+                            const Vec2d d = before[j - 1].points[io[i]].cast<double>() - here;
+                            g_out = d.norm();
+                            if (g_out > 1e-9) out += d / g_out;
+                        }
+                        if (!ii.empty()) {
+                            const Vec2d d = here - before[j + 1].points[ii[i]].cast<double>();
+                            g_in = d.norm();
+                            if (g_in > 1e-9) out += d / g_in;
+                        }
+                        const double len = out.norm();
+                        if (len < 1e-9) { moved[i] = me[i]; continue; }
+                        out /= len;
+                        const double sh_out = (j > 0 && kept_infill[j - 1] && !pinned[j - 1]) ? 0.5 : 1.0;
+                        const double sh_in  = (j + 1 < NR && kept_infill[j + 1] && !pinned[j + 1]) ? 0.5 : 1.0;
+                        const double cap_out = std::max(0.0, woven.weave * sh_out * (g_out - 0.8 * double(spacing)));
+                        const double cap_in  = std::max(0.0, woven.weave * sh_in  * (g_in  - 0.8 * double(spacing)));
+                        const double u = cum[i] / total;
+                        const double e = std::clamp(
+                            overshoot * std::sin(woven.lobes * 2.0 * M_PI * u + phase), -1.0, 1.0);
+                        const Vec2d q = here + out * (e * (e >= 0.0 ? cap_out : cap_in));
+                        moved[i] = Point(coord_t(std::llround(q.x())), coord_t(std::llround(q.y())));
                     }
+                    cc.loops[j].points = std::move(moved);
                 }
             }
         } else if (woven.solid_stagger > 0.0 && thick && cc.star_ok && cc.plan == nullptr) {

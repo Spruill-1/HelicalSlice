@@ -1136,14 +1136,25 @@ TEST_CASE("Continuous shell samples the free surface finely on a large section",
     REQUIRE(max_seg * SCALING_FACTOR < 0.5);                // half-bead-chord target (was ~0.74mm)
 }
 
-TEST_CASE("Continuous shell declines the weave and Z-wave on a non-star (crescent) section", "[ContinuousShell]") {
-    // The woven infill phases and clamps every ring by its angle about the section centroid,
-    // which is only meaningful on star-shaped sections. On this crescent the 360-bin shell
-    // profile would average the two boundary branches a ray crosses, and "clamping" to that
-    // fiction can drag a bead half the section width off its ring. The star-shape gate must
-    // therefore decline the radial weave AND the Z-wave here - while KEEPING the sparse
-    // decimation, which needs no angular parametrization.
-    Surfaces surfaces{ Surface(stInternal, make_deep_crescent()) };
+TEST_CASE("Continuous shell weaves a non-star (crescent) section", "[ContinuousShell]") {
+    // This test asserted the OPPOSITE until the weave was rebuilt, and the behaviour it locked in
+    // was a real defect that shipped for the whole campaign. The weave used to phase and clamp
+    // every ring by its angle about the section centroid, which is meaningless where a ray
+    // crosses the outline twice, so it was gated on a star-shape test. A crescent fails that
+    // gate - and got NO weave at all: rings thinned to the sparse stride but never displaced,
+    // leaving plain nested tubes with nothing tying them together. On PlateP that was the one
+    // object of eight that peeled apart in the hand.
+    //
+    // The rebuilt weave asks each point only for its distance to the neighbouring ring and the
+    // direction to it, both taken from the NEAREST point on that ring. There is no angular
+    // profile to average two branches into a fiction, no centroid, and nothing to gate on.
+    //
+    // The hazard the old gate existed to prevent is still asserted, and more directly than
+    // before: no emitted point may leave the section. That is what "clamping to a fiction can
+    // drag a bead half the section width off its ring" would look like, and it is checked here
+    // rather than avoided by declining to weave at all.
+    const ExPolygon crescent = make_deep_crescent();
+    Surfaces surfaces{ Surface(stInternal, crescent) };
     Flow flow(0.5f, 0.25f, 0.5f);
     auto measure = [&](int density, int weave) {
         PrintRegionConfig cfg;
@@ -1164,17 +1175,39 @@ TEST_CASE("Continuous shell declines the weave and Z-wave on a non-star (crescen
 
     // Sparse decimation still applies on the folded section (it drops rings, no parametrization).
     REQUIRE(xy_len(sparse) < 0.85 * xy_len(solid));
-    // The gate declines the weave outright: with it requested, the path is IDENTICAL to the
-    // plain sparse path - no point moved, no Z perturbation added.
-    REQUIRE(woven.size() == sparse.size());
-    coord_t max_dev = 0, z_span = 0;
-    for (size_t i = 0; i < woven.size(); ++i) {
-        max_dev = std::max(max_dev, coord_t(std::abs(woven[i].x() - sparse[i].x())));
-        max_dev = std::max(max_dev, coord_t(std::abs(woven[i].y() - sparse[i].y())));
-        z_span  = std::max(z_span,  coord_t(std::abs(woven[i].z())));
+
+    // The weave now APPLIES. An undulating ring is longer than the smooth one it replaced, and
+    // the margin is well outside anything resampling noise could produce - measured at +13% on
+    // the PlateP crescent, against +0.0% before the rebuild.
+    INFO("sparse " << xy_len(sparse) << " mm, woven " << xy_len(woven) << " mm");
+    REQUIRE(xy_len(woven) > 1.04 * xy_len(sparse));
+
+    // ...and it stays honest. Every point inside the section it belongs to.
+    size_t outside = 0;
+    for (const Point3 &q : woven)
+        if (!crescent.contains(Point(q.x(), q.y()))) ++outside;
+    INFO(outside << " of " << woven.size() << " woven points outside the crescent");
+    REQUIRE(outside == 0);
+
+    // No bead is displaced further than the wall could possibly allow. The old gate's stated
+    // fear was a bead dragged "half the section width" off its ring; bound it explicitly.
+    coord_t xmin = std::numeric_limits<coord_t>::max(), xmax = std::numeric_limits<coord_t>::lowest();
+    coord_t ymin = xmin, ymax = xmax;
+    for (const Point &p : crescent.contour.points) {
+        xmin = std::min(xmin, p.x()); xmax = std::max(xmax, p.x());
+        ymin = std::min(ymin, p.y()); ymax = std::max(ymax, p.y());
     }
-    REQUIRE(max_dev == 0);
-    REQUIRE(z_span == 0);
+    const double span = double(std::max(xmax - xmin, ymax - ymin)) * SCALING_FACTOR;
+    double max_off = 0.0;
+    for (const Point3 &q : woven) {
+        double best = std::numeric_limits<double>::max();
+        for (const Point3 &r : sparse)
+            best = std::min(best, (Point(q.x(), q.y()) - Point(r.x(), r.y())).cast<double>().norm());
+        max_off = std::max(max_off, best * SCALING_FACTOR);
+    }
+    INFO("furthest a woven point sits from any unwoven one: " << max_off << " mm of a "
+         << span << " mm section");
+    REQUIRE(max_off < 0.15 * span);
 }
 
 TEST_CASE("Continuous shell declines the solid-cap stagger on a non-star (crescent) section", "[ContinuousShell]") {

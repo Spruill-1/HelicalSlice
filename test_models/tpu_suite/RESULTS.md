@@ -1734,3 +1734,62 @@ from a centroid, and delete the `star_ok` gate on the weave. `resample_ring` alr
 Worth stating plainly: this means every foam result in this ledger is a result about STAR-SHAPED
 sections. The lobed and eccentric objects are star-shaped; concave outlines were never tested
 until this plate, and they were never woven at all.
+
+## The crescent fixed, and what the eccentric object's solidity is (2026-08-26)
+
+### The weave is now local to each point
+
+Two formulations failed before this one, both because they needed a global frame for something
+purely local.
+
+**By ANGLE about the centroid** - the shipped version. A ring is single-valued in angle only if
+the centroid sees all of it, so the weave was gated on `star_ok`, and sections failing that gate
+got NO weave at all: thinned to the sparse stride but never displaced, leaving plain nested tubes.
+That is this subsystem's original failure mode, and it sat in the non-star path for the entire
+campaign because every plate until PlateP was star-shaped.
+
+**By normalised ARC LENGTH along each ring** - the first attempt at a fix. No centroid needed, but
+it assumes equal fractions of arc length on adjacent rings lie across from each other. On a wall
+of varying thickness they do not, so the correspondence check tripped and the ECCENTRIC object
+stopped being woven too. Measured: crescent still +0.0%, eccentric fell +8.0% -> 0.0%. Caught
+before it went anywhere near a plate.
+
+**By NEAREST POINT on the neighbouring ring** - what landed. A point needs only its distance to
+the next ring and the direction to it, and both are local. No parameterisation, no correspondence,
+no centroid, no star assumption, nothing to gate on. The nearest point is walked rather than
+searched, so it stays linear.
+
+| object | weave off | angular (printed) | nearest-point |
+|---|---|---|---|
+| P1_sparse | 386 mm | +7.8% | +7.8% |
+| P2_dense | 460 mm | +4.4% | +4.4% |
+| P3_ecc | 548 mm | +8.0% | +7.5% |
+| P4_lobed | 424 mm | +6.1% | +5.7% |
+| **P5_crescent** | 389 mm | **+0.0%** | **+13.3%** |
+| P6_solid | 258 mm | +13.9% | +14.0% |
+| P7_taper | 365 mm | +6.2% | +6.3% |
+| P8_thin | 128 mm | +0.0% | +0.0% (correctly declines) |
+
+The peel-validated annulus is unchanged against a matched weave-off reference: L1 worst 19.1%
+(identical), L2 24.9% against 25.0%. Fence byte-identical, suite green at 175.
+
+**The test that asserted the old behaviour was inverted, not deleted.** It used to require the
+weave be declined on a crescent, and its stated fear - that clamping to an angle-binned profile
+could drag a bead "half the section width off its ring" - was legitimate for THAT formulation.
+The safety claim is kept and made sharper: every emitted point must lie inside the section (0 of
+1038 outside), and no point may sit further than 15% of the section span from where the unwoven
+path put it (measured 0.57 mm of 16 mm).
+
+### The eccentric object's solidity
+
+P3_ecc covers 63% of its wall against P1_sparse's 44% at the same nominal density, and it tracks
+thickness: 42% on the thin side, 73% on the thick. Reading the kept rings by azimuth shows why -
+on the thick side the gaps run `1.1 1.1 2.1 3.1 1.0 1.0 1.0 1.1 1.0 1.0 1.0 1.0 2.0 2.0 1.0 1.0`.
+That long run of one-slot gaps is SOLID: consecutive rings, nothing skipped.
+
+This is NOT yet explained. The likeliest cause is that the marching splits an eccentric wall into
+more than one chain - the thin side closes first, so a hole-less band continues as a separate
+SOLID chain - and each chain then carries its own shell allowance, or fails `chain_thick_enough`
+and prints solid. That is a hypothesis, not a measurement: it has not been confirmed, and the
+sparsifier's behaviour on multi-chain sections has not been looked at. Recorded so it is not
+mistaken for a settled account.
