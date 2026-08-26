@@ -1538,3 +1538,56 @@ Before a measurement is used to justify a design change, check what it DISCARDS.
 that misled this campaign did so by silently dropping inconvenient samples: a weld threshold
 sitting exactly where the data lands, and a ring matcher keeping 45% of rays. Both produced
 confident, ordered, plausible tables.
+
+## The 43-vs-16 hunt (2026-08-26): the geometry was right, the target was wrong
+
+The model of the shipped cap law predicted a uniform 43% tie at every interface; the slicer
+delivered 16-44%. That gap was the last open question, and chasing it went through four wrong
+answers before the right one, each ruled out by measurement rather than argument.
+
+**Ruled out.** Amplitude - the actual p5..p95 envelopes match the prediction ring by ring.
+**Phase** - each ring's phase extracted by Fourier component steps by 3.76 to 4.18 radians,
+averaging 3.93 against the 3.927 the code asks for. **Arc fitting** - the config has it on, and
+the G-code parser reads only G0/G1, so it would have silently dropped every arc; the file
+contains zero G2/G3 moves. **Path simplification** - point pitch is a uniform 0.198 mm with a p90
+of 0.201, so nothing was decimated. Unfolded, ring 8.15 shows a clean six-lobe wave at the
+predicted radii with the saturated duty cycle, two bins high and three low per sixty degrees.
+
+**The geometry was correct all along. The design target was not.**
+
+One spacing is where two adjacent beads sit, so aiming a tie there leaves NO margin: full closure
+lands at 0.396 mm against a 0.456 mm contact threshold - a seventh of a bead. Every
+sub-tenth-millimetre effect in a real toolpath then flips a tie on or off, which is exactly how a
+law that models as 43% delivers 16%.
+
+Aiming at 0.8 of a spacing instead makes the beads at a tie OVERLAP rather than merely touch,
+which is what a weld wants anyway. Swept through the slicer and measured with the interval
+instrument:
+
+| closure target | tie % per interface | worst | mean | mass |
+|---|---|---|---|---|
+| 1.00 (as shipped) | 44 19 16 37 18 25 33 | 16.3% | 27.5% | 5.43 g |
+| 0.90 | 44 25 22 47 24 31 31 | 21.7% | 31.9% | 5.46 g |
+| **0.80** | 44 26 25 52 27 34 27 | **25.0%** | **33.5%** | 5.48 g |
+| 0.70 | 42 25 24 49 32 46 8 | 8.0% | 32.4% | 5.49 g |
+
+0.8 lifts the worst interface by half again for 0.9% more material and one minute. By 0.7 it
+destabilises - one interface collapses to 8% as excursions start to overrun their neighbours -
+so this is a shallow optimum with a cliff on one side, not a monotone knob to keep turning.
+
+Fence byte-identical, suite green at 175 cases, PlateL republished at 5.48 g / 30 min.
+
+### What is still unexplained, and should not be papered over
+
+25% is not 43%. The model still predicts more than the slicer delivers, and the remaining factor
+of 1.7 has no explanation yet. Everything ruled out above stays ruled out, so the residue lives
+somewhere not yet looked at - the likeliest candidates are the junction and seam regions, which
+this analysis has consistently treated as noise to be suppressed rather than as geometry to be
+accounted for, and the layer-to-layer phase advance, which every measurement here has averaged
+over rather than examined.
+
+**And the ceiling matters more than the residue.** Even a perfect 43% is under half the
+circumference. If the foam needs its tubes joined most of the way round, no amount of amplitude
+or phase work reaches it - that needs explicit radial ties added to the lattice, keeping the cells
+and adding real spokes between them. This closure fix is worth having and worth printing, but it
+is an improvement to a design whose ceiling is already known.

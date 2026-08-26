@@ -1977,7 +1977,23 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
                         // gap of 2 spacings it capped the excursion below what contact needs, so
                         // the pair could never meet however the wave was tuned.
                         const double gap = std::abs(prof[nb].r[b] - prof[j].r[b]);
-                        c[b] = std::max(0.0, woven.weave * share * (gap - double(spacing)));
+                        // Aim each pair at 0.8 of a spacing, not exactly one.
+                        //
+                        // One spacing is where two adjacent beads sit, so aiming there gives the
+                        // tie ZERO margin: full closure lands at 0.396 mm against a 0.456 mm
+                        // contact threshold, a seventh of a bead, and any sub-tenth-millimetre
+                        // effect flips it. That is not a theoretical worry - it is why the wall
+                        // measured 16% tied at its worst interface while an idealised model of
+                        // this very law predicted a uniform 43%. The geometry was right all
+                        // along: amplitude, phase and duty cycle all check out against the model
+                        // on the printed part. What was wrong was aiming at the edge of contact.
+                        //
+                        // Overshooting makes the beads at a tie OVERLAP rather than merely touch,
+                        // which is what a weld wants anyway. Swept through the slicer: worst
+                        // interface 16.3% at 1.0, 21.7% at 0.9, 25.0% at 0.8, and it destabilises
+                        // by 0.7 (one interface collapses to 8% as excursions start to overrun).
+                        // Costs 0.9% material.
+                        c[b] = std::max(0.0, woven.weave * share * (gap - 0.8 * double(spacing)));
                     }
                     return c;
                 };
