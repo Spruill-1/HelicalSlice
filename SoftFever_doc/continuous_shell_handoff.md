@@ -1175,3 +1175,47 @@ circumference. If the foam needs its tubes joined most of the way round, no amou
 or phase work reaches it - that needs explicit radial ties added to the lattice, keeping the cells
 and adding real spokes between them. This closure fix is worth having and worth printing, but it
 is an improvement to a design whose ceiling is already known.
+
+### Gap width limit (2026-08-26): chosen against the plastic, not the metric
+
+The closure fix printed: the DENSE object came out fixed entirely, and the sparse object almost -
+one central void where it peels, with, in the user's words, "no free-standing foam, all of it
+connected to either the outer or inner shell". That is a single parting plane rather than the
+column bundle this started as.
+
+Chasing that plane produced a third instrument failure and one genuinely useful finding.
+
+**The failure.** An interface measured at 0.0% tied, apparently pinpointing the plane. It was an
+artifact: the band assignment used `delid_noweave.3mf` as its nominal reference, and that file
+was sliced BEFORE the stride and closure changes, so the bands were built from stale ring
+positions. Re-measured against a matched reference, the sparse wall reads 30/29/32/29 - worst
+28.8%, and uniform.
+
+**The finding, which is the useful part.** With correct references, the dense object holds
+together with its worst interface tied 25.0% while the sparse object parts at 28.8%. **Tie
+fraction does not predict peel resistance.** What separates the two is how WIDE the void is at an
+untied azimuth: 2.0 slots dense against 4.0 sparse. A wider void is a bigger crack starter and
+leaves less material to tear.
+
+So the sparsifier now caps how wide a gap it may leave. Gaps land on integer slots, so the choice
+is effectively binary - 3 or 4:
+
+| limit | sparse gaps (slots) | worst tie | mass |
+|---|---|---|---|
+| none, as shipped | 3.0 3.8 2.8 **4.0** | 28.8% | 5.48 g |
+| **3.0** | 3.0 3.0 1.6 **3.0** | 19.1% | 5.78 g |
+| 2.5 | all **2.0** (identical to dense) | 25.0% | 6.16 g |
+
+**3.0 landed.** 2.5 would reproduce the known-good dense geometry exactly, but it abolishes the
+density setting for walls this thin - density 25 would emit density 50. 3.0 is the untested
+middle, and the print decides.
+
+Two things stated plainly rather than buried. The limit LOWERS the tie fraction, 28.8% to 19.1%,
+and that is accepted deliberately because the metric has been shown not to track the outcome. And
+the material cost is geometry-dependent and can be much larger than the 5% seen here: the
+composition test's 4 mm wall went from 67% of solid to 79%, because on a thin wall the shells
+already dominate and added rings land on top of that. Its assertion bar moved from 0.7 to 0.85
+with that reason recorded in the test.
+
+**Next:** print PlateL and peel both objects again. If the sparse one holds, a wider battery of
+geometries follows, then W4.

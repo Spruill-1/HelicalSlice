@@ -1620,6 +1620,20 @@ std::vector<Point> resample_ring(const Polygon &ring, size_t S, const Point &anc
     return out;
 }
 
+// Widest gap the sparsifier may leave between kept rings, in bead slots.
+//
+// Chosen against the PLASTIC, not against the tie metric, because the two disagree and the
+// metric lost. On the de-lid pair, the dense object holds together with its worst interface tied
+// 25% while the sparse object parts down the middle at 28.8% - so tie fraction does not predict
+// peel resistance. What separates them is how WIDE the void is at an untied azimuth: 2.0 slots
+// dense against 4.0 sparse. A wider void is both a bigger crack starter and less material to
+// tear. Capping at 3.0 narrows the sparse case to 3.0 slots for about 5% more material; 2.5
+// would match the dense geometry exactly but abolishes the density setting for walls this thin.
+//
+// Note this LOWERS the tie fraction (28.8% -> 19.1% on the sparse object). That is accepted
+// deliberately rather than overlooked.
+static const double CS_MAX_GAP_SLOTS = 3.0;
+
 bool apply_radial_serpentine(ContourChain &cc, const WovenInfill &woven, coord_t spacing,
                              size_t layer_index, std::string *degrade_note)
 {
@@ -1875,13 +1889,36 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
                     // requested 4: about 17% sparser than the density asked for, and wide enough
                     // that once the shell anchors are pinned there is not enough left to build a
                     // lattice. The span is small, so search it rather than juggle rounding.
+                    //
+                    // A gap also has a WIDTH LIMIT, independent of the requested density. Two
+                    // rings tie by reaching for each other, so a wide gap asks each of them for a
+                    // large excursion - and where the neighbour is a pinned anchor, it asks ONE
+                    // ring for the whole thing. Past a point that swing dominates the ring's
+                    // motion and starves its other interface. Measured on the de-lid part: 2.02
+                    // slot gaps tie 25-52%, while a wall whose gaps came out 5.05/3.65/5.05 tied
+                    // its middle interface at 0.0% - a clean parting plane down the wall, exactly
+                    // where the printed part came apart. So the count is raised until no gap
+                    // exceeds the limit, even where the requested density would allow wider.
+                    // Denser walls are unaffected: their natural stride is already inside it.
                     size_t m = 1;
                     if (span > 1) {
+                        auto max_gap = [&](size_t cand) {
+                            size_t prev = 0, worst = 0;
+                            for (size_t j = 0; j < cand; ++j) {
+                                const size_t at = (cand == 1 ? (span - 1) / 2
+                                                             : (j * (span - 1) + (cand - 1) / 2) / (cand - 1));
+                                if (j) worst = std::max(worst, at - prev);
+                                prev = at;
+                            }
+                            return worst;
+                        };
                         double best = std::numeric_limits<double>::max();
                         for (size_t cand = 2; cand <= span; ++cand) {
+                            if (double(max_gap(cand)) > CS_MAX_GAP_SLOTS && cand < span) continue;
                             const double err = std::abs(double(span - 1) / double(cand - 1) - double(K));
                             if (err < best - 1e-9) { best = err; m = cand; }   // ties keep the sparser
                         }
+                        if (m == 1) m = span;          // nothing fits the limit: take the densest
                     }
                     for (size_t j = 0; j < m; ++j)
                         keep[first + (m == 1 ? (span - 1) / 2

@@ -2195,7 +2195,12 @@ TEST_CASE("Adaptive beading composes with sparse infill", "[ContinuousShell]") {
         const double dense = len(cs_paths(surfaces, flow, c_dense, e_dense));
         INFO("sparse+adaptive " << on << " mm, sparse+C-lite " << off << " mm, dense " << dense);
         REQUIRE(on != Catch::Approx(off).epsilon(1e-9));   // the plan is no longer switched off
-        REQUIRE(on < 0.7 * dense);                          // ...and decimation still happened
+        // ...and decimation still happened. The bar was 0.7 until the sparsifier gained a cap on
+        // how wide a gap it may leave (CS_MAX_GAP_SLOTS): bounding the gap adds rings, and on a
+        // wall this thin the shells already dominate, so sparse went from 67% of solid to 79%.
+        // That cost is real and larger here than the ~5% measured on the de-lid part - it is
+        // geometry-dependent, and worth knowing when reading the density setting.
+        REQUIRE(on < 0.85 * dense);
     }
 
     SECTION("a surviving ring keeps its OWN slot's widths") {
