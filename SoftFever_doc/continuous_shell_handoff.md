@@ -1284,3 +1284,37 @@ measurement.
 
 P7 is the one to examine along its HEIGHT rather than across: its ring count changes partway up,
 so the cap re-decides mid-part, and the layers either side of that change still have to tie.
+
+### PlateP result (2026-08-26): 7 of 8 hold, the prediction was wrong, and the crescent is a GATE
+
+Seven of eight objects came out acceptable. Only the crescent is peelable. A few objects showed
+what read as overly-solid columns, noted for later.
+
+**The pre-registered prediction failed, and that is the most useful thing here.** P3_ecc was
+predicted to peel because a three-slot gap on its thick side is 4.4 spacings of physical void.
+**P3 held.** The object that failed was the crescent - the one object explicitly recorded as
+having no valid pre-print measurement. So void width does NOT govern peel resistance on its own;
+the story built on it is at best incomplete, and should stop being leaned on. What it did do
+correctly was motivate the gap cap, which fixed the sparse annulus - but the mechanism behind
+that is now open again.
+
+**The crescent's cause is a gate, not a tuning failure.** The weave is parameterised by ANGLE
+ABOUT A CENTROID, so it is guarded by `star_ok`:
+
+    if (woven.weave > 0.0 && cc.star_ok) { ...the entire weave... }
+
+A crescent's centroid sits at (-3.66, 0) and the section is not star-shaped about it, so the gate
+fails and the weave is skipped WHOLESALE. The crescent gets sparse concentric rings with no
+undulation whatever - zero ties by construction. That is the original failure mode of this whole
+campaign, preserved intact in the non-star path, and it has been there the entire time: every
+plate until now was star-shaped, so nothing ever exercised it.
+
+**The fix is one already done once.** The radial serpentine hit exactly this and was rebuilt in
+ring-index space - normalised arc length along the rings the marching produces, which needs no
+centroid and no star assumption. The weave needs the same treatment: modulate along each ring's
+own arc-length parameter, displace along the ring's outward normal rather than along a radius
+from a centroid, and delete the `star_ok` gate on the weave. `resample_ring` already exists.
+
+Worth stating plainly: this means every foam result in this ledger is a result about STAR-SHAPED
+sections. The lobed and eccentric objects are star-shaped; concave outlines were never tested
+until this plate, and they were never woven at all.
