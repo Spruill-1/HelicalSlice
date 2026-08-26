@@ -1054,3 +1054,71 @@ angular formulation could never have handled, not to be peeled.
 
 N6 is the decline case: a 1 mm wall has nothing to traverse, so it should fall back to the ring
 lattice and print normally. Its "deep runs" reading is not meaningful at that thickness.
+
+### Correction (2026-08-25): the tie profile was a measurement artifact
+
+PlateN printed cleanly on every topology - the serpentine's shape claims held - but the verdict
+on it was that **the previous foam was better**, wanting only the tubes joined to each other. So
+the line went back to the ring lattice, and re-examining it turned up something that invalidates
+several numbers recorded above.
+
+`rank_rows` matched rings by their ORDER along a ray and kept only rays showing the modal number
+of crossings. On a saturated weave that filter discards more than half the circumference - a ray
+grazing a steep radial transition can cross one ring twice or miss it entirely - and the rays it
+keeps are not a fair sample. It was keeping **162 of 360 rays**.
+
+Three facts about the same geometry did not fit what it reported:
+
+- adjacent rings correlate at **-0.87 to -0.98**, which is the exact anti-phase the code asks for;
+- **every** interface reaches a minimum gap of exactly one spacing, including the ones reported
+  as barely tied;
+- an idealised model of the very same cap law gives a **uniform 43%** at every interface.
+
+Re-measured with rings assigned by DISJOINT INTERVAL instead of by rank - each ring's excursion
+is bounded by its own caps, those bounds do not overlap on this geometry, and nothing is
+discarded - over 6455 rays instead of 162:
+
+| config | tie % per interface (bore -> out) | worst |
+|---|---|---|
+| pin + drift 2 (what was printed) | 44 19 16 37 18 25 33 | **16.3%** |
+| pin + drift 0 | 37 29 24 23 25 16 33 | 15.6% |
+| no pin + drift 0 | 0 21 24 29 15 29 1 | 0.0% |
+
+**What is withdrawn.** The "0.8% tied" interface, the 74/0.8/15/63 alternation, and the
+"permanent doublets" reading built on top of them. The real profile is 16-44% and far flatter.
+The mechanism story - that each ring commits to one neighbour and never swaps - was overstated.
+
+**What stands.** The peel is physical evidence and is not in question. The infill-to-shell
+interface was genuinely weak and pinning genuinely fixed it: worst interface 0% -> 16%, which the
+anchor-hug regression test corroborates independently of this instrument (49.8% tied with the pin
+disabled, matching the 43% measured on the plastic).
+
+**What it changes.** The remaining question is now much better posed and much smaller: the model
+says a uniform 43%, the slicer delivers 16-44%. That is a bug-sized gap in a specific place, not
+evidence that concentric rings cannot be made to connect.
+
+### The per-ring lobe count, tested
+
+The proposal was to scale each ring's lobe count to its own circumference - so a bore ring and an
+outer ring get the same lobe PITCH rather than the same lobe COUNT - and to choose the offsets to
+set how many connections form. Modelled on the L2 geometry:
+
+| scheme | worst interface |
+|---|---|
+| exact anti-phase, one lobe count | **43%**, uniform |
+| per-ring count from circumference, wavelength 4-10 mm | 0-20% |
+| forced step, adjacent counts differing by 1 to 4 | ~19% |
+
+Detuning makes it worse, and the reason is the reverse of the intuition: two rings at exact
+anti-phase are in opposition at EVERY azimuth, so they touch wherever both saturate - 43% of the
+circumference. Give them different counts and they are only in opposition at the beat nodes, so
+contact collapses to a few narrow zones. The pitch argument is right - a bore ring at six lobes
+has less than half an outer ring's lobe pitch - but it cannot be bought by detuning neighbours
+against each other.
+
+### Rule for this subsystem, learned the hard way three times
+
+Before a measurement is used to justify a design change, check what it DISCARDS. Both instruments
+that misled this campaign did so by silently dropping inconvenient samples: a weld threshold
+sitting exactly where the data lands, and a ring matcher keeping 45% of rays. Both produced
+confident, ordered, plausible tables.
