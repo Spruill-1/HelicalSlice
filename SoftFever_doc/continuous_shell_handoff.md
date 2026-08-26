@@ -1219,3 +1219,68 @@ with that reason recorded in the test.
 
 **Next:** print PlateL and peel both objects again. If the sparse one holds, a wider battery of
 geometries follows, then W4.
+
+### VALIDATED (2026-08-26): the foam holds, both densities
+
+PlateL reprinted with the closure target at 0.8 spacings and the gap cap at 3 slots. **Both
+objects passed the peel test.** Sectioned, both show a regular honeycomb - closed cells, connected
+through the wall depth - rather than the concentric tubes, columns, or parting planes that every
+earlier version produced.
+
+That closes the arc this campaign has been on since the first de-lid print:
+
+| print | sparse | dense |
+|---|---|---|
+| de-lid, original | columns, not connected at all | columns |
+| + tie-band stagger | still columns | almost a foam |
+| + per-gap amplitude | 3 concentric sections | 3 concentric sections |
+| + anchor pin, stride | peels at the shell faces | peels at the shell faces |
+| + closure 0.8 | one central parting plane | **holds** |
+| + gap cap 3 slots | **holds** | **holds** |
+
+The two changes that mattered, both landed in the last day, were unglamorous: aim the ties at 0.8
+of a spacing instead of exactly one, and refuse to leave a gap wider than three slots. Neither is
+a new mechanism. Both are corrections to targets that had been set at the edge of what works.
+
+**What the metrics got wrong, kept here because it was expensive.** Tie fraction - the statistic
+this subsystem was steered by for a week - does not predict peel resistance: the dense object
+holds at 25% and the sparse one parted at 28.8%. Void WIDTH does track it. And the gap cap that
+fixed the sparse case LOWERED its tie fraction to 19.1%, so optimising the metric would have
+rejected the change that worked.
+
+### PlateP: the battery, with one pre-registered prediction (2026-08-26)
+
+PlateL proved the foam holds on ONE geometry. Everything that made it hold is geometry-dependent:
+the gap cap decides ring counts from the buried span, the per-gap amplitude sizes excursions from
+measured gaps, and the anchor pin needs a kept ring beside a shell. A round tube exercises none of
+that. So: eccentric bore, lobed wall, crescent, solid section, a taper whose ring count changes
+partway up, and a wall too thin to sparsify - 19.73 g / 95 min, lids off.
+
+Measuring the ring gaps before printing found a hole in the fix:
+
+| object | rings | ring gaps (slots) | max buried |
+|---|---|---|---|
+| P1_sparse | 10 | 3.0 3.0 1.6 3.0 3.0 | 3.0 |
+| P2_dense | 12 | 2.0 x6 | 2.0 |
+| **P3_ecc** | 8 | 2.1 **4.4** 2.0 | **4.4 - over cap** |
+| P4_lobed | 10 | 2.8 2.8 1.5 2.8 2.8 | 2.8 |
+| P6_solid | 4 | 3.0 | 3.0 |
+| P7_taper | 8 | 3.1 3.2 3.1 | 3.2 |
+| P8_thin | 4 | sub-spacing | declined, as intended |
+
+**The cap is expressed in SLOTS, but adaptive beading makes bead width vary with azimuth.** On an
+eccentric wall the thick side carries wider beads, so a three-slot gap there is 4.4 spacings of
+physical void. The cap bounds ring COUNTS; it does not bound the quantity that actually predicts
+peeling, which is void WIDTH in millimetres.
+
+That is left in deliberately, as a **pre-registered prediction**: if void width governs peel
+resistance, P3 comes apart and the others hold. Fixing it first would have tested the fix;
+printing it tests the mechanism, and the mechanism is what the rest of this design rests on. The
+fix, if needed, is to convert the cap through the LOCAL bead width rather than the nominal one.
+
+P5_crescent measures 15.4 slots, but that number is meaningless - it comes from rays cast from a
+centroid lying outside the material. There is no valid pre-print reading for it; the print is the
+measurement.
+
+P7 is the one to examine along its HEIGHT rather than across: its ring count changes partway up,
+so the cap re-decides mid-part, and the layers either side of that change still have to tie.
