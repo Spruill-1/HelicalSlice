@@ -178,9 +178,13 @@ def main():
     t2 = re.search(r"prediction[^\d]*(\d+)", meta)
     print(f"\n{OUTNAME}: {w.group(1) if w else '?'} g, "
           f"{int(t2.group(1)) // 60 if t2 else '?'} min")
-    print("\nPeel every object the way PlateL was peeled: bottom shell off first.")
-    print("P7 is the one to look at along its HEIGHT - the ring count changes partway up, so the")
-    print("gap cap re-decides mid-part, and the layers either side of that change must still tie.")
+    print("\nPeel all three, bottom shell off first, and compare with the parts already in")
+    print("hand from PlateP - same filament, same machine, and for these three the only")
+    print("difference is the two fixes.")
+    print("  P3: the solid ring mid-wall should be gone.")
+    print("  P5: the concave side should hold, not just the convex one.")
+    print("  P4: nothing should have got worse. It moved only because the phase field touches")
+    print("      any section whose rings differ in length, and a lobed wall qualifies.")
 
 
 if __name__ == "__main__":
