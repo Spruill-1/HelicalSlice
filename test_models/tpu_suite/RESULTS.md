@@ -1958,6 +1958,26 @@ about it.
 Both are real but neither is the common case, and the annulus, eccentric, lobed, solid, taper and
 thin-wall geometries are all in acceptable shape. Proceeding to W4.
 
+> **Both closed on 2026-08-27** - see "The weave was measuring gaps that cross no wall" at the end
+> of this file. They were the same defect: the amplitude law was fed a distance that crosses no
+> wall. Awaiting print validation, not further analysis.
+
+### Queue (2026-08-27, revised)
+
+1. **The axial core of a solid section.** Diagnosed (see the correction above): the weave adds a
+   FIXED `lobes * 4 * amplitude` of path to every ring regardless of its radius, so near the axis,
+   where a ring is short, it is a 130% surcharge and the ring folds into a tight zigzag. The fix
+   is to bound the amplitude by the local wavelength `2 pi r / lobes` as well as by the gap. That
+   changes geometry on every part with a small-radius feature, so it is print-gated. The ring
+   selection is NOT the lever - moving the inner anchor onto the terminus was tried and the
+   amplitude law spends the saving.
+
+2. **A combined battery over the Voronoi subsectioning**, which allows multi-bore geometry. Blocked
+   on `continuous-shell-multibore-and-infill` being brought forward. The sharp question: whether a
+   peel runs along a CELL CUT LINE - an artificial face the generator will treat as real. Note
+   that the reach bound landed above makes this more interesting, not less: a Voronoi cell
+   boundary is exactly the situation where one chain's rings sit in another's measured gap.
+
 ## W4 (2026-08-27): a forced-solid layer keeps adaptive beading
 
 `force_solid` used to switch adaptive beading off, so a top/bottom shell - or any shell over air -
@@ -2176,3 +2196,167 @@ lands, which is a candidate and nothing more.
 **Queued** alongside the eccentric solid chunk, which is plausibly the same family: both are
 places where the fill is denser than the density setting asks, and in both the mechanism sits
 near a chain end rather than in the weave.
+
+### Correction: the odd/even alternation was the instrument (2026-08-27)
+
+The alternating 45/17 mm figures above are wrong, and the "unexplained" verdict with them. They
+came from bucketing G-code segments by `int(round(z / layer_height))`. The continuous shell writes
+a per-POINT Z - the Z-wave, and the layer-join ramp - so that expression does not name the layer a
+segment belongs to, and it scattered each layer's path across two buckets.
+
+Bucketed by the G-code's own `; CHANGE_LAYER` markers, the profile is flat:
+
+    layers  99-114:  ~31 mm per layer      the plain cylinder below the floor
+    layers 115-119:  ~49 mm per layer      the five shell layers under the bore floor (W6)
+    layers 120+:      0 mm                 above the floor, where the bore is
+
+So there is no alternation to explain. The core is a steady ~31 mm of path per layer inside
+r = 2.5 mm, which is 12.4 mm2 of bead in a 19.6 mm2 disc - **63% dense where the setting asks
+25%**.
+
+The ring dump says where it comes from. Kept rings on layer 8, by radius:
+
+    shell    9.775  9.379  8.982                        two shell rings plus a pinned anchor
+    infill   7.819  6.617  5.428  4.238  3.049  1.860   stride 3 slots, weaving
+    anchor   0.658                                      kept infill, pinned, un-woven
+    terminus 0.262                                      always kept
+
+Two contributions, and the smaller one is the obvious one:
+
+- **The terminus and its anchor sit ONE slot apart** at the axis - 5.8 mm of path between them.
+  Moving the distribution's inner anchor onto the terminus itself removes that doublet; it was
+  tried, and it does not help, because the amplitude law then grants the next ring a bigger cap
+  and it spends the saving.
+
+- **The weave adds a FIXED length to every ring**, not a proportional one. The drive saturates
+  (`clamp(4 sin, -1, 1)`), so a ring is a square wave of `lobes` periods and amplitude A, and the
+  radial travel is about `lobes * 4 * A` whatever the ring's radius. At r = 7.8 mm that is a 21%
+  surcharge on the circumference; at r = 1.86 mm the same 15.6 mm is a 130% surcharge, and the
+  ring folds into a zigzag of 1.94 mm wavelength and 1.3 mm peak to peak. 24 of the 30 mm inside
+  r = 2.5 mm is that one ring.
+
+So the axial core is the weave's fixed length surcharge landing in the smallest area of the
+section. It cannot be fixed by choosing different rings; it needs the amplitude bounded by the
+LOCAL wavelength (2 pi r / lobes) as well as by the gap - which changes geometry on every part
+with a small-radius feature, and so is a print-gated change rather than a desk one.
+
+## The crescent and the eccentric: the weave was measuring gaps that cross no wall (2026-08-27)
+
+Both parked objects turned out to be the same defect wearing two costumes. The amplitude law is
+
+    cap = weave * share * (gap - 0.8 * spacing)
+
+and `gap` is the distance to the nearest point on the neighbouring ring. That is the right
+quantity while the two rings FACE each other across the wall. Neither object's did.
+
+### The crescent: the nearest point was walked, and a concavity has two basins
+
+`nearest_walk` carried an index from one sample to the next and hill-climbed it forwards and
+backwards while the distance improved - on the reasoning that adjacent points have adjacent
+neighbours. That holds until the section is concave. A ring wraps AROUND a notch, so a point
+facing it has one candidate across the gap and another round the far side, and the distance
+function along the neighbouring ring has two basins with a ridge between them. The walk cannot
+cross a ridge, so once the index settled in the wrong basin every later sample inherited it.
+
+Transcribing the walk into Python and running it against a true nearest, on the slicer's own
+dumped rings:
+
+| ring pair | region | walk says | truth | wrong on |
+|---|---|---|---|---|
+| 3 -> 2 | convex | 1.189 mm | 1.189 mm | 1.5% |
+| 3 -> 2 | concave | 5.206 mm | 1.189 mm | **100%** |
+| 1 -> 0 | concave | 5.573 mm | 0.396 mm | **100%** |
+
+Every ring, over the whole concave stretch. The law then permitted 7.458 mm of excursion against a
+true 0.873, and the printed rings moved 7.384. The same index also chooses the DIRECTION of the
+excursion, and carries the phase field from ring to ring, so one wrong answer spoiled the
+amplitude, the direction and the phase together. Four of the five dead hypotheses were true
+observations of a downstream symptom.
+
+Searching for the nearest point instead of walking toward it, same object, same layer:
+
+| | welded, CONVEX | welded, CONCAVE |
+|---|---|---|
+| before | 41.5% | **5.7%** |
+| after | 41.5% | **38.1%** |
+
+Ring 3's displacement over the concave stretch falls from a mean of 2.256 mm (max 7.384) to a mean
+of 0.544 (max 0.872 - the cap, to three digits). The convex side does not move.
+
+### The eccentric: a chain reads its neighbour chain's material as a void
+
+Band marching splits a wall into chains where it pinches, and each chain measures gaps only within
+itself. On P3_ecc the first chain's rings 3 and 4 lie a median 3.716 mm apart - with the SECOND
+chain's three rings sitting between them. The law read that as the gap to close, permitted 5.063
+mm, and flung both rings 2.53 mm into a pocket that was already full. That is the solid chunk that
+survived the pinch-boundary fix.
+
+Here the walk was innocent: walk and truth agree at 3.716 mm. The gap is real; it is just not a
+wall crossing.
+
+### The bound
+
+A neighbour further off than a wall crossing is not a neighbour. The bound is the one the
+sparsifier already guarantees on the other side - it raises the kept-ring count until no gap
+exceeds `CS_MAX_GAP_SLOTS`, and consecutive band contours are one spacing apart, so a genuine
+crossing between kept rings is at most that many spacings. Half a slot of margin keeps a gap that
+sits exactly at the cap (the crescent's 1.189 mm) from being excluded by rounding. Applied per
+POINT: a ring can face its neighbour over most of its length and run past its end for the rest.
+
+### Blast radius
+
+The excursion the law permits, on the same unwoven rings, old law against new:
+
+| object | old | new | object | old | new |
+|---|---|---|---|---|---|
+| P1_sparse | 0.885 | 0.885 | P6_solid | 0.873 | 0.873 |
+| P3_ecc | **5.063** | **1.064** | P7_taper | 0.875 | 0.875 |
+| P4_lobed | 1.016 | 1.016 | P8_thin | 0.035 | 0.035 |
+| P5_crescent | **9.837** | **1.041** | | | |
+
+Exactly the two objects that failed in the plastic, and nothing else. On the test fixtures the
+same split appears as topology - a wall that marches as ONE chain is byte-identical, and only
+walls that pinch into chains lose the excess:
+
+| eccentric annulus r10/bore3 | surplus path, old | new |
+|---|---|---|
+| bore offset 0 mm (one chain) | 6.47% | 6.47% |
+| bore offset 1 mm (one chain) | 6.69% | 6.69% |
+| bore offset 2 mm (pinches) | **9.59%** | **2.46%** |
+| bore offset 3 mm (pinches) | 2.11% | 1.18% |
+
+Density-0 signature fence byte-identical across all 20 fixtures. Suite 49 -> 50 cases.
+
+### Two things tried and reverted, with the reason recorded in the code
+
+- **`chain_thick_enough` double-counts an outer shell on a pinch chain**, where the sparsifier
+  holds none (`sl_out`). The arithmetic is genuinely wrong, and correcting it makes things worse:
+  a three-ring pinch chain cannot be thinned anyway - two infill rings and a terminus, with the
+  distribution obliged to anchor both ends - so the only effect is to start weaving it. On the
+  eccentric pocket that turned the outer ring from a 41 mm loop into an 80 mm one sweeping 4.2 mm
+  of radius, and silenced a "printed solid" note that was true.
+
+- **Moving the distribution's inner anchor onto the terminus** for a bore-less chain, to remove
+  the one-slot doublet at the axis. It removes the doublet and saves nothing, and it broke the
+  weave on thin chains by spending one of the distribution's slots on a ring kept anyway.
+
+### The note now reports the outcome
+
+"wall too thin to sparsify - printed solid" fired on `chain_thick_enough` saying no. It now fires
+on no ring having been dropped, which is the thing that is true of the plastic. They part company
+on a short chain whose span leaves the distribution no room: that chain printed solid and nothing
+said so.
+
+### One test replaced rather than retuned
+
+The crescent test asserted that the weave adds at least 4% of path. That proxy reads the wrong way
+round: extra path comes MORE readily from a bead going where it should not than from one weaving,
+and on that fixture the defect scored 10.5% against the fix's 2.2% - the assertion was satisfied
+twice as well by the bug as by the fix. It is now a two-sided window on the same law, since the
+surplus has a ceiling (`lobes * 4 * cap`) as well as a floor.
+
+Also recorded there: the existing "no bead is displaced further than the wall allows" bound did
+NOT catch this, and the numbers are written down so nobody re-derives it. A bead displaced 7 mm
+from its own ring lands on top of a NEIGHBOURING ring, so its distance to the nearest unwoven bead
+stays small - 0.555 mm with the walk against 0.592 mm with the search. That is also why the
+printed defect was stacked material and an unwelded interface rather than a bead in mid-air.
