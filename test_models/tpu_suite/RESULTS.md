@@ -1834,3 +1834,56 @@ slicer emits no degrade note for this object at all.
 face or a pinch, and apply the solid shell allowance only at real faces. The information exists
 at the moment of the split - `march_bands` continues when a band loses its hole, and that
 continuation point is exactly the artificial end.
+
+## Pinch-boundary shells, and phase as a field (2026-08-27)
+
+### The eccentric object's solid ring is gone
+
+A chain now knows whether its OUTER end is a real face or the point at which a previous chain
+pinched out, and the solid shell allowance is applied only at real faces. A shell exists to skin
+a surface; where the end is a pinch artifact there is no surface, and skinning it printed a solid
+ring buried mid-wall.
+
+    P3_ecc wall coverage   62.4% -> 53.4%
+    P3_ecc path per layer  589 mm -> 466 mm   (-20.7%)
+    plate                  19.99 g -> 19.26 g
+
+Every other object is byte-identical in path length, which is the check that matters: the flag is
+only ever set on a chain the marching created by continuation, and no other object on the plate
+produces one.
+
+### Phase is now a FIELD across the wall
+
+The crescent still peeled on its concave side after the weave was made to apply there. The weave
+phased each ring by its OWN normalised arc length, which gives every ring the same lobe COUNT. On
+an annulus that is harmless - all rings are nearly the same length, so anti-phase holds the whole
+way round. On a crescent the inner rings are far shorter than the outer ones, so the same count
+means different wavelengths and adjacent rings BEAT: in opposition in some places, in phase in
+others. Two rings tie only where they oppose, so the ties collapse wherever the beat puts them in
+phase. The weave was applying, but detuned.
+
+Phase is now carried ACROSS the wall. Ring 0 takes its phase from its own arc length; every ring
+after it inherits the phase of its nearest point on the ring outside it. Adjacent rings are then
+in exact anti-phase everywhere by construction whatever their lengths, and the lobes line up along
+the wall rather than around each ring independently.
+
+| object | before | after |
+|---|---|---|
+| P1_sparse, P2_dense | 416 / 481 mm | **unchanged** |
+| P5_crescent | 440 mm | +2.1% |
+| P4_lobed | 448 mm | +1.7% |
+| P3_ecc | 466 mm | +0.2% |
+| P6, P7, P8 | | unchanged |
+
+The annuli being untouched is the point: on a circle the inherited phase IS the same angular
+position, so this reduces exactly to what they already did. The change lands only on sections
+whose rings differ in length - which is where the defect was.
+
+Peel-validated annulus, matched reference: L1 worst 19.4% against 19.1%, L2 25.1% against 24.9%.
+Fence byte-identical, suite green at 175.
+
+**Stated plainly: the beat is inferred, not measured.** Every instrument in this ledger that can
+measure tie quality needs rays, a centroid, or a ring correspondence, and none of them work on a
+crescent - three separate attempts to measure that object returned numbers known to be wrong
+(coincident-point gaps of 0.000 mm, an inflated section area). The mechanism fits the geometry and
+the fix moves exactly the objects it should, but the crescent print is what will decide it.

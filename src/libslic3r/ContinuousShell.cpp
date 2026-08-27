@@ -1460,7 +1460,8 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
 // Returns false only for topologies we still do not model (a solid band that grows a
 // hole) or on a band/point budget overflow, so the caller can hard-stop.
 bool march_bands(ExPolygon band, coord_t spacing, bool has_hole,
-                 std::vector<std::vector<ExPolygon>> &chains, std::vector<char> &vanished, size_t &point_count)
+                 std::vector<std::vector<ExPolygon>> &chains, std::vector<char> &vanished,
+                 std::vector<char> &outer_pinch, size_t &point_count, bool outer_real = true)
 {
     constexpr size_t max_chains = 4096;
     constexpr size_t max_points = 400000;
@@ -1480,8 +1481,11 @@ bool march_bands(ExPolygon band, coord_t spacing, bool has_hole,
                 if (! chain.empty()) {
                     chains.push_back(std::move(chain));
                     vanished.push_back(0);
+                    outer_pinch.push_back(outer_real ? 0 : 1);
                 }
-                return march_bands(band, spacing, false, chains, vanished, point_count);
+                // The remainder starts where this chain pinched out - an artificial end.
+                return march_bands(band, spacing, false, chains, vanished, outer_pinch,
+                                   point_count, /*outer_real=*/false);
             }
             break;                          // bore split into several holes: not a topology we model
         }
@@ -1511,15 +1515,18 @@ bool march_bands(ExPolygon band, coord_t spacing, bool has_hole,
         if (!chain.empty()) {
             chains.push_back(std::move(chain));
             vanished.push_back(0);
+            outer_pinch.push_back(outer_real ? 0 : 1);
         }
         for (const ExPolygon &comp : next)
-            if (!march_bands(comp, spacing, !comp.holes.empty(), chains, vanished, point_count))
+            if (!march_bands(comp, spacing, !comp.holes.empty(), chains, vanished, outer_pinch,
+                             point_count, /*outer_real=*/false))
                 return false;
         return true;
     }
     if (!chain.empty()) {
         chains.push_back(std::move(chain));
         vanished.push_back(char(ended_by_vanish ? 1 : 0));
+        outer_pinch.push_back(outer_real ? 0 : 1);
     }
     return true;
 }
@@ -1531,6 +1538,13 @@ bool march_bands(ExPolygon band, coord_t spacing, bool has_hole,
 struct ContourChain {
     Polygons loops;
     bool     has_bore = false;
+    // True when this chain's OUTER end is where a previous chain pinched out, not a real face
+    // of the object. A wall of varying thickness closes on its thin azimuth first, and the
+    // marching hands the remainder on as a new chain - so that chain's outermost rings sit in
+    // the MIDDLE of the wall. Giving them the solid shell allowance printed a solid ring buried
+    // mid-wall: on the eccentric test object it took wall coverage to 63% against 44% for a
+    // plain wall, and was visible in the section as a solid band between two foams.
+    bool     outer_pinch = false;
     bool     woven_infill = false;   // true once this chain's interior was thinned to sparse infill
     // False when the chain's rings are not star-shaped about the perturbation centre, so
     // every angular-parametrized perturbation (radial weave, solid stagger, and this
@@ -1838,13 +1852,19 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
     // tubes. Disabled unless infill density is set.
     if (woven.enabled && cc.loops.size() > 2) {
         const size_t sl = woven.shell_loops;
+        // A shell exists to give a FACE a solid skin. Where this chain's outer end is not a face
+        // but the point at which the previous chain pinched out, there is no surface to skin -
+        // those rings are buried mid-wall, and skinning them printed a solid ring inside the
+        // part. Measured on the eccentric object: 63% wall coverage against 44% for a plain
+        // wall, with a run of one-slot gaps mid-wall where two chains' shells sat back to back.
+        const size_t sl_out = cc.outer_pinch ? 0 : sl;
         const size_t K  = woven.stride;
         const size_t n  = cc.loops.size();
         const bool   annular = cc.has_bore;
         // is_infill on ORIGINAL indices: buried interior beyond the shell(s). Annular keeps a
         // shell at both ends; solid keeps the outer shell and the buried core (minus the terminus).
         auto is_infill = [&](size_t i) -> bool {
-            if (i < sl) return false;
+            if (i < sl_out) return false;
             return annular ? (i + sl < n) : (i + 1 < n);
         };
         const bool thick = chain_thick_enough(cc, woven);   // one definition, shared
@@ -2019,10 +2039,52 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
                 // The rings are read from a snapshot so a ring already displaced this layer does
                 // not shift the gaps its neighbour is about to measure.
                 const Polygons before = cc.loops;
+
+                // PHASE IS A FIELD ACROSS THE WALL, not a per-ring function of its own length.
+                //
+                // Phasing each ring by its OWN normalised arc length gives every ring the same
+                // lobe COUNT. On an annulus that is harmless - all the rings are nearly the same
+                // length, so anti-phase holds the whole way round. On a section whose rings differ
+                // in length it is not: the inner rings of a crescent are far shorter than its
+                // outer ones, so the same count means different wavelengths, and adjacent rings
+                // BEAT against each other - in opposition in some places and in phase in others.
+                // Two rings only tie where they oppose, so the ties collapse wherever the beat
+                // puts them in phase. That is why the crescent still peeled on its concave side
+                // after the weave was made to apply there at all: it was applying, but detuned.
+                //
+                // So the phase is carried ACROSS the wall instead. Ring 0 takes its phase from its
+                // own arc length; every ring after it inherits the phase of its NEAREST point on
+                // the ring outside it. Adjacent rings are then in exact anti-phase everywhere by
+                // construction, whatever their lengths, and the lobes line up along the wall
+                // rather than around each ring independently. On a circle the inherited phase is
+                // the same angular position, so this reduces exactly to what annuli already do -
+                // which is why their validated behaviour is unchanged.
+                std::vector<std::vector<double>> basephase(NR);
+                for (size_t j = 0; j < NR; ++j) {
+                    const Points &pts = before[j].points;
+                    basephase[j].assign(pts.size(), 0.0);
+                    if (pts.empty()) continue;
+                    if (j == 0) {
+                        double run = 0.0;
+                        std::vector<double> cum(pts.size() + 1, 0.0);
+                        for (size_t i = 0; i < pts.size(); ++i)
+                            cum[i + 1] = cum[i] + (pts[(i + 1) % pts.size()] - pts[i]).cast<double>().norm();
+                        const double tot = cum[pts.size()];
+                        for (size_t i = 0; i < pts.size(); ++i)
+                            basephase[j][i] = (tot > 1e-9)
+                                ? woven.lobes * 2.0 * M_PI * (cum[i] / tot) : 0.0;
+                        (void)run;
+                    } else {
+                        const std::vector<size_t> up = nearest_walk(pts, before[j - 1].points);
+                        for (size_t i = 0; i < pts.size(); ++i)
+                            basephase[j][i] = basephase[j - 1][up[i]];
+                    }
+                }
+
                 size_t infill_ring = 0;
                 for (size_t j = 0; j < NR; ++j) {
                     if (!kept_infill[j] || pinned[j]) continue;
-                    const double phase = layer_phase + double(infill_ring) * (M_PI + drift);
+                    const double ring_phase = layer_phase + double(infill_ring) * (M_PI + drift);
                     ++infill_ring;
                     const Points &me = before[j].points;
                     if (me.size() < 8) continue;
@@ -2030,15 +2092,6 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
                                                                 : std::vector<size_t>();
                     const std::vector<size_t> ii = (j + 1 < NR) ? nearest_walk(me, before[j + 1].points)
                                                                 : std::vector<size_t>();
-                    // The wave runs on arc length along this ring's OWN outline, so its lobe pitch
-                    // is a distance rather than an angle - the same lobe size at a bore as at an
-                    // outer wall, and meaningful on an outline that no ray can parameterise.
-                    std::vector<double> cum(me.size() + 1, 0.0);
-                    for (size_t i = 0; i < me.size(); ++i)
-                        cum[i + 1] = cum[i] + (me[(i + 1) % me.size()] - me[i]).cast<double>().norm();
-                    const double total = cum[me.size()];
-                    if (total < 1e-9) continue;
-
                     Points moved(me.size());
                     for (size_t i = 0; i < me.size(); ++i) {
                         const Vec2d here = me[i].cast<double>();
@@ -2061,9 +2114,8 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
                         const double sh_in  = (j + 1 < NR && kept_infill[j + 1] && !pinned[j + 1]) ? 0.5 : 1.0;
                         const double cap_out = std::max(0.0, woven.weave * sh_out * (g_out - 0.8 * double(spacing)));
                         const double cap_in  = std::max(0.0, woven.weave * sh_in  * (g_in  - 0.8 * double(spacing)));
-                        const double u = cum[i] / total;
                         const double e = std::clamp(
-                            overshoot * std::sin(woven.lobes * 2.0 * M_PI * u + phase), -1.0, 1.0);
+                            overshoot * std::sin(basephase[j][i] + ring_phase), -1.0, 1.0);
                         const Vec2d q = here + out * (e * (e >= 0.0 ? cap_out : cap_in));
                         moved[i] = Point(coord_t(std::llround(q.x())), coord_t(std::llround(q.y())));
                     }
@@ -2194,11 +2246,12 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
 
     std::vector<std::vector<ExPolygon>> chains;
     std::vector<char> vanished;
+    std::vector<char> outer_pinch;
     size_t point_count = 0;
 
     ExPolygons current = offset_ex(ExPolygons{ region }, -float(width) / 2.f);
     for (const ExPolygon &seed : current)
-        if (!march_bands(seed, spacing, !seed.holes.empty(), chains, vanished, point_count))
+        if (!march_bands(seed, spacing, !seed.holes.empty(), chains, vanished, outer_pinch, point_count))
             return {};
 
     std::vector<ContourChain> out;
@@ -2253,6 +2306,9 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
     for (size_t ci = 0; ci < chains.size(); ++ci) {
         const auto &chain = chains[ci];
         ContourChain cc;
+        // Whether this chain's outer end is a real face or the point where a previous chain
+        // pinched out. Only a real face gets a solid shell; see ContourChain::outer_pinch.
+        cc.outer_pinch = ci < outer_pinch.size() && outer_pinch[ci] != 0;
         cc.loops.reserve(chain.size() * 2 + 1);
         // Outer contours: outer edge -> medial axis.
         for (const ExPolygon &band : chain)
