@@ -1,4 +1,6 @@
 #include "ContinuousShell.hpp"
+#include <cstdio>
+#include <cstdlib>
 
 #include "Arachne/BeadingStrategy/BeadingStrategyFactory.hpp"
 #include "ClipperUtils.hpp"
@@ -2689,6 +2691,34 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     // ends at the (precessing) outer anchor - and reversing would break exactly that
     // pairing: odd layers would START at the buried inner ring while the previous
     // layer ended at the outer anchor, chording across any concave notch between.
+    // Ring dump, for analysis with TRUE ring identity. Off unless CS_DUMPRINGS names a layer.
+    //
+    // Kept rather than deleted because of what it cost to do without. Every other instrument this
+    // subsystem has - ray crossings, angular profiles, nominal-band assignment, arc-length
+    // correspondence - needs a centroid, a star-shaped outline, or rings of comparable length,
+    // and a concave section has none of those. Five separate attempts to measure the crescent
+    // produced numbers that were provably wrong (coincident-point gaps of 0.000mm, an inflated
+    // section area, a tie profile built on stale nominal rings). Dumping the geometry itself is
+    // the only measurement here that is correct by construction on any topology.
+    static const char *dump_layer = std::getenv("CS_DUMPRINGS");
+    if (dump_layer) {
+        if (layer_index == size_t(std::atoi(dump_layer))) {
+            if (FILE *f = std::fopen("cs_rings.txt", "a")) {
+                for (size_t ci = 0; ci < chains.size(); ++ci) {
+                    const ContourChain &c = chains[ci];
+                    for (size_t j = 0; j < c.loops.size(); ++j) {
+                        std::fprintf(f, "CHAIN %zu RING %zu BORE %d PINCH %d N %zu",
+                                     ci, j, c.has_bore ? 1 : 0, c.outer_pinch ? 1 : 0,
+                                     c.loops[j].points.size());
+                        for (const Point &p : c.loops[j].points)
+                            std::fprintf(f, " %.4f %.4f", unscale<double>(p.x()), unscale<double>(p.y()));
+                        std::fputc(10, f);
+                    }
+                }
+                std::fclose(f);
+            }
+        }
+    }
     const bool reverse_chains = chains.size() > 1 ? false : reverse_path;
     for (const ContourChain &chain : chains) {
         std::vector<char> flags;

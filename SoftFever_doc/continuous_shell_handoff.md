@@ -1471,3 +1471,52 @@ measure tie quality needs rays, a centroid, or a ring correspondence, and none o
 crescent - three separate attempts to measure that object returned numbers known to be wrong
 (coincident-point gaps of 0.000 mm, an inflated section area). The mechanism fits the geometry and
 the fix moves exactly the objects it should, but the crescent print is what will decide it.
+
+### PlateQ (2026-08-27): incremental on all three, and the crescent measured at last
+
+The three-object plate came back an incremental improvement across the board. The eccentric's
+solid chunk is still present though smaller; the crescent is mildly less peelable but its
+concave-side outer ring still has little interconnect with the foam; the lobed object is
+essentially unchanged, which is what it was there to confirm.
+
+### An instrument that works on any topology
+
+Five attempts to measure the crescent had failed, each returning numbers that were provably
+wrong - coincident-point gaps of 0.000 mm, an inflated section area, a tie profile built on stale
+nominal rings. Every instrument this subsystem had needs a centroid, a star-shaped outline, or
+rings of comparable length, and a concave section has none of those.
+
+`CS_DUMPRINGS=<layer>` now writes the chain rings themselves, so analysis has exact ring identity
+and the outline's shape is irrelevant (`tools/ringanalyse.py`). It is kept rather than deleted:
+the cost of working without it, across this campaign, has been several wrong conclusions.
+
+### What it says about the crescent, and what remains unexplained
+
+| interface | tied CONVEX | tied CONCAVE |
+|---|---|---|
+| 2 (anchor to foam) | 45.8% | **5.1%** |
+| 3 | 27.1% | **0.0%** |
+
+The user's reading confirmed and quantified: the concave side is tied roughly nine times less.
+
+What was then ruled OUT, each by measurement:
+
+- **Gap geometry.** Unwoven gaps are identical between the regions - 1.189 mm at interface 2,
+  0.793 at interface 3, on both sides.
+- **The weave failing to apply.** Ring 3 is displaced 0.238 mm (concave) against 0.252 mm
+  (convex): it is weaving there.
+- **Reach.** Both regions achieve full closure at their peaks - minimum gap 0.317 mm convex,
+  0.280 mm concave, against a 0.456 mm tie threshold.
+- **Lobe starvation.** Ring 3 gets 3 lobes over 34.7 mm of convex arc and 2 over 22.9 mm of
+  concave arc - the same pitch either side.
+
+So the ring reaches the anchor at its peaks, with the same lobe density and the same gap to
+close, and is nonetheless tied over nine times less of its concave length. **That is not
+explained.** Five hypotheses have died on this object today - the star gate (real, fixed, not
+sufficient), arc-length correspondence, the beat, phase-field flattening, and lobe starvation -
+and the honest position is that the cause is still unidentified rather than that the next guess
+is likely right.
+
+The instrument now exists to settle it, which it did not before. The next step on this object is
+to plot ring 3's displacement against arc length either side and look, rather than to reason
+about it.
