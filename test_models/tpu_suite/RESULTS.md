@@ -1998,3 +1998,52 @@ the same flag and only one of them was meant to change.
 **Not yet print-validated.** The defect this fixes was seen on the S5 cone, which is not on any
 current plate. The geometry to reprint is the S5 cone; what to look for is the bore lip, which
 should no longer be doubled.
+
+## W5 (2026-08-27): the notes were single-slot, so half of them never appeared
+
+The plumbing was already in place - `degrade_note` threaded out of `build_cross_section` and
+logged by LayerRegion with the layer id. What was missing was coverage and, worse, a defect in the
+mechanism itself.
+
+**Every site guarded on the note being EMPTY**, so a layer that took two weaker paths reported
+one, and which one depended on the order the code happened to run in. That is not a cosmetic
+problem: it is the same blindness W5 exists to remove, one level up. Notes now accumulate through
+a single `add_note`, and a multi-bore section correctly reports both of its declines:
+
+    adaptive beading out of scope: multi-bore section; marching stopped early: a band split
+    into several bores - the material inward of that point is NOT filled
+
+**Two silent declines surfaced:**
+
+- **The multi-hole break in `march_bands`.** A band that splits into several bores ends the chain,
+  and the material inward of that point is not filled. This is precisely the family that cost an
+  eccentric bore 31% of its material with nothing in the log.
+- **The solid-cap brick stagger on a non-star section.** Unlike the weave, which was rebuilt to
+  need no angle, the stagger is still parametrized by angle about the centroid and is genuinely
+  undefined on a folded outline. Declining is right; declining silently means a solid cap's
+  interior rings stack into an aligned radial plane with nothing recording it.
+
+**The test caught itself being vacuous.** Its first version asked only that a note be non-empty,
+and passed while proving nothing - it was seeing an unrelated pre-existing note about adaptive
+beading being off, because of the empty-slot guard above. It now asserts the specific text. That
+is the fourth time in this campaign a green test turned out to be asserting nothing; the rule
+stands - a test is not evidence until you have watched it fail for the reason you intend.
+
+Every fence signature is byte-identical: W5 adds information, never geometry. Suite green at 178.
+
+## Queue addition (2026-08-27)
+
+**A combined battery over the Voronoi subsectioning.** The geometry battery covers what a single
+`ContourChain` can be - annulus, eccentric, lobed, crescent, solid, taper, thin. It does not cover
+what the multi-bore pipeline on `continuous-shell-multibore-and-infill` unlocks, and that is where
+the interesting cases are: two bores, bores of different sizes, a bore near a wall, cell CUT LINES
+where two Voronoi cells meet.
+
+That last one is the point. A cut line is an artificial face, and everything this campaign learned
+about faces says the interior generator will treat it as one - the serpentine turns at it, the
+sparsifier skins it (until told not to, as the pinch fix now does), and the weave anchors to it.
+Whether a peel runs along a cut line is the single question that merges the two workstreams, and
+no plate has ever asked it.
+
+Blocked on that branch being brought forward; it has diverged a long way from main. Recorded here
+so it is not rediscovered late.

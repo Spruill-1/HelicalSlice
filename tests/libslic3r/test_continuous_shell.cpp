@@ -2811,6 +2811,76 @@ TEST_CASE("The interior spiral stays off on a forced-solid layer", "[ContinuousS
     REQUIRE(solid_layer.pts == solid_no_spiral.pts);
 }
 
+TEST_CASE("A layer that builds never takes a weaker path in silence", "[ContinuousShell]") {
+    // The mode's contract is fail-loudly, and a layer that BUILDS but quietly takes a weaker path
+    // than the options asked for is the other half of it. That half was missing for a long time:
+    // seven decline sites wrote a note and nothing read it, and the blindness is what let an
+    // eccentric bore lose 31% of its material with nothing in the log.
+    //
+    // The notes now reach the log through LayerRegion. What this pins down is the contract
+    // itself - for each way a section can be refused a feature, the build either fails with a
+    // reason or succeeds carrying a note. Never succeeds saying nothing.
+    Flow flow(0.5f, 0.25f, 0.5f);
+
+    auto attempt = [&](const ExPolygon &shape, PrintRegionConfig &cfg, size_t layer, bool force_solid) {
+        Surfaces surfaces{ Surface(stInternal, shape) };
+        ExtrusionEntityCollection e;
+        std::string reason, note;
+        const bool built = ContinuousShellPathBuilder::build_cross_section(
+            surfaces, flow, 0.25, &cfg, e, &reason, false, layer, force_solid, {}, &note);
+        return std::make_tuple(built, reason, note);
+    };
+
+    SECTION("a multi-bore section: refused, or filled with a note - never silently short") {
+        // Two bores are a topology the marching does not model: it stops, and the material inward
+        // of that point is not filled. Whether the medial fallback then rescues the layer depends
+        // on the geometry, so the assertion is on the CONTRACT rather than on which branch runs.
+        Polygon outer, h1, h2;
+        for (int i = 0; i < 240; ++i) {
+            const double a = 2.0 * M_PI * i / 240.0;
+            outer.points.emplace_back(coord_t(scale_(14.0 * std::cos(a))),
+                                      coord_t(scale_(14.0 * std::sin(a))));
+        }
+        for (int i = 239; i >= 0; --i) {
+            const double a = 2.0 * M_PI * i / 240.0;
+            h1.points.emplace_back(coord_t(scale_(-6.0 + 3.5 * std::cos(a))),
+                                   coord_t(scale_(3.5 * std::sin(a))));
+            h2.points.emplace_back(coord_t(scale_( 6.0 + 3.5 * std::cos(a))),
+                                   coord_t(scale_(3.5 * std::sin(a))));
+        }
+        ExPolygons two = diff_ex(Polygons{outer}, Polygons{h1, h2});
+        REQUIRE(two.size() == 1);
+        REQUIRE(two.front().holes.size() == 2);
+
+        PrintRegionConfig cfg;
+        cfg.continuous_shell_infill_density.value = 25;
+        const auto [built, reason, note] = attempt(two.front(), cfg, 3, false);
+        INFO("built=" << built << " reason='" << reason << "' note='" << note << "'");
+        if (built)
+            REQUIRE_FALSE(note.empty());     // it filled something - it must say what it gave up
+        else
+            REQUIRE_FALSE(reason.empty());   // or it refused, with a reason
+    }
+
+    SECTION("a non-star solid cap: the brick stagger is declined, and says so") {
+        // The stagger shifts interior rings by angle about the centroid, which is genuinely
+        // undefined on a folded section - unlike the weave, which was rebuilt to need no angle.
+        // Declining is right. Declining in silence is not: the interior rings of a solid cap then
+        // stack into an aligned radial plane with nothing recording it.
+        PrintRegionConfig cfg;
+        cfg.continuous_shell_infill_density.value = 25;      // makes the cap want to stagger
+        cfg.continuous_shell_adaptive_beading.value = false; // the stagger is the C-lite path
+        // An ODD layer, because the stagger is only applied on odd ones.
+        const auto [built, reason, note] = attempt(make_deep_crescent(), cfg, 3, /*force_solid=*/true);
+        INFO("built=" << built << " reason='" << reason << "' note='" << note << "'");
+        REQUIRE(built);
+        // Assert the SPECIFIC note, not merely that some note exists. The first version of this
+        // test asked only that the note be non-empty, and passed while proving nothing: it was
+        // seeing an unrelated pre-existing note about adaptive beading being switched off.
+        REQUIRE(note.find("brick stagger declined") != std::string::npos);
+    }
+}
+
 TEST_CASE("Continuous shell density-0 signature table", "[.][ContinuousShellSig]")
 {
     const Flow flow(0.5f, 0.25f, 0.5f);

@@ -1461,9 +1461,23 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
 // chain ended by a pinch or a split has material continuing elsewhere instead.
 // Returns false only for topologies we still do not model (a solid band that grows a
 // hole) or on a band/point budget overflow, so the caller can hard-stop.
+// Record a way this layer took a weaker path than the options asked for.
+//
+// APPENDS rather than only filling an empty slot. Every site used to guard on the note being
+// empty, so a layer that declined twice reported once - and which one it reported depended on
+// the order the code happened to run in. A test written against that behaviour passed while
+// asserting nothing: it saw a pre-existing note from an unrelated decline and was satisfied.
+inline void add_note(std::string *note, const std::string &msg)
+{
+    if (note == nullptr) return;
+    if (! note->empty()) *note += "; ";
+    *note += msg;
+}
+
 bool march_bands(ExPolygon band, coord_t spacing, bool has_hole,
                  std::vector<std::vector<ExPolygon>> &chains, std::vector<char> &vanished,
-                 std::vector<char> &outer_pinch, size_t &point_count, bool outer_real = true)
+                 std::vector<char> &outer_pinch, size_t &point_count, bool &multi_hole,
+                 bool outer_real = true)
 {
     constexpr size_t max_chains = 4096;
     constexpr size_t max_points = 400000;
@@ -1487,9 +1501,14 @@ bool march_bands(ExPolygon band, coord_t spacing, bool has_hole,
                 }
                 // The remainder starts where this chain pinched out - an artificial end.
                 return march_bands(band, spacing, false, chains, vanished, outer_pinch,
-                                   point_count, /*outer_real=*/false);
+                                   point_count, multi_hole, /*outer_real=*/false);
             }
-            break;                          // bore split into several holes: not a topology we model
+            // Bore split into several holes: not a topology we model. This ABANDONS the material
+            // the chain would have covered from here inward, so it must be said out loud - a
+            // silent version of exactly this cost an eccentric bore 31% of its material with
+            // nothing in the log.
+            multi_hole = true;
+            break;
         }
         // A solid region that grows a hole is a topology we do not model.
         if (!has_hole && !band.holes.empty())
@@ -1521,7 +1540,7 @@ bool march_bands(ExPolygon band, coord_t spacing, bool has_hole,
         }
         for (const ExPolygon &comp : next)
             if (!march_bands(comp, spacing, !comp.holes.empty(), chains, vanished, outer_pinch,
-                             point_count, /*outer_real=*/false))
+                             point_count, multi_hole, /*outer_real=*/false))
                 return false;
         return true;
     }
@@ -1661,7 +1680,7 @@ bool apply_radial_serpentine(ContourChain &cc, const WovenInfill &woven, coord_t
     const size_t first = sl;
     const size_t last  = annular ? (n - sl - 1) : (n - 2);
     if (n <= 2 * sl || last < first + 1) {
-        if (degrade_note) *degrade_note = "serpentine declined: fewer than two buried rings to traverse";
+        add_note(degrade_note, "serpentine declined: fewer than two buried rings to traverse");
         return false;
     }
     const size_t M = last - first;                  // rings the traverse sweeps across
@@ -1685,7 +1704,7 @@ bool apply_radial_serpentine(ContourChain &cc, const WovenInfill &woven, coord_t
     for (size_t j = first; j <= last; ++j) {
         band.push_back(resample_ring(cc.loops[j], S, anchor, ccw));
         if (band.back().size() != S) {
-            if (degrade_note) *degrade_note = "serpentine declined: a buried ring would not resample";
+            add_note(degrade_note, "serpentine declined: a buried ring would not resample");
             return false;
         }
     }
@@ -1703,9 +1722,8 @@ bool apply_radial_serpentine(ContourChain &cc, const WovenInfill &woven, coord_t
         for (size_t i = 0; i < S; ++i)
             worst_step = std::max(worst_step, (band[k + 1][i] - band[k][i]).cast<double>().norm());
     if (worst_step > 4.0 * double(spacing)) {
-        if (degrade_note)
-            *degrade_note = "serpentine declined: rings do not correspond (chain is not a simple "
-                            "nested stack - multi-bore or pinched section)";
+        add_note(degrade_note, "serpentine declined: rings do not correspond (chain is not a "
+                               "simple nested stack - multi-bore or pinched section)");
         return false;
     }
 
@@ -1840,8 +1858,8 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
     if (woven.serpentine && woven.stride > 1 &&
         apply_radial_serpentine(cc, woven, spacing, layer_index, degrade_note))
         return;
-    if (woven.stride > 1 && !chain_thick_enough(cc, woven) && degrade_note)
-        *degrade_note = "continuous shell: wall too thin to sparsify - printed solid";
+    if (woven.stride > 1 && !chain_thick_enough(cc, woven))
+        add_note(degrade_note, "continuous shell: wall too thin to sparsify - printed solid");
     // Sparse WOVEN infill. Keep a solid shell of shell_loops rings on every free FACE and thin
     // the buried interior to the sparse stride, all carried by the SAME continuous bead. For a
     // SOLID chain the shell hugs the outer face and the fill thins toward the centre. For an
@@ -2124,6 +2142,13 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
                     cc.loops[j].points = std::move(moved);
                 }
             }
+        } else if (woven.solid_stagger > 0.0 && thick && !cc.star_ok && cc.plan == nullptr) {
+            // The brick stagger is still parametrized by angle about the centroid, so unlike the
+            // weave it is genuinely undefined on a folded section. Declining is right; declining
+            // in silence is not - the interior rings of a solid cap then stack into an aligned
+            // radial plane with nothing saying so.
+            add_note(degrade_note, "solid-cap brick stagger declined: section is not star-shaped, "
+                                   "so its interior rings stack aligned between layers");
         } else if (woven.solid_stagger > 0.0 && thick && cc.star_ok && cc.plan == nullptr) {
             // Solid cap/shell brick stagger (see build_cross_section). Shift only the interior rings
             // inward by solid_stagger this layer; the outer wall rings (< sl) and, for a tube, the
@@ -2193,9 +2218,9 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
         return {};
     }
     if (adaptive && region.holes.size() != 1) {
-        if (degrade_note)
-            *degrade_note = region.holes.empty() ? "adaptive beading out of scope: solid (no bore) section"
-                                                 : "adaptive beading out of scope: multi-bore section";
+        add_note(degrade_note, region.holes.empty()
+                                   ? "adaptive beading out of scope: solid (no bore) section"
+                                   : "adaptive beading out of scope: multi-bore section");
     }
     // Sparse infill no longer excludes the plan. Adaptive beading decides bead COUNTS and
     // WIDTHS; decimation decides which buried rings survive afterwards. They are orthogonal,
@@ -2213,7 +2238,8 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
         if (degrade_note && !note.empty())
             // A plan that was BUILT can still carry a note (the spiral declining is not the plan
             // declining), so say which happened rather than reporting every note as a fallback.
-            *degrade_note = (plan ? "interior spiral declined: " : "adaptive beading declined: ") + note;
+            add_note(degrade_note, (plan ? "interior spiral declined: "
+                                         : "adaptive beading declined: ") + note);
         if (plan) {
             ContourChain cc;
             Polygons pr = plan_rings(*plan);
@@ -2250,11 +2276,16 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
     std::vector<char> vanished;
     std::vector<char> outer_pinch;
     size_t point_count = 0;
+    bool   multi_hole  = false;
 
     ExPolygons current = offset_ex(ExPolygons{ region }, -float(width) / 2.f);
     for (const ExPolygon &seed : current)
-        if (!march_bands(seed, spacing, !seed.holes.empty(), chains, vanished, outer_pinch, point_count))
+        if (!march_bands(seed, spacing, !seed.holes.empty(), chains, vanished, outer_pinch,
+                         point_count, multi_hole))
             return {};
+    if (multi_hole)
+        add_note(degrade_note, "marching stopped early: a band split into several bores - the "
+                               "material inward of that point is NOT filled");
 
     std::vector<ContourChain> out;
 
@@ -2618,8 +2649,8 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     }
     // A forced-solid layer is no longer a reason for the plan to be off, so the only remaining
     // one at this point is the option itself.
-    if (degrade_note != nullptr && config != nullptr && ! adaptive)
-        *degrade_note = "adaptive beading disabled by continuous_shell_adaptive_beading";
+    if (config != nullptr && ! adaptive)
+        add_note(degrade_note, "adaptive beading disabled by continuous_shell_adaptive_beading");
     std::string plan_fail;
     const std::vector<ContourChain> chains = contour_spiral(merged.front(), flow, layer_index, woven, width_limits,
                                                             adaptive, layer_height, spiral_wanted, junction_ramp, cs_seam_theta,
