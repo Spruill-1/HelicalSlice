@@ -2590,13 +2590,24 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     } else {
         woven = woven_infill_params(config);
     }
-    // Adaptive beading (C-full) applies only to dense (non-force-solid) sections; the
-    // solid caps keep their serpentine/stagger machinery untouched. The interior
-    // spiral (phase B) additionally requires the plan and anchors its arm phase to
-    // this layer's seam angle (computed here exactly as spiralize_rings computes it,
-    // so the spiral's junctions precess with the seam).
-    const bool adaptive = config != nullptr && config->continuous_shell_adaptive_beading.value && !force_solid;
-    const bool   spiral_wanted = adaptive && config->continuous_shell_interior_spiral.value;
+    // Adaptive beading (C-full) applies to forced-solid layers too.
+    //
+    // It used to be switched off for them, so a top/bottom shell - or any shell over air - fell
+    // back to C-lite marching for its bead COUNTS while the layers above and below were planned.
+    // The two disagree on how many beads a wall of given thickness takes, so the count stepped at
+    // the boundary between a solid layer and its neighbours, and the step is visible: on the S5
+    // cone it printed as a doubled lip at the bore, where the solid cap laid a different number
+    // of beads than the wall it sat on.
+    //
+    // Beading decides bead counts and widths; force_solid decides whether the interior is
+    // sparsified. Those are orthogonal, and coupling them is the same mistake W3 fixed for
+    // sparse infill - which cost a 2.035 mm wall four stretched beads instead of five.
+    //
+    // The solid caps keep their serpentine and brick-stagger machinery untouched. The interior
+    // SPIRAL stays gated on force_solid: it reorganises the buried interior into one migrating
+    // arm, which is not what a solid cap is for.
+    const bool adaptive = config != nullptr && config->continuous_shell_adaptive_beading.value;
+    const bool   spiral_wanted = adaptive && !force_solid && config->continuous_shell_interior_spiral.value;
     const double junction_ramp = (config != nullptr)
                                ? std::clamp(config->continuous_shell_junction_ramp.value / 100.0, 0.05, 1.0) : 1.0;
     double cs_seam_theta = 0.0;
@@ -2605,14 +2616,10 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         const double jitter_rad = 0.10 * (config->continuous_shell_seam_jitter.value / 100.0);
         cs_seam_theta = double(layer_index) * step_rad + jitter_rad * seam_jitter_walk(layer_index);
     }
-    // Pre-set the note for the two ways adaptive beading can be off before contour_spiral is even
-    // reached; it folds force_solid into `adaptive` and cannot tell them apart from in there.
-    if (degrade_note != nullptr && config != nullptr && ! adaptive) {
-        *degrade_note = config->continuous_shell_adaptive_beading.value
-            ? "adaptive beading OFF: forced-solid cap/shell layer (a top/bottom shell, or a shell "
-              "over air) - wall bead counts fall back to C-lite marching"
-            : "adaptive beading disabled by continuous_shell_adaptive_beading";
-    }
+    // A forced-solid layer is no longer a reason for the plan to be off, so the only remaining
+    // one at this point is the option itself.
+    if (degrade_note != nullptr && config != nullptr && ! adaptive)
+        *degrade_note = "adaptive beading disabled by continuous_shell_adaptive_beading";
     std::string plan_fail;
     const std::vector<ContourChain> chains = contour_spiral(merged.front(), flow, layer_index, woven, width_limits,
                                                             adaptive, layer_height, spiral_wanted, junction_ramp, cs_seam_theta,

@@ -2748,6 +2748,69 @@ TEST_CASE("Radial serpentine is inert when its option is off", "[ContinuousShell
     }
 }
 
+TEST_CASE("A forced-solid layer keeps adaptive beading", "[ContinuousShell]") {
+    // force_solid used to switch adaptive beading off, so a top/bottom shell - or any shell over
+    // air - fell back to C-lite marching for its bead COUNTS while the layers above and below
+    // were planned. The two disagree on how many beads a wall of a given thickness takes, so the
+    // count stepped at the boundary between a solid layer and its neighbours. On the S5 cone that
+    // printed as a doubled lip at the bore: the solid cap laid a different number of beads than
+    // the wall it sat on.
+    //
+    // Beading decides bead counts and widths; force_solid decides whether the interior is
+    // sparsified. They are orthogonal, and coupling them is the same mistake W3 fixed for sparse
+    // infill, which cost a 2.035 mm wall four stretched beads instead of five.
+    //
+    // At density 0 nothing sparsifies and the brick stagger is off, so a forced-solid layer
+    // should now be geometrically IDENTICAL to an ordinary one - and identical is the strongest
+    // form the claim can take, so it is asserted rather than a tolerance.
+    Flow flow(0.5f, 0.25f, 0.5f);
+    Surfaces surfaces{ Surface(stInternal, make_annulus(10.0, 6.0)) };
+
+    PrintRegionConfig on;
+    on.continuous_shell_adaptive_beading.value = true;
+    PrintRegionConfig off;
+    off.continuous_shell_adaptive_beading.value = false;
+
+    const CsSig plain  = cs_signature(surfaces, flow, on,  /*layer_index=*/4, /*force_solid=*/false);
+    const CsSig solid  = cs_signature(surfaces, flow, on,  /*layer_index=*/4, /*force_solid=*/true);
+    const CsSig clite  = cs_signature(surfaces, flow, off, /*layer_index=*/4, /*force_solid=*/false);
+
+    INFO("planned " << plain.pts.size() << " pts, forced-solid " << solid.pts.size()
+         << " pts, C-lite " << clite.pts.size() << " pts");
+    // The premise: the two beading modes really do differ on this wall, or the test proves nothing.
+    REQUIRE(plain.pts.size() != clite.pts.size());
+    // A forced-solid layer now plans exactly as its neighbours do...
+    REQUIRE(solid.pts == plain.pts);
+    // ...and no longer falls back to the C-lite layout, which is what stepped the count.
+    REQUIRE_FALSE(solid.pts == clite.pts);
+}
+
+TEST_CASE("The interior spiral stays off on a forced-solid layer", "[ContinuousShell]") {
+    // Adaptive beading now survives force_solid, but the interior spiral must not: it reorganises
+    // the buried interior into one migrating arm, which is not what a solid cap is for. The two
+    // rode on the same flag before, so this pins the half that was NOT meant to change.
+    Flow flow(0.5f, 0.25f, 0.5f);
+    Surfaces surfaces{ Surface(stInternal, make_annulus(12.0, 8.0 * flow.spacing() + (0.5 - flow.spacing()))) };
+
+    PrintRegionConfig cfg;
+    cfg.continuous_shell_adaptive_beading.value  = true;
+    cfg.continuous_shell_interior_spiral.value   = true;
+
+    const CsSig spiral_layer = cs_signature(surfaces, flow, cfg, /*layer_index=*/4, /*force_solid=*/false);
+    const CsSig solid_layer  = cs_signature(surfaces, flow, cfg, /*layer_index=*/4, /*force_solid=*/true);
+
+    PrintRegionConfig no_spiral = cfg;
+    no_spiral.continuous_shell_interior_spiral.value = false;
+    const CsSig solid_no_spiral = cs_signature(surfaces, flow, no_spiral, /*layer_index=*/4, /*force_solid=*/true);
+
+    INFO("spiral layer " << spiral_layer.pts.size() << " pts, forced-solid " << solid_layer.pts.size()
+         << " pts, forced-solid with the spiral option off " << solid_no_spiral.pts.size() << " pts");
+    // The premise: the spiral really does change this wall when it is allowed to run.
+    REQUIRE(spiral_layer.pts.size() != solid_no_spiral.pts.size());
+    // On a forced-solid layer the spiral option makes no difference - it is declined either way.
+    REQUIRE(solid_layer.pts == solid_no_spiral.pts);
+}
+
 TEST_CASE("Continuous shell density-0 signature table", "[.][ContinuousShellSig]")
 {
     const Flow flow(0.5f, 0.25f, 0.5f);

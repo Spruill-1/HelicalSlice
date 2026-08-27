@@ -1520,3 +1520,65 @@ is likely right.
 The instrument now exists to settle it, which it did not before. The next step on this object is
 to plot ring 3's displacement against arc length either side and look, rather than to reason
 about it.
+
+### Queue (2026-08-27)
+
+**Parked, with everything needed to resume:**
+
+1. **The eccentric object's remaining solid chunk.** The pinch-boundary fix cut its path 20.7% and
+   the chunk visibly shrank, so a second and smaller contributor is still there. Start from the
+   fact that P3_ecc is the only object on the battery that emits TWO chains per layer; the first
+   contributor was each chain skinning its own pinch end. Check what else is per-chain: the
+   `chain_thick_enough` gate, the shell allowance at the chain's INNER end (the terminus), and
+   whether the second chain's own gap cap re-decides its ring count independently.
+
+2. **The crescent's concave side.** Tied 5.1% against 45.8% convex at the anchor interface, 0.0%
+   against 27.1% one ring in. Cause UNIDENTIFIED - four candidates ruled out by measurement (gap
+   geometry, weave not applying, failure to reach, lobe starvation), five hypotheses dead. The
+   instrument to settle it now exists and did not before: `CS_DUMPRINGS=<layer>` plus
+   `tools/ringanalyse.py`. The next step is a desk exercise, not a print: plot ring 3's
+   displacement against arc length either side of the concavity and look at it.
+
+Both are real but neither is the common case, and the annulus, eccentric, lobed, solid, taper and
+thin-wall geometries are all in acceptable shape. Proceeding to W4.
+
+### W4 (2026-08-27): a forced-solid layer keeps adaptive beading
+
+`force_solid` used to switch adaptive beading off, so a top/bottom shell - or any shell over air -
+fell back to C-lite marching for its bead COUNTS while the layers above and below were planned.
+The two disagree on how many beads a wall of a given thickness takes, so the count STEPPED at the
+boundary between a solid layer and its neighbours. On the S5 cone that printed as a doubled lip at
+the bore, where the solid cap laid a different number of beads than the wall it sat on.
+
+Beading decides bead counts and widths; force_solid decides whether the interior is sparsified.
+They are orthogonal, and coupling them is the same mistake W3 fixed for sparse infill - which cost
+a 2.035 mm wall four stretched beads instead of five.
+
+The fix is one clause. What makes it convincing is the signature table, where the forced-solid row
+used to be byte-identical to the adaptive-OFF row and is now byte-identical to the adaptive one:
+
+| fixture row | before | after |
+|---|---|---|
+| `adaptive=0` (C-lite) | `803b06085a5e` | `803b06085a5e` |
+| `adaptive=1` | `86d421e06ffb` | `86d421e06ffb` |
+| **`force_solid`** | **`803b06085a5e`** | **`86d421e06ffb`** |
+
+2758 points and 624.2 mm become 2561 and 580.2 - exactly its neighbours' layout. Coverage moves
+from 1.056 to 0.982, which is the adaptive path's own figure on this fixture (its plain row reads
+0.982 and its spiral row 0.968), so this is the solid layer adopting the plan's coverage rather
+than a new deviation. Absolute error against a full layer improves, 5.6% over to 1.8% under.
+
+**The fence moved, deliberately, and only where it should.** Four force_solid rows exist; the two
+annulus rows changed and the two solid-disc rows did not, because the plan declines on a section
+with no bore. No other row moved.
+
+On the plates: bottom-shell layers shift by 0.24 mm at p99 and **the mid-wall is bit-identical**
+(0.0000 mm) on every object. The eccentric and crescent objects do not move even in their bottom
+shells - the first is multi-chain, the second has no bore.
+
+The interior SPIRAL stays gated on force_solid and has its own test, because the two used to ride
+the same flag and only one of them was meant to change.
+
+**Not yet print-validated.** The defect this fixes was seen on the S5 cone, which is not on any
+current plate. The geometry to reprint is the S5 cone; what to look for is the bore lip, which
+should no longer be doubled.
