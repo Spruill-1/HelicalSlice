@@ -2145,3 +2145,34 @@ So both changes are now print-validated:
 - **W4** by the absence of the defect: no step where the cap meets the wall. Weaker evidence, as
   recorded when the plate was built - there is no same-plate control for it - but the signature
   table already showed the forced-solid layer adopting its neighbours' layout exactly.
+
+## The axial core in a solid section (2026-08-27) - pre-existing, queued
+
+The blind-bore part has a solid column running the full height BELOW its floor, coaxial with the
+bore and narrower than it. That is not the W6 mask, and not the shell band under the floor - it is
+present on layers nowhere near either, and the slicer emits no decline note for the object at all.
+
+**It is the medial core of a solid section.** Below the floor R2 is a plain cylinder, and a
+concentric fill of a solid section has every ring converging on the axis. The terminus ring and
+its pinned anchor are always kept, so within roughly r = 2.5 mm several rings survive whatever the
+density asks for. Path lying inside r = 2.5 mm, by layer:
+
+    layers 3-17:   45, 17, 45, 17, 45, 17 ... mm   every layer occupied, alternating
+    layers 24+:    0 mm                            above the floor, where the bore is
+
+The core area inside r = 2.5 mm is 19.6 mm2, and 45 mm of bead at 0.4 mm wide covers about 18 of
+them - so odd layers are nearly solid there and even layers about a third. Stacked, that reads as
+a solid column. It stops dead at the floor because the bore replaces it, which is why it appears
+aligned with the bore: same axis, not the same cause.
+
+**Not a regression.** Those layers are not forced solid, so neither W4 nor W6 touches them. This
+is how a solid section has always been filled; the blind-bore geometry simply made it visible by
+putting a bore directly above it.
+
+**The odd/even alternation is unexplained.** It is not the brick stagger, which only runs on
+forced-solid layers. `reverse_path` alternates with layer parity and would move where the terminus
+lands, which is a candidate and nothing more.
+
+**Queued** alongside the eccentric solid chunk, which is plausibly the same family: both are
+places where the fill is denser than the density setting asks, and in both the mechanism sits
+near a chain end rather than in the weave.
