@@ -1377,3 +1377,44 @@ SOLID chain - and each chain then carries its own shell allowance, or fails `cha
 and prints solid. That is a hypothesis, not a measurement: it has not been confirmed, and the
 sparsifier's behaviour on multi-chain sections has not been looked at. Recorded so it is not
 mistaken for a settled account.
+
+### PlateP reprint (2026-08-27): crescent much improved, eccentric solidity DIAGNOSED
+
+The crescent now peels only on its **concavity side** - the rest of it holds - and no other object
+regressed. So weaving the non-star path was the right fix and it worked; what remains on that
+object is localised to the concave region rather than general.
+
+### The eccentric object's solid ring: confirmed, and it is a chain boundary
+
+Two probes failed before the right one, both worth recording because they looked plausible:
+
+- **Counting separate extrusion runs per layer** gave P3_ecc 4 and P4_lobed 242, which would have
+  meant severe fragmentation. Both were artifacts: continuous shell emits Z on nearly every move
+  for the ramp, and the run-counter treated Z-only moves as breaks.
+- **Counting retractions and travels** returned ZERO of each for every object - correct, and it
+  disproves fragmentation outright, because continuous shell links everything into one path with
+  connectors rather than travels. Which also means travels can never reveal chain structure.
+
+Instrumenting the slicer directly settles it:
+
+| object | chains per layer |
+|---|---|
+| P1_sparse | 1 |
+| P4_lobed | 1 |
+| P5_crescent | 1 |
+| **P3_ecc** | **2** |
+
+An eccentric wall pinches closed on its thin side before its thick side, so `march_bands` ends the
+annular chain there and continues the remainder as a SECOND chain. Each chain then applies
+`shell_loops` at both of its own ends - but the end where the two chains meet is a PINCH
+ARTIFACT, not a real surface. Those interior shells are the solid ring, and they explain the
+whole measurement: 63% wall coverage against 44% for a plain wall, tracking thickness, with a run
+of one-slot gaps mid-wall where two chains' shells sit back to back.
+
+Note this is unrelated to the gap cap, which was the earlier guess. It is also not a decline: the
+slicer emits no degrade note for this object at all.
+
+**The fix, specified but not built:** a chain needs to know whether each of its ends is a real
+face or a pinch, and apply the solid shell allowance only at real faces. The information exists
+at the moment of the split - `march_bands` continues when a band loses its hole, and that
+continuation point is exactly the artificial end.
