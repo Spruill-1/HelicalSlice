@@ -2119,3 +2119,29 @@ control, because W4's old behaviour cannot be reproduced per object (it was a di
 between two beading paths, and switching adaptive off changes both). The comparison available is
 against the S5 cone already in hand, which is a different geometry. What R1 can show on its own is
 the absence of a step at the cap boundary, which is what the defect looked like.
+
+## PlateR result (2026-08-27): W4 and W6 validated in plastic
+
+The plate came out well. The blind-bore object shows a compact solid column under the bore with
+properly foamed material around and below it - which is W6 doing exactly what it was built to do.
+No object showed a regression.
+
+**One reading corrected, because the direction matters.** The solid column looked smaller than the
+bore by eye. Measured, it is slightly LARGER: solid extends to r = 4.6 mm on the masked layers
+against a bore radius of 4.0 mm. That is the bore footprint grown by about a wall thickness
+(`wall_loops * spacing` = 0.79 mm, trimmed a little by whole-ring granularity), and the direction
+is the whole point - a solid region NARROWER than the bore would leave the floor's rim sitting on
+foam, which is the failure the grow term exists to prevent.
+
+What reads as "small" is its HEIGHT: the column is only as tall as the shell count, about five
+layers or 1.25 mm, where before W6 those same layers were solid edge to edge out to r = 10 mm.
+The layer below the shell band measures solid only to r = 2.3 mm, which is not the mask at all -
+it is the naturally dense core near the axis of a solid section.
+
+So both changes are now print-validated:
+
+- **W6** directly and unambiguously: the floor is solid where the bore sits and foam elsewhere,
+  and the G-code showed 29-41% less path on those layers with the layers away from them untouched.
+- **W4** by the absence of the defect: no step where the cap meets the wall. Weaker evidence, as
+  recorded when the plate was built - there is no same-plate control for it - but the signature
+  table already showed the forced-solid layer adopting its neighbours' layout exactly.
