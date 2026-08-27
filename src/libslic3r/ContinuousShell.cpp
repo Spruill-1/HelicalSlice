@@ -4,6 +4,7 @@
 
 #include "Arachne/BeadingStrategy/BeadingStrategyFactory.hpp"
 #include "ClipperUtils.hpp"
+#include "KDTreeIndirect.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -1781,6 +1782,14 @@ bool apply_radial_serpentine(ContourChain &cc, const WovenInfill &woven, coord_t
 // One definition of "this chain has buried rings to thin", used by the sparsifier and by the
 // C-lite deficit correction that must stand aside for it. They were two separate expressions
 // and had to agree; now they cannot drift.
+// Deliberately counts a full outer shell even where the outer end is a PINCH and the sparsifier
+// will hold no shell there (sl_out). Correcting the arithmetic was tried and reverted: it makes a
+// three-ring pinch chain eligible, and such a chain cannot be thinned anyway - two infill rings
+// and a terminus, with the distribution obliged to anchor both ends - so the only effect is to
+// start weaving it. Measured on the eccentric object's deep pocket, that turned its outer ring
+// from a 41 mm loop into an 80 mm one sweeping 4.2 mm of radius, because the ring it weaves
+// against is half its length and the gap to it is not a gap across the wall at all. The pocket
+// still printed solid, and the "too thin to sparsify" note stopped being emitted for it.
 bool chain_thick_enough(const ContourChain &cc, const WovenInfill &w)
 {
     return cc.has_bore ? cc.loops.size() > 2 * w.shell_loops + 1
@@ -1868,8 +1877,11 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
     if (woven.serpentine && woven.stride > 1 &&
         apply_radial_serpentine(cc, woven, spacing, layer_index, degrade_note))
         return;
-    if (woven.stride > 1 && !chain_thick_enough(cc, woven))
-        add_note(degrade_note, "continuous shell: wall too thin to sparsify - printed solid");
+    // The note is deferred to the OUTCOME, below: "no ring was dropped" is the thing that is
+    // true of the plastic, where "chain_thick_enough said no" is a proxy for it. They part
+    // company on a short chain whose span leaves the distribution no room to drop anything -
+    // that chain prints solid and the proxy says nothing about it.
+    const size_t rings_before = cc.loops.size();
     // Sparse WOVEN infill. Keep a solid shell of shell_loops rings on every free FACE and thin
     // the buried interior to the sparse stride, all carried by the SAME continuous bead. For a
     // SOLID chain the shell hugs the outer face and the fill thins toward the centre. For an
@@ -2034,30 +2046,40 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
                 // What a point actually needs is its distance to the neighbouring ring and the
                 // direction to it. Both are local: take the NEAREST point on that ring. No
                 // parameterisation, no correspondence, no centroid, no star-shape assumption, and
-                // nothing to gate on. The nearest point is walked rather than searched - adjacent
-                // points on one ring have adjacent nearest points on the next - so it stays linear.
-                auto nearest_walk = [](const Points &from, const Points &to) {
+                // nothing to gate on.
+                //
+                // It has to be the nearest point, though, and not a walk toward one. This used to
+                // hill-climb a single index forwards and backwards from the previous sample's
+                // answer, on the reasoning that adjacent points have adjacent neighbours. That
+                // holds until the section is concave: a ring wraps AROUND a notch, so a point
+                // facing it has one candidate across the gap and another round the far side of
+                // the notch, and the distance function has two basins. Once the index settles in
+                // the wrong one every later sample inherits it - the walk cannot cross the ridge
+                // between them, and the step guard cannot either.
+                //
+                // Measured on the crescent, every ring, over its concave stretch: the walk was
+                // wrong on 100% of samples, reporting a median gap of 5.206 mm where the true one
+                // is 1.189. The gap feeds the amplitude law directly (cap = weave * share *
+                // (gap - 0.8 * spacing)), so it permitted an excursion of 7.458 mm against a true
+                // 0.873 - and the crescent's concave rings moved 7.384. The same index also picks
+                // the DIRECTION of the excursion, and carries the phase field from ring to ring,
+                // so one wrong answer spoiled the amplitude, the direction and the phase at once.
+                // That is the crescent's concave side, which four measurements and five
+                // hypotheses had failed to account for.
+                //
+                // Convex geometry is untouched: there the walk already agreed with the true
+                // nearest on over 98% of samples, and the remainder differed by under 0.02 mm.
+                auto nearest_on = [](const Points &from, const Points &to) {
                     std::vector<size_t> idx(from.size(), 0);
                     if (from.empty() || to.empty()) return idx;
-                    size_t k = 0;
-                    double best = std::numeric_limits<double>::max();
-                    for (size_t t = 0; t < to.size(); ++t) {
-                        const double d = (to[t] - from[0]).cast<double>().squaredNorm();
-                        if (d < best) { best = d; k = t; }
-                    }
-                    idx[0] = k;
-                    for (size_t i = 1; i < from.size(); ++i) {
-                        double cur = (to[k] - from[i]).cast<double>().squaredNorm();
-                        for (int guard = 0; guard < 64; ++guard) {
-                            const size_t kn = (k + 1) % to.size();
-                            const double dn = (to[kn] - from[i]).cast<double>().squaredNorm();
-                            if (dn < cur) { cur = dn; k = kn; continue; }
-                            const size_t kp = (k + to.size() - 1) % to.size();
-                            const double dp = (to[kp] - from[i]).cast<double>().squaredNorm();
-                            if (dp < cur) { cur = dp; k = kp; continue; }
-                            break;
-                        }
-                        idx[i] = k;
+                    auto coord = [&to](size_t i, size_t dim) -> double {
+                        return dim == 0 ? double(to[i].x()) : double(to[i].y());
+                    };
+                    KDTreeIndirect<2, double, decltype(coord)> tree(coord, to.size());
+                    for (size_t i = 0; i < from.size(); ++i) {
+                        const std::array<double, 2> q{ double(from[i].x()), double(from[i].y()) };
+                        const size_t k = find_closest_point(tree, q);
+                        idx[i] = (k == decltype(tree)::npos) ? 0 : k;
                     }
                     return idx;
                 };
@@ -2122,7 +2144,7 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
                                 ? woven.lobes * 2.0 * M_PI * (cum[i] / tot) : 0.0;
                         (void)run;
                     } else {
-                        const std::vector<size_t> up = nearest_walk(pts, before[j - 1].points);
+                        const std::vector<size_t> up = nearest_on(pts, before[j - 1].points);
                         for (size_t i = 0; i < pts.size(); ++i)
                             basephase[j][i] = basephase[j - 1][up[i]];
                     }
@@ -2135,10 +2157,36 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
                     ++infill_ring;
                     const Points &me = before[j].points;
                     if (me.size() < 8) continue;
-                    const std::vector<size_t> io = (j > 0)      ? nearest_walk(me, before[j - 1].points)
+                    const std::vector<size_t> io = (j > 0)      ? nearest_on(me, before[j - 1].points)
                                                                 : std::vector<size_t>();
-                    const std::vector<size_t> ii = (j + 1 < NR) ? nearest_walk(me, before[j + 1].points)
+                    const std::vector<size_t> ii = (j + 1 < NR) ? nearest_on(me, before[j + 1].points)
                                                                 : std::vector<size_t>();
+                    // A neighbour further off than a wall crossing is not a neighbour.
+                    //
+                    // The nearest point on the next ring is the right thing to weave toward while
+                    // the two rings FACE each other. Where the next ring ends, or is much shorter
+                    // than this one, the nearest point on it is round its end - along the wall,
+                    // not across it - and the law then sizes an excursion from a distance that
+                    // crosses no material at all. Worse, another chain's rings can be sitting in
+                    // that space: band marching splits a wall into chains, and a chain measures
+                    // gaps only within itself, so it reads a void where its neighbour chain's
+                    // material is.
+                    //
+                    // Measured on the eccentric object, whose wall marches into two chains: the
+                    // first chain's rings 3 and 4 sit a median 3.716 mm apart with the SECOND
+                    // chain's three rings in between them. The law read that as the gap to close,
+                    // permitted 5.063 mm of excursion, and flung both rings 2.53 mm into the
+                    // pocket the other chain had already filled. That is the solid chunk that
+                    // survived the pinch-boundary fix.
+                    //
+                    // The bound is the one the sparsifier already guarantees on the other side:
+                    // it raises the kept-ring count until no gap exceeds CS_MAX_GAP_SLOTS, and
+                    // consecutive band contours are one spacing apart, so a real crossing between
+                    // kept rings is at most that many spacings. The half-slot is margin, so a gap
+                    // that IS exactly at the cap - the crescent's 1.189 mm - is not excluded by
+                    // rounding. Per POINT, not per ring: a ring can face its neighbour over most
+                    // of its length and run past its end for the rest.
+                    const double reach = (CS_MAX_GAP_SLOTS + 0.5) * double(spacing);
                     Points moved(me.size());
                     for (size_t i = 0; i < me.size(); ++i) {
                         const Vec2d here = me[i].cast<double>();
@@ -2146,13 +2194,13 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
                         double g_out = 0.0, g_in = 0.0;
                         if (!io.empty()) {
                             const Vec2d d = before[j - 1].points[io[i]].cast<double>() - here;
-                            g_out = d.norm();
-                            if (g_out > 1e-9) out += d / g_out;
+                            const double g = d.norm();
+                            if (g > 1e-9 && g <= reach) { g_out = g; out += d / g; }
                         }
                         if (!ii.empty()) {
                             const Vec2d d = here - before[j + 1].points[ii[i]].cast<double>();
-                            g_in = d.norm();
-                            if (g_in > 1e-9) out += d / g_in;
+                            const double g = d.norm();
+                            if (g > 1e-9 && g <= reach) { g_in = g; out += d / g; }
                         }
                         const double len = out.norm();
                         if (len < 1e-9) { moved[i] = me[i]; continue; }
@@ -2201,6 +2249,8 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
             }
         }
     }
+    if (woven.stride > 1 && rings_before > 2 && cc.loops.size() == rings_before)
+        add_note(degrade_note, "continuous shell: wall too thin to sparsify - printed solid");
 }
 
 

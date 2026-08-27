@@ -1176,11 +1176,21 @@ TEST_CASE("Continuous shell weaves a non-star (crescent) section", "[ContinuousS
     // Sparse decimation still applies on the folded section (it drops rings, no parametrization).
     REQUIRE(xy_len(sparse) < 0.85 * xy_len(solid));
 
-    // The weave now APPLIES. An undulating ring is longer than the smooth one it replaced, and
-    // the margin is well outside anything resampling noise could produce - measured at +13% on
-    // the PlateP crescent, against +0.0% before the rebuild.
+    // The weave APPLIES, and it applies WITHIN ITS BUDGET. Both halves are the same law.
+    //
+    // An undulating ring is longer than the smooth one it replaced, and by a bounded amount: a
+    // ring carries `lobes` lobes, each costing four radial traverses of the amplitude, and the
+    // amplitude is capped at the gap to the neighbour less the closure allowance
+    // (cap = weave * share * (gap - 0.8 * spacing)). So the surplus has a ceiling as well as a
+    // floor, and a bead that travels further than the law allows shows up as surplus too.
+    //
+    // This used to assert the floor alone, at 4%. That reads the wrong way round: excess path is
+    // produced MORE readily by a bead going somewhere it should not than by one weaving properly.
+    // On this fixture the broken nearest-point search (see below) scored 10.5% and the correct one
+    // scores 2.2% - the old assertion was satisfied twice as well by the defect as by the fix.
     INFO("sparse " << xy_len(sparse) << " mm, woven " << xy_len(woven) << " mm");
-    REQUIRE(xy_len(woven) > 1.04 * xy_len(sparse));
+    REQUIRE(xy_len(woven) > 1.015 * xy_len(sparse));
+    REQUIRE(xy_len(woven) < 1.060 * xy_len(sparse));
 
     // ...and it stays honest. Every point inside the section it belongs to.
     size_t outside = 0;
@@ -1189,8 +1199,29 @@ TEST_CASE("Continuous shell weaves a non-star (crescent) section", "[ContinuousS
     INFO(outside << " of " << woven.size() << " woven points outside the crescent");
     REQUIRE(outside == 0);
 
-    // No bead is displaced further than the wall could possibly allow. The old gate's stated
-    // fear was a bead dragged "half the section width" off its ring; bound it explicitly.
+    // No bead is displaced further than the amplitude law allows.
+    //
+    // The law is cap = weave * share * (gap - 0.8 * spacing): a bead reaches for the neighbouring
+    // ring and stops short of it by the closure allowance, so it lands within a ring gap of the
+    // unwoven geometry - its own ring or the one it is reaching for, whichever is nearer.
+    //
+    // That nearest point on the neighbouring ring used to be WALKED: an index carried from sample
+    // to sample and hill-climbed forwards and backwards. A concavity gives the distance along
+    // that ring two basins - the ring wraps around the notch, so a point has one candidate across
+    // the gap and another round the far side - and once the index settled in the wrong basin
+    // every later sample inherited it. The gap it then reported was the WRONG gap, and the law
+    // sized the excursion from it. Measured on the printed crescent, over its concave stretch:
+    // wrong on 100% of samples, a median reported gap of 5.206 mm where the true one is 1.189, an
+    // excursion of 7.384 mm where the law allows 0.873 - and an interface welded over 5.7% of its
+    // length against 41.5% on the convex side. Searching for the nearest point instead put those
+    // at 38.1% and 41.5%.
+    //
+    // This bound does NOT catch that, and the measurement is recorded here so nobody re-derives
+    // it: with the walk it read 0.555 mm and with the search 0.592 mm, on a 2.4 mm allowance. A
+    // bead displaced 7 mm from ITS OWN ring lands on top of a NEIGHBOURING ring, so its distance
+    // to the nearest unwoven bead stays small - which is also why the printed defect was stacked
+    // material and an unwelded interface rather than a bead in mid-air. The surplus-path window
+    // above is what separates the two; this stays as the containment check it always was.
     coord_t xmin = std::numeric_limits<coord_t>::max(), xmax = std::numeric_limits<coord_t>::lowest();
     coord_t ymin = xmin, ymax = xmax;
     for (const Point &p : crescent.contour.points) {
@@ -2399,6 +2430,68 @@ Surfaces cs_fence_disc(double r_out)
 }
 
 } // namespace
+
+TEST_CASE("A ring weaves toward the wall, not toward another chain's material", "[ContinuousShell]") {
+    // The weave sizes its excursion from the distance to the nearest point on the neighbouring
+    // ring: cap = weave * share * (gap - 0.8 * spacing). That is the right quantity while the two
+    // rings FACE each other across the wall. It stops being one where the neighbouring ring ends,
+    // or where something else has filled the space between them.
+    //
+    // Band marching splits a wall into chains where it pinches, and a chain measures gaps only
+    // within itself - so the outer chain of an eccentric wall reads the whole depth of the pocket
+    // beyond it as a gap, while the next chain's rings are sitting in that pocket. Measured on
+    // the printed eccentric object: its first chain's rings 3 and 4 lie a median 3.716 mm apart
+    // with the second chain's three rings between them, the law permitted 5.063 mm of excursion,
+    // and both rings were flung 2.53 mm into a pocket that was already full. That is the solid
+    // chunk which survived the pinch-boundary fix.
+    //
+    // The bound comes from the sparsifier, which guarantees the other side of the same property:
+    // it raises the kept-ring count until no gap exceeds CS_MAX_GAP_SLOTS, and band contours are
+    // one spacing apart, so a genuine crossing between kept rings is at most that many spacings.
+    //
+    // A 2 mm bore offset is the fixture that marches into more than one chain (the signature
+    // table shows it taking the pinch path); 0.5 mm does not, and is the control.
+    Flow flow(0.5f, 0.25f, 0.5f);
+    auto surplus = [&](Surfaces surfaces) {
+        auto measure = [&](int density, int weave) {
+            PrintRegionConfig cfg;
+            cfg.wall_loops.value = 2;
+            cfg.continuous_shell_infill_density.value = density;
+            cfg.continuous_shell_infill_weave.value   = weave;
+            const std::vector<Point3> pts = cs_path_points(surfaces, flow, cfg, 3, false);
+            double len = 0.0;
+            for (size_t i = 1; i < pts.size(); ++i)
+                len += (Point(pts[i].x(), pts[i].y()) - Point(pts[i-1].x(), pts[i-1].y()))
+                           .cast<double>().norm();
+            return len * SCALING_FACTOR;
+        };
+        const double sparse = measure(25, 0), woven = measure(25, 100);
+        INFO("sparse " << sparse << " mm, woven " << woven << " mm");
+        return woven / sparse;
+    };
+    // A 2 mm bore offset is where this wall marches into more than one chain (the signature
+    // table shows it taking the pinch path); 1 mm does not, and is the control. The bore radius
+    // matches the printed object's.
+    const double pinched = surplus(cs_fence_tube(10.0, 3.0, 2.0));
+    const double plain   = surplus(cs_fence_tube(10.0, 3.0, 1.0));
+    INFO("surplus: pinched wall " << 100.0 * (pinched - 1.0) << "%, single-chain wall "
+         << 100.0 * (plain - 1.0) << "%");
+
+    // The weave still applies to the pinched wall. This is a bound on where a ring may reach,
+    // not a switch that turns the lattice off wherever a wall splits.
+    REQUIRE(pinched > 1.01);
+
+    // ...and it costs a weave's worth of path, not a traverse of the pocket beyond. Measured on
+    // this fixture: 9.6% before the bound and 2.5% after, against a single-chain wall's 6.7%.
+    // A chain reaching through the next chain's rings buys nothing and costs more than every
+    // lobe on the ring put together.
+    REQUIRE(pinched < 1.05);
+
+    // The control is the load-bearing half: a wall that marches as ONE chain has no gap that is
+    // not a wall crossing, so the bound must not touch it. Byte-identical either way, and it
+    // weaves harder than the pinched wall does.
+    REQUIRE(plain > 1.04);
+}
 
 TEST_CASE("Every woven neighbour pair reaches a weld, whatever its gap", "[ContinuousShell]") {
     // The weave's amplitude used to be one scalar derived from the nominal stride K, on the
