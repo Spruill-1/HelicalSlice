@@ -2084,3 +2084,38 @@ every fence signature is unchanged.
 **Not print-validated.** The geometry that exercises it is a blind bore: a tube with a floor part
 way up, where the floor layer should now be solid over the bore and sparse in the wall. That is
 the object to slice.
+
+## PlateR (2026-08-27): the geometry W4 and W6 actually need
+
+Neither change was exercised by any existing plate - every one of them has its lid off and no
+internal surface, which is precisely the geometry that avoids force_solid. 9.05 g, 45 min.
+
+    R1_tube       plain tube, LID ON. Its top layers are forced solid AND annular, which is the
+                  case W4 changes. Look down the bore at the top face: no step where the cap
+                  meets the wall.
+    R2_blindbore  a bore starting part way up, so its FLOOR is an internal surface - the case W6
+                  is for. Cut it at the floor: solid disc in the middle, foam in the ring around.
+                  The bore opens UPWARD on purpose; a bore closed at the top would put a ceiling
+                  over air, and asking TPU to bridge 8 mm would test the bridge, not the mask.
+    R3_control    the validated annulus, unchanged by either change.
+
+**W6 measured end to end**, through the real LayerRegion mask rather than the unit test's
+hand-built one, by slicing the same plate with the mask suppressed:
+
+| layer | z | whole-layer solid | W6 mask | saved |
+|---|---|---|---|---|
+| 19 | 4.75 mm | 680 mm | 443 mm | 35% |
+| 20 | 5.00 mm | 813 mm | 577 mm | 29% |
+| 21 | 5.25 mm | 776 mm | 460 mm | 41% |
+| 22 | 5.50 mm | 813 mm | 575 mm | 29% |
+| 23 | 5.75 mm | 776 mm | 457 mm | 41% |
+
+21% less over the shell band under the floor, and the layers away from it are untouched - 0% at
+layers 16, 17 and 26, which is the containment that matters. Whole object 27896 -> 26525 mm.
+
+**What each object can and cannot settle.** R2 shows W6 in plastic directly: the floor either has
+foam in its outer ring or it does not. R1 is weaker evidence for W4 - there is no same-plate
+control, because W4's old behaviour cannot be reproduced per object (it was a disagreement
+between two beading paths, and switching adaptive off changes both). The comparison available is
+against the S5 cone already in hand, which is a different geometry. What R1 can show on its own is
+the absence of a step at the cap boundary, which is what the defect looked like.
