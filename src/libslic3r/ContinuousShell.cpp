@@ -32,6 +32,16 @@ struct WovenInfill {
     double zamp        = 0.0;       // Z amplitude, fraction of layer_height
     double zphase      = 1.5708;    // quadrature offset (rad) between the radial and Z waves
     bool   serpentine  = false;     // radial-traverse interior instead of concentric rings
+    // Where this layer must stay SOLID, when that is only part of the cross-section.
+    //
+    // force_solid is a whole-layer boolean: if any part of the section has air within the shell
+    // count, the ENTIRE section prints solid. For a genuine top or bottom shell that is right -
+    // the whole face is exposed. For an INTERNAL surface it is not: the floor of a blind bore
+    // needs solid over the bore's footprint, and the wall around it is buried and could stay
+    // sparse. That layer currently prints solid edge to edge.
+    //
+    // Empty means "no mask" - either the whole section is solid (force_solid) or none of it is.
+    const ExPolygons *solid_mask = nullptr;
     double solid_stagger = 0.0;     // radial inward shift (scaled) of a SOLID cap's interior rings this layer
 };
 WovenInfill woven_infill_params(const PrintRegionConfig *config)
@@ -1883,8 +1893,25 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
         const bool   annular = cc.has_bore;
         // is_infill on ORIGINAL indices: buried interior beyond the shell(s). Annular keeps a
         // shell at both ends; solid keeps the outer shell and the buried core (minus the terminus).
+        // A ring that carries part of the solid mask is never thinned away, wherever it sits in
+        // the stack. Granularity is a WHOLE RING, which is the natural unit here: the rings are
+        // closed loops and the machinery downstream chains closed loops, so keeping half of one
+        // would need open paths through the whole pipeline. It also happens to be the right unit
+        // for the case that motivates this - a bore floor needs its INNER rings solid, and those
+        // are whole rings.
+        auto touches_mask = [&](size_t i) -> bool {
+            if (woven.solid_mask == nullptr || woven.solid_mask->empty()) return false;
+            const Points &pts = cc.loops[i].points;
+            // Every eighth point: the mask is grown by a wall thickness before it gets here, so a
+            // ring either sits well inside it or well outside, and sampling cannot straddle that.
+            for (size_t k = 0; k < pts.size(); k += 8)
+                for (const ExPolygon &m : *woven.solid_mask)
+                    if (m.contains(pts[k])) return true;
+            return false;
+        };
         auto is_infill = [&](size_t i) -> bool {
             if (i < sl_out) return false;
+            if (touches_mask(i)) return false;          // must stay solid here
             return annular ? (i + sl < n) : (i + 1 < n);
         };
         const bool thick = chain_thick_enough(cc, woven);   // one definition, shared
@@ -2567,6 +2594,7 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
                                                      const PrintRegionConfig *config, ExtrusionEntityCollection &entities,
                                                      std::string *reason, bool reverse_path, size_t layer_index, bool force_solid,
                                                      const ContinuousShellWidthLimits &width_limits,
+                                                     const ExPolygons *solid_mask,
                                                      std::string *degrade_note)
 {
     ExPolygons regions;
@@ -2620,6 +2648,10 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         }
     } else {
         woven = woven_infill_params(config);
+        // Only part of the section needs to be solid (an internal surface such as a bore floor).
+        // The rings carrying it are kept whole; the rest of the wall still sparsifies.
+        if (solid_mask != nullptr && !solid_mask->empty())
+            woven.solid_mask = solid_mask;
     }
     // Adaptive beading (C-full) applies to forced-solid layers too.
     //

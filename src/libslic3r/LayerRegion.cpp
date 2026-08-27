@@ -43,6 +43,33 @@ static bool cs_air_within(const Layer *layer, int dir, int n, const ExPolygons &
     return false;
 }
 
+// WHERE the layer must stay solid, rather than merely whether it must.
+//
+// cs_air_within answers a yes/no question and the answer applies to the whole cross-section: if
+// any part of the footprint has air within the shell count, every ring in the layer is kept. For
+// a genuine top or bottom shell that is correct - the whole face is exposed. For an INTERNAL
+// surface it is not. The floor of a blind bore needs solid over the bore's footprint; the wall
+// around it is buried, and printing it solid edge to edge is material spent on nothing.
+//
+// This returns the union of the uncovered regions over those layers, grown by a wall thickness so
+// the solid patch is anchored into the surrounding wall rather than ending at the surface's edge.
+static ExPolygons cs_solid_mask(const Layer *layer, int dir, int n, const ExPolygons &here, coord_t grow)
+{
+    ExPolygons acc;
+    const Layer *l = layer;
+    for (int k = 0; k < n; ++k) {
+        l = (dir > 0) ? l->upper_layer : l->lower_layer;
+        if (l == nullptr)
+            return here;                                   // ran off the end of the part: all of it
+        for (const ExPolygon &e : diff_ex(here, l->lslices))
+            if (e.area() * SCALING_FACTOR * SCALING_FACTOR > 0.5)
+                acc.push_back(e);
+    }
+    if (acc.empty())
+        return {};
+    return intersection_ex(offset_ex(union_ex(acc), float(grow)), here);
+}
+
 Flow LayerRegion::flow(FlowRole role) const
 {
     return this->flow(role, m_layer->height);
@@ -199,11 +226,35 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         // a blind-bore cap). Detect those and fill the whole cross-section solid there, so the bead
         // still runs continuously but lays a dense Fermat base/cap instead of open infill.
         bool force_solid = false;
+        ExPolygons solid_mask;
         if (region_config.continuous_shell_infill_density.value > 0) {
             const int tsl = region_config.top_shell_layers.value;
             const int bsl = region_config.bottom_shell_layers.value;
             force_solid = (tsl > 0 && cs_air_within(this->layer(), +1, tsl, merged_slice))
                        || (bsl > 0 && cs_air_within(this->layer(), -1, bsl, merged_slice));
+            if (force_solid) {
+                // Ask WHERE, not just whether. A surface that covers the section keeps the old
+                // whole-layer behaviour byte for byte; one that covers only part of it - an
+                // internal surface such as a bore floor - now keeps solid just the rings that
+                // carry it, and the buried wall around it still sparsifies.
+                const coord_t grow = coord_t(std::max(1, region_config.wall_loops.value))
+                                   * this->flow(frExternalPerimeter).scaled_spacing();
+                ExPolygons m;
+                if (tsl > 0)
+                    append(m, cs_solid_mask(this->layer(), +1, tsl, merged_slice, grow));
+                if (bsl > 0)
+                    append(m, cs_solid_mask(this->layer(), -1, bsl, merged_slice, grow));
+                solid_mask = union_ex(m);
+                double mask_mm2 = 0.0, sect_mm2 = 0.0;
+                for (const ExPolygon &e : solid_mask) mask_mm2 += e.area();
+                for (const ExPolygon &e : merged_slice) sect_mm2 += e.area();
+                // Covering essentially all of it IS the whole-layer case; keep it on that path so
+                // real top and bottom shells are untouched.
+                if (sect_mm2 <= 0.0 || mask_mm2 >= 0.95 * sect_mm2)
+                    solid_mask.clear();
+                else
+                    force_solid = false;                   // partial: the mask decides, per ring
+            }
         }
         // Printable-width bounds for the adaptive bead width: the same object-scope percent
         // options (of the smallest nozzle) the Arachne generator honours. Unset options stay
@@ -227,7 +278,7 @@ void LayerRegion::make_perimeters(const SurfaceCollection &slices, const LayerRe
         if (ContinuousShellPathBuilder::build_cross_section(
                 slices.surfaces, this->flow(frExternalPerimeter), this->layer()->height, &region_config,
                 continuous_entities, &reason, (this->layer()->id() & 1u) != 0, size_t(this->layer()->id()), force_solid,
-                cs_width_limits, &degrade_note)) {
+                cs_width_limits, solid_mask.empty() ? nullptr : &solid_mask, &degrade_note)) {
             // The mode's contract is fail-loudly. A layer that BUILDS but silently takes a weaker
             // path than the options asked for is the other half of that contract: it must say so,
             // or a wall quietly loses bead count (and material) with nothing in the log.

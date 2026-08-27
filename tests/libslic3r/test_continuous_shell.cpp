@@ -2827,7 +2827,7 @@ TEST_CASE("A layer that builds never takes a weaker path in silence", "[Continuo
         ExtrusionEntityCollection e;
         std::string reason, note;
         const bool built = ContinuousShellPathBuilder::build_cross_section(
-            surfaces, flow, 0.25, &cfg, e, &reason, false, layer, force_solid, {}, &note);
+            surfaces, flow, 0.25, &cfg, e, &reason, false, layer, force_solid, {}, nullptr, &note);
         return std::make_tuple(built, reason, note);
     };
 
@@ -2881,6 +2881,70 @@ TEST_CASE("A layer that builds never takes a weaker path in silence", "[Continuo
     }
 }
 
+TEST_CASE("Only the masked part of a layer is forced solid", "[ContinuousShell]") {
+    // force_solid is a whole-layer boolean: if any part of the section has air within the shell
+    // count, EVERY ring in the layer is kept. For a genuine top or bottom shell that is right -
+    // the whole face is exposed. For an internal surface it is not. The floor of a blind bore
+    // needs solid over the bore's footprint; the wall around it is buried, and filling it solid
+    // edge to edge is material spent on nothing.
+    //
+    // The mask says WHERE. Granularity is a whole ring, which is the natural unit: the rings are
+    // closed loops and everything downstream chains closed loops, so keeping half of one would
+    // need open paths through the entire pipeline. It is also the right unit for the case that
+    // motivates this, since a bore floor needs its INNER rings and those are whole rings.
+    Flow flow(0.5f, 0.25f, 0.5f);
+    const ExPolygon disc = [&] {
+        Polygon p;
+        for (int i = 0; i < 240; ++i) {
+            const double a = 2.0 * M_PI * i / 240.0;
+            p.points.emplace_back(coord_t(scale_(10.0 * std::cos(a))), coord_t(scale_(10.0 * std::sin(a))));
+        }
+        return ExPolygon(p);
+    }();
+    Surfaces surfaces{ Surface(stInternal, disc) };
+
+    PrintRegionConfig cfg;
+    cfg.continuous_shell_infill_density.value = 25;
+
+    auto run = [&](bool force_solid, const ExPolygons *mask) {
+        ExtrusionEntityCollection e;
+        std::string reason, note;
+        REQUIRE(ContinuousShellPathBuilder::build_cross_section(
+            surfaces, flow, 0.25, &cfg, e, &reason, false, 4, force_solid, {}, mask, &note));
+        std::vector<ExtrusionPath *> paths;
+        for (ExtrusionEntity *ent : e.entities)
+            ContinuousShellPathBuilder::collect_paths(ent, paths);
+        double len = 0.0;
+        for (const ExtrusionPath *p : paths) len += p->polyline.length() * SCALING_FACTOR;
+        return len;
+    };
+
+    // A mask over the middle only - the shape a bore floor makes.
+    ExPolygons inner;
+    {
+        Polygon p;
+        for (int i = 0; i < 240; ++i) {
+            const double a = 2.0 * M_PI * i / 240.0;
+            p.points.emplace_back(coord_t(scale_(4.0 * std::cos(a))), coord_t(scale_(4.0 * std::sin(a))));
+        }
+        inner.emplace_back(p);
+    }
+
+    const double sparse = run(false, nullptr);
+    const double solid  = run(true,  nullptr);
+    const double masked = run(false, &inner);
+
+    INFO("sparse " << sparse << " mm, fully solid " << solid << " mm, masked middle " << masked << " mm");
+    // The premise: sparsifying this section really does remove a lot of path, or nothing below
+    // distinguishes anything.
+    REQUIRE(sparse < 0.8 * solid);
+    // The masked layer lies BETWEEN the two: more than sparse, because the middle is now kept...
+    REQUIRE(masked > 1.05 * sparse);
+    // ...and less than solid, because the wall around the mask still sparsifies. This is the
+    // whole point - a whole-layer boolean can only produce the two endpoints.
+    REQUIRE(masked < 0.95 * solid);
+}
+
 TEST_CASE("Continuous shell density-0 signature table", "[.][ContinuousShellSig]")
 {
     const Flow flow(0.5f, 0.25f, 0.5f);
@@ -2920,7 +2984,7 @@ TEST_CASE("Continuous shell density-0 signature table", "[.][ContinuousShellSig]
         ExtrusionEntityCollection e;
         std::string reason, note;
         const bool built = ContinuousShellPathBuilder::build_cross_section(
-            r.surf, flow, 0.25, &cfg, e, &reason, false, r.layer, r.force_solid, {}, &note);
+            r.surf, flow, 0.25, &cfg, e, &reason, false, r.layer, r.force_solid, {}, nullptr, &note);
         // Model area of the fixture: a malformed ExPolygon (a badly wound hole, say) shows up
         // here as a nonsense area, so a row cannot quietly guard the wrong geometry.
         double area = 0.0;
@@ -3048,7 +3112,7 @@ TEST_CASE("Adaptive beading keeps the surface flank pinned across a bead-birth w
     ExtrusionEntityCollection e;
     std::string reason, note;
     REQUIRE(ContinuousShellPathBuilder::build_cross_section(surf, flow, 0.25, &cfg, e, &reason,
-                                                            false, 0, false, {}, &note));
+                                                            false, 0, false, {}, nullptr, &note));
     INFO("degrade note: " << note);
     std::vector<ExtrusionPath *> paths;
     for (ExtrusionEntity *ent : e.entities)

@@ -1631,3 +1631,40 @@ no plate has ever asked it.
 
 Blocked on that branch being brought forward; it has diverged a long way from main. Recorded here
 so it is not rediscovered late.
+
+### W6 (2026-08-27): the solid region is a mask, not a whole layer
+
+`force_solid` was a whole-layer boolean. If any part of the section had air within the shell
+count, EVERY ring in the layer was kept. For a genuine top or bottom shell that is right - the
+whole face is exposed. For an INTERNAL surface it is not: the floor of a blind bore needs solid
+over the bore's footprint, and the wall around it is buried. That layer printed solid edge to
+edge.
+
+`cs_solid_mask` now answers WHERE rather than whether: the union of the uncovered regions over the
+shell layers, grown by a wall thickness so the solid patch anchors into the surrounding wall
+instead of ending at the surface's edge. On a 20 mm disc with the middle masked:
+
+| | path per layer |
+|---|---|
+| sparse | 390.9 mm |
+| **masked middle** | **446.9 mm** |
+| fully solid, as before | 698.1 mm |
+
+36% less path on such a layer, with solid still where the surface needs it. A whole-layer boolean
+can only produce the two endpoints; that the masked case lands between them is the whole claim,
+and it is what the test asserts.
+
+**Granularity is a WHOLE RING**, and that is a deliberate limit rather than an oversight. The
+rings are closed loops and every stage downstream chains closed loops, so keeping half a ring
+would need open paths through the entire pipeline. It also happens to be the right unit for the
+case that motivates this: a bore floor needs its inner rings, and those are whole rings. A surface
+that cuts ACROSS the rings - a shelf on one side of a tube, say - will still promote every ring it
+touches, which is more solid than strictly necessary. That case is not addressed here.
+
+**Real top and bottom shells are untouched.** A mask covering 95% or more of the section is
+treated as the whole-layer case and stays on the old path, so the common case is byte-identical -
+every fence signature is unchanged.
+
+**Not print-validated.** The geometry that exercises it is a blind bore: a tube with a floor part
+way up, where the floor layer should now be solid over the bore and sparse in the wall. That is
+the object to slice.

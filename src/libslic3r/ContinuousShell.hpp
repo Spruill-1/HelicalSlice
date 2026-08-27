@@ -34,6 +34,10 @@ public:
                                     ExtrusionEntityCollection &entities, std::string *reason = nullptr,
                                     bool reverse_path = false, size_t layer_index = 0, bool force_solid = false,
                                     const ContinuousShellWidthLimits &width_limits = {},
+                                    // Part of the section that must stay solid when only PART of
+                                    // it must. Null or empty means the force_solid boolean decides
+                                    // for the whole layer, as before.
+                                    const ExPolygons *solid_mask = nullptr,
                                     // Set when the layer BUILT but took a weaker path than asked for
                                     // (adaptive beading skipped or declined, interior spiral declined).
                                     // Distinct from `reason`, which reports an outright failure.
