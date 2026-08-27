@@ -1,25 +1,33 @@
-"""Build PlateQ_changed: only the objects the last two fixes actually moved.
+"""Build PlateQ_changed: only the objects a fix actually moves.
 
     make_changed_plate.py [--publish]
 
-PlateP's full battery would be eight objects and 94 minutes, and five of them would be printing
-geometry that did not change. Measured against the plate that came off the printer, centred so
-plate arrangement cannot confuse it, the median and 99th-percentile displacement per object is:
+PlateP's full battery would be eight objects and 94 minutes, and most of them would be printing
+geometry that did not change. The same three objects have carried two rounds of validation now.
 
-    P3_ecc       0.060 / 0.384 mm     <- the pinch-boundary shell fix
-    P4_lobed     0.002 / 0.477 mm     <- the phase field
-    P5_crescent  0.048 / 0.505 mm     <- the phase field
-    P1_sparse    0.0007 / 0.032 mm    unchanged (coordinate rounding)
-    P2_dense     0.0003 / 0.026 mm    unchanged
-    P6_solid     0.001 / 0.085 mm     unchanged
-    P7_taper     0.0002 / 0.036 mm    unchanged
-    P8_thin      0.000 / 0.000 mm     bit-identical
+ROUND 2 (2026-08-27) - the weave was sizing excursions from gaps that cross no wall. Two causes,
+one per object, both bounded by the geometry each object has. Per object, on its own dumped rings:
 
-Only three moved by anything a nozzle can resolve, and they are exactly the three the mechanisms
-predict: the pinch fix touches only a section that produces a second chain, and the phase field
-touches only sections whose rings differ in length. The peel-validated annuli reduce to their old
-formula on a circle, so the parts already in hand ARE the control for this plate - it does not
-have to carry its own.
+                  walk picked a       worst        neighbour samples
+                  wrong point on      error        beyond a wall crossing
+    P3_ecc            2.53%           1.414 mm         13.09%
+    P5_crescent      17.71%           9.757 mm          5.61%
+    P4_lobed          0.35%           0.001 mm          0.00%
+    P1_sparse         0.00%           0.000            0.00%
+    P6_solid          0.00%           0.000            0.00%
+    P7_taper          0.00%           0.000            0.00%
+    P8_thin           0.00%           0.000            0.00%
+
+P3 and P5 are the two objects the change is FOR, and they are the two that failed in the hand.
+The four zeros are untouched by both halves of it, so the parts already in hand are the control
+and do not need reprinting.
+
+P4 is the near-miss and is on the plate for that reason. Its walk picked a wrong point on 0.35% of
+samples but never by more than a micron - an adjacent vertex, not a different basin - so nothing
+about its amplitude changes. It still moves a little, because an adjacent vertex carries an
+adjacent PHASE, and the drive saturates: one sample of phase either way can flip a bead from one
+side of a transition to the other. Median displacement 0.0002 mm, 99th percentile 0.30, max 0.94.
+It is the check that nothing got worse, not a null control.
 
 PlateL proved the foam holds on ONE geometry - a concentric annulus, at two densities. Everything
 that made it hold is geometry-dependent: the gap cap decides ring counts from the buried span,
@@ -178,13 +186,19 @@ def main():
     t2 = re.search(r"prediction[^\d]*(\d+)", meta)
     print(f"\n{OUTNAME}: {w.group(1) if w else '?'} g, "
           f"{int(t2.group(1)) // 60 if t2 else '?'} min")
-    print("\nPeel all three, bottom shell off first, and compare with the parts already in")
-    print("hand from PlateP - same filament, same machine, and for these three the only")
-    print("difference is the two fixes.")
-    print("  P3: the solid ring mid-wall should be gone.")
-    print("  P5: the concave side should hold, not just the convex one.")
-    print("  P4: nothing should have got worse. It moved only because the phase field touches")
-    print("      any section whose rings differ in length, and a lobed wall qualifies.")
+    print("\nPeel all three, bottom shell off first, and compare with the PlateQ parts already")
+    print("in hand - same objects, same filament, same machine.")
+    print("  P5: the CONCAVE side is the question. It welded over 5.7% of that interface and now")
+    print("      welds over 38.1%, against 41.5% on the convex side, so the two sides should")
+    print("      now peel alike. This is the object that has peeled on every plate so far.")
+    print("  P3: the solid chunk mid-wall. Two of its rings were being flung 2.53 mm into the")
+    print("      pocket the second chain had already filled; that is now bounded at 1.06 mm.")
+    print("      Section it and look at the pocket between the outer wall and the bore.")
+    print("  P4: the near-miss control. Its amplitudes do not change at all, only which side of")
+    print("      a transition a few beads land on. It must be no worse than the one in hand.")
+    print("\nWhat would falsify this: P5 peeling on the concave side anyway (the weld measurement")
+    print("is of ONE layer, and peel is a stack), or P4 coming out worse than its predecessor,")
+    print("which would mean phase continuity matters more than picking the right neighbour.")
 
 
 if __name__ == "__main__":
