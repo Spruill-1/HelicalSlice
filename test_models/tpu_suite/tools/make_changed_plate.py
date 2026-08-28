@@ -5,29 +5,27 @@
 PlateP's full battery would be eight objects and 94 minutes, and most of them would be printing
 geometry that did not change. The same three objects have carried two rounds of validation now.
 
-ROUND 2 (2026-08-27) - the weave was sizing excursions from gaps that cross no wall. Two causes,
-one per object, both bounded by the geometry each object has. Per object, on its own dumped rings:
+ROUND 2 (2026-08-27) fixed the crescent and broke the eccentric. The crescent stopped peeling -
+its concave side went from 5.7% of that interface welded to 38.1%, against 41.5% convex - and the
+lobed object came out as the foam is meant to look. The eccentric came apart into three pieces.
 
-                  walk picked a       worst        neighbour samples
-                  wrong point on      error        beyond a wall crossing
-    P3_ecc            2.53%           1.414 mm         13.09%
-    P5_crescent      17.71%           9.757 mm          5.61%
-    P4_lobed          0.35%           0.001 mm          0.00%
-    P1_sparse         0.00%           0.000            0.00%
-    P6_solid          0.00%           0.000            0.00%
-    P7_taper          0.00%           0.000            0.00%
-    P8_thin           0.00%           0.000            0.00%
+ROUND 3 (2026-08-28) - the pocket a pinching wall leaves behind. Band marching walks a chain down
+one face to the medial and back up the other; on a wall of varying thickness those two middle
+rings do not meet, and the remainder is handed on as a separate chain that fills the space between
+them. Those middle rings are that pocket's faces and the chain filling it has nothing else to weld
+to - but the gap cap looks only within a chain, and so does the weave, so the stride stepped over
+both. Measured on this object: middle pair 7.41 slots apart, the next chain's outermost ring one
+slot inside EACH of them, the two chains four slots apart with a void between them.
 
-P3 and P5 are the two objects the change is FOR, and they are the two that failed in the hand.
-The four zeros are untouched by both halves of it, so the parts already in hand are the control
-and do not need reprinting.
+                                    detached rings   chain-to-chain welded
+    before the excursions bounded                0                   15.4%
+    what you printed (round 2)                   7                    0.0%
+    this plate                                   0                   68.7%
 
-P4 is the near-miss and is on the plate for that reason. Its walk picked a wrong point on 0.35% of
-samples but never by more than a micron - an adjacent vertex, not a different basin - so nothing
-about its amplitude changes. It still moves a little, because an adjacent vertex carries an
-adjacent PHASE, and the drive saturates: one sample of phase either way can flip a bead from one
-side of a transition to the other. Median displacement 0.0002 mm, 99th percentile 0.30, max 0.94.
-It is the check that nothing got worse, not a null control.
+ONE object changes. P4_lobed and P5_crescent are byte-identical to the parts from round 2 - same
+ring count, same path to 0.1 mm - so those parts ARE this plate's control and are not reprinted.
+P5 is kept only as a peel reference in the same filament and session: it held last time and must
+hold again.
 
 PlateL proved the foam holds on ONE geometry - a concentric annulus, at two densities. Everything
 that made it hold is geometry-dependent: the gap cap decides ring counts from the buried span,
@@ -110,7 +108,8 @@ def main():
 
     eo, ei = ecc_pair(10.0, 3.0, 2.0)
     add("P3_ecc", tube(eo, ei, H))
-    add("P4_lobed", tube(lobed(10.0, 1.2, 5), circle(3.0), H))
+    # P4_lobed is byte-identical to the part in hand and is not reprinted. P5 is, as the peel
+    # reference: it is also byte-identical, so if it peels this time the machine moved, not the code.
     cre = crescent(12.0, 9.0, 8.0)
     if not star_ok(cre, (-6.0, 0.0)):
         sys.exit("P5: the fan anchor does not see the whole crescent boundary")
@@ -186,19 +185,18 @@ def main():
     t2 = re.search(r"prediction[^\d]*(\d+)", meta)
     print(f"\n{OUTNAME}: {w.group(1) if w else '?'} g, "
           f"{int(t2.group(1)) // 60 if t2 else '?'} min")
-    print("\nPeel all three, bottom shell off first, and compare with the PlateQ parts already")
-    print("in hand - same objects, same filament, same machine.")
-    print("  P5: the CONCAVE side is the question. It welded over 5.7% of that interface and now")
-    print("      welds over 38.1%, against 41.5% on the convex side, so the two sides should")
-    print("      now peel alike. This is the object that has peeled on every plate so far.")
-    print("  P3: the solid chunk mid-wall. Two of its rings were being flung 2.53 mm into the")
-    print("      pocket the second chain had already filled; that is now bounded at 1.06 mm.")
-    print("      Section it and look at the pocket between the outer wall and the bore.")
-    print("  P4: the near-miss control. Its amplitudes do not change at all, only which side of")
-    print("      a transition a few beads land on. It must be no worse than the one in hand.")
-    print("\nWhat would falsify this: P5 peeling on the concave side anyway (the weld measurement")
-    print("is of ONE layer, and peel is a stack), or P4 coming out worse than its predecessor,")
-    print("which would mean phase continuity matters more than picking the right neighbour.")
+    print("\nPeel both, bottom shell off first, against the round-2 parts already in hand.")
+    print("  P3: THE question. Last time it came apart into three pieces - outer wall, bore wall,")
+    print("      and a solid crescent between them, with nothing joining any of it. It should now")
+    print("      resist peeling like the others, and sectioning it should show foam where that")
+    print("      solid crescent was. It costs 18% more material than the version you called")
+    print("      acceptable; that is the pocket's two faces plus a properly strided pocket.")
+    print("  P5: byte-identical to the one in hand, printed only as a peel reference in the same")
+    print("      filament and session. If it peels this time, the machine moved and not the code.")
+    print("\nWhat would falsify this: P3 still separating at the same surface, which would mean")
+    print("the two chains need the weave to cross between them and not merely to touch; or P3")
+    print("holding but reading as solid again, which would mean the pocket wants a stride of its")
+    print("own rather than two pinned faces.")
 
 
 if __name__ == "__main__":

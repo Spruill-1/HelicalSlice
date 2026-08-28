@@ -2360,3 +2360,111 @@ NOT catch this, and the numbers are written down so nobody re-derives it. A bead
 from its own ring lands on top of a NEIGHBOURING ring, so its distance to the nearest unwoven bead
 stays small - 0.555 mm with the walk against 0.592 mm with the search. That is also why the
 printed defect was stacked material and an unwelded interface rather than a bead in mid-air.
+
+## PlateQ round 2 result (2026-08-28): two of three right, and the eccentric came apart
+
+**The crescent is solved.** It does not peel. Its concave side had been the one unexplained
+failure of the campaign and the nearest-point fix closed it, exactly as the weld measurement
+predicted (5.7% -> 38.1% of that interface welded, against 41.5% convex). It has a solid core,
+which is the axial-core item already queued and not specific to this object.
+
+**The lobed object is what the foam is meant to be** - the user's words, "basically just as I had
+envisioned". It is the near-miss control on this plate and it did not regress.
+
+**The eccentric came apart.** Not a surface defect: it printed as three separate pieces - outer
+wall, bore wall, and a solid crescent between them, with no foam joining any of it.
+
+### The instrument that saw it, and the two that did not
+
+The weld map says the eccentric barely moved (mean welds per azimuth 2.97 -> 2.86, azimuths with
+none 4.7% -> 5.6%, tallest dead run 2 -> 3 layers), and total path FELL 6.4%. Neither reads as a
+part in three pieces. That is the lesson already in the ledger, paid for again: **a peel is a
+radial fault and every per-azimuth statistic is blind to it**, because a cylinder of poor bond is
+equally unbraced at every azimuth.
+
+What sees it is the ring dump plus a weld GRAPH - every ring in the section against every other
+ring, whichever chain each belongs to, so a chain BOUNDARY appears as an interface like any other
+(`tools/weldgraph.py` equivalent, kept in the scratch analysis). It reports connectivity directly:
+
+| | detached rings | chain-to-chain interface welded |
+|---|---|---|
+| before the excursions were bounded | 0 | 15.4% |
+| as printed | **7** | **0.0%** |
+| with the pocket faces kept | 0 | **68.7%** |
+
+### What the defect actually is
+
+Band marching walks a chain down one face to the medial and back up the other, so a chain's two
+middle rings are the last it could reach from either side. On a wall of even thickness they meet
+one slot apart. On a wall of VARYING thickness they do not: the marching closes on the thin
+azimuth first and hands the remainder on as a separate chain, which fills the space between them.
+Those two middle rings are that pocket's faces, and the chain filling it has nothing else to weld
+to.
+
+Nothing in this subsystem could see that. The gap cap looks only WITHIN a chain, and so does the
+weave. Measured on the object, undecimated: its middle pair is **7.41 slots** apart and the next
+chain's outermost ring sits **exactly one slot inside each of them** - and the stride stepped over
+both, leaving the two chains four slots apart with a void between them, the full height of the
+part.
+
+The threshold for detecting it is read off rather than chosen. Consecutive-ring gaps, undecimated,
+every chain of every object in the battery:
+
+| object | chain | consecutive gaps (slots) |
+|---|---|---|
+| P1_sparse | 0 | 1.01 x8, 0.82, 0.82, 1.01 x8 |
+| P3_ecc | 0 | 1.00 x5, **7.41**, 1.00 x5 |
+| P3_ecc | 1 | 1.00, 1.00, 1.00, 1.11 |
+| P4_lobed | 0 | 0.71 to 0.97 |
+| P5_crescent | 0 | 1.00 x13 |
+| P6_solid | 0 | 1.00 x19 |
+| P7_taper | 0 | 0.81 to 1.00 |
+| P8_thin | 0 | 0.70 to 0.89 |
+
+### Why it took this long to appear
+
+It was hidden the whole campaign by things that happened to bridge it, each removed for a good
+reason of its own:
+
+1. The pinch SHELLS bridged it - until W1b removed them, correctly, as a solid ring mid-wall.
+2. The weave's over-long excursions bridged it - until the nearest-point and reach fixes bounded
+   them, correctly, because they were sized from a gap that crossed no wall.
+
+Between them they took away every accidental connection at that boundary without ever adding a
+designed one. **That is the shape of the whole arc, and worth stating plainly: every fix in this
+sequence was right, and the sequence still ended with a part in three pieces.**
+
+The user's reading from the photographs - "it really looks like the eccentric one just doesn't
+have foam at all, just the solid walls and a solid crescent in between the outer walls and bore
+walls" - names all three pieces correctly, and the solid crescent is a second, separate fault: the
+pocket chain's span started at `sl` as though its outermost rings were skin, which left it three
+CONSECUTIVE rings.
+
+### The fix, and what it costs
+
+- The two rings bounding a medial pocket are kept whatever the density asks, and pinned.
+- A pinch chain's span starts at its own first ring, not at `sl`.
+
+Two extra rings on the one object that has a pocket - 431.6 to 541.6 mm of path per layer, and
+18% more than the version that printed acceptably. Every other object in the battery is
+byte-identical, same ring count and same path to 0.1 mm, and the fence is byte-identical across
+all 20 fixtures.
+
+### Two things tried and reverted, reasons at the code
+
+- **Pinning the pinch chain's own outermost ring too.** Boundary weld 69% -> 88%, and then the
+  pocket chain detached internally: its second ring is already pinned against its terminus, so
+  pinning the first left two pinned rings three slots apart with no free ring between them to do
+  the reaching. **The anchor pin needs a free neighbour**, and a three-ring chain has none spare.
+- **Splitting the distribution span at the pocket** instead of forcing its faces. Tidier, and it
+  costs the same: a run bounded by two anchors needs a free ring between them for exactly the
+  reason above, so each run must carry three rings - which is the ring the forcing added. Where
+  the arithmetic landed on two it was worse, chain 0 falling into four detached pieces.
+
+### One number recorded and not asserted
+
+The new test's single-chain control - the same tube at 1 mm of bore offset, which does not pinch -
+carries a median-over-rays widest gap of **2.13 mm**, five slots, wider than the pinched wall and
+wider than the cap. It does not move when the pocket faces are kept, so it is neither this defect
+nor caused by this fix. A wall that marches as one chain should not carry a five-slot median gap
+at density 25. **Queued.**
