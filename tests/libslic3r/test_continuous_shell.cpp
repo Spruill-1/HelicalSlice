@@ -2431,6 +2431,101 @@ Surfaces cs_fence_disc(double r_out)
 
 } // namespace
 
+TEST_CASE("A wall that pinches keeps the faces of the pocket it leaves", "[ContinuousShell]") {
+    // Band marching walks a chain down one face to the medial and back up the other, so a chain's
+    // two middle rings are the last it could reach from either side. On a wall of even thickness
+    // they meet one slot apart. On a wall of VARYING thickness they do not: the marching closes on
+    // the thin azimuth first and hands the remainder on as a separate chain, which fills the space
+    // between them. Those two middle rings are that pocket's faces, and the chain filling it has
+    // nothing else to weld to.
+    //
+    // Nothing in this subsystem could see that. The gap cap looks only WITHIN a chain, and so does
+    // the weave. So the two chains' kept rings drifted apart with a void between them, and the
+    // printed eccentric object came apart into three concentric pieces - outer wall, bore wall,
+    // and a solid crescent between them, with no foam joining any of it.
+    //
+    // Measured there: the chain's middle pair is 7.41 slots apart and the next chain's outermost
+    // ring sits exactly one slot inside EACH of them, yet the stride stepped over both. Keeping
+    // and pinning them takes the section from seven detached rings to one connected piece, and
+    // the interface between the two chains from 0.0% of its length welded to 68.7%.
+    //
+    // The observable here is the widest RADIAL gap any ray sees. Rays are legitimate on this
+    // section - an eccentric annulus is star-shaped about its centroid, unlike a crescent - and a
+    // void plane between two chains is exactly a ray gap that no bead spans.
+    Flow flow(0.5f, 0.25f, 0.5f);
+    auto worst_ray_gap = [&](Surfaces surfaces) {
+        const ExPolygon &region = surfaces.front().expolygon;
+        PrintRegionConfig cfg;
+        cfg.wall_loops.value = 2;
+        cfg.continuous_shell_infill_density.value = 25;
+        cfg.continuous_shell_infill_weave.value   = 100;
+        const std::vector<Point3> pts = cs_path_points(surfaces, flow, cfg, 3, false);
+        double cx = 0.0, cy = 0.0;
+        for (const Point3 &q : pts) { cx += q.x(); cy += q.y(); }
+        cx /= double(pts.size()); cy /= double(pts.size());
+        std::vector<double> per_ray;
+        for (int a = 0; a < 72; ++a) {
+            double worst = 0.0;
+            const double th = 2.0 * M_PI * a / 72.0, ux = std::cos(th), uy = std::sin(th);
+            std::vector<double> hit;
+            for (size_t i = 1; i < pts.size(); ++i) {
+                const double x0 = (pts[i-1].x() - cx) * SCALING_FACTOR, y0 = (pts[i-1].y() - cy) * SCALING_FACTOR;
+                const double x1 = (pts[i].x()   - cx) * SCALING_FACTOR, y1 = (pts[i].y()   - cy) * SCALING_FACTOR;
+                // cs_path_points concatenates every ExtrusionPath into one list, and a wall of
+                // varying width is emitted as dozens of them, so consecutive entries can belong to
+                // different paths. Joining those fabricates a chord straight across the section
+                // and with it a crossing that no bead made - which read as a 2.9 mm void on a wall
+                // that is perfectly filled. A real bead chord is a fraction of a millimetre.
+                if (std::hypot(x1 - x0, y1 - y0) > 2.0) continue;
+                // side of the ray line, then require the crossing to be on the positive half
+                const double s0 = x0 * uy - y0 * ux, s1 = x1 * uy - y1 * ux;
+                if ((s0 > 0.0) == (s1 > 0.0)) continue;
+                const double t = s0 / (s0 - s1);
+                const double r = (x0 + t * (x1 - x0)) * ux + (y0 + t * (y1 - y0)) * uy;
+                if (r > 0.0) hit.push_back(r);
+            }
+            std::sort(hit.begin(), hit.end());
+            for (size_t i = 1; i < hit.size(); ++i) {
+                // Only a gap through MATERIAL counts. The centroid of an eccentric annulus does
+                // not sit inside its bore, so a ray toward the thin side leaves the wall, crosses
+                // the bore and comes back - and that reads as a 2.9 mm gap on a wall which is
+                // perfectly filled. Ask the section whether the gap's midpoint is inside it.
+                const double rm = 0.5 * (hit[i] + hit[i-1]);
+                const Point mid(coord_t(scale_(cx * SCALING_FACTOR + rm * ux)),
+                                coord_t(scale_(cy * SCALING_FACTOR + rm * uy)));
+                if (region.contains(mid))
+                    worst = std::max(worst, hit[i] - hit[i-1]);
+            }
+            if (hit.size() > 1) per_ray.push_back(worst);
+        }
+        // The MEDIAN over rays, not the maximum. One ray with a wide gap is a seam or a join; a
+        // void RING is a gap that most rays carry, and only the second is a peel plane. Reading
+        // the maximum here put a single-chain control at 2.93 mm and made it look worse than the
+        // object that came apart in the hand.
+        std::sort(per_ray.begin(), per_ray.end());
+        return per_ray.empty() ? 0.0 : per_ray[per_ray.size() / 2];
+    };
+    // 2 mm of bore offset is where this wall pinches and leaves a pocket (the signature table
+    // shows it taking the pinch path); 1 mm does not, and is the control.
+    const double pinched = worst_ray_gap(cs_fence_tube(10.0, 3.0, 2.0));
+    const double plain   = worst_ray_gap(cs_fence_tube(10.0, 3.0, 1.0));
+    INFO("median-over-rays widest radial gap: pinched wall " << pinched << " mm, "
+         "single-chain wall " << plain << " mm");
+    // The bound is the sparsifier's own: it raises the kept-ring count until no gap within a chain
+    // exceeds CS_MAX_GAP_SLOTS, and this asserts the same of the SECTION, which is where a pocket
+    // between two chains falls. Three slots of this flow is 1.34 mm; the pinched wall measures
+    // 1.02 with the pocket faces kept and 1.51 without them.
+    REQUIRE(pinched < 1.34);
+
+    // The 1 mm control is NOT asserted, and that is deliberate. It measures 2.13 mm, wider than
+    // the pinched wall and wider than the cap, and it does not move when the pocket faces are
+    // kept - so whatever it is, it is neither this defect nor caused by this fix. It is recorded
+    // here rather than tuned around: a wall that marches as a single chain should not carry a
+    // median gap of five slots at density 25, and nothing in this campaign has explained one yet.
+    // Queued in the handoff.
+    INFO("(the single-chain wall's " << plain << " mm is unexplained and queued, not asserted)");
+}
+
 TEST_CASE("A ring weaves toward the wall, not toward another chain's material", "[ContinuousShell]") {
     // The weave sizes its excursion from the distance to the nearest point on the neighbouring
     // ring: cap = weave * share * (gap - 0.8 * spacing). That is the right quantity while the two

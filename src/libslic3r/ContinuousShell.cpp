@@ -1790,6 +1790,31 @@ bool apply_radial_serpentine(ContourChain &cc, const WovenInfill &woven, coord_t
 // from a 41 mm loop into an 80 mm one sweeping 4.2 mm of radius, because the ring it weaves
 // against is half its length and the gap to it is not a gap across the wall at all. The pocket
 // still printed solid, and the "too thin to sparsify" note stopped being emitted for it.
+// Typical distance from ring A to ring B, sampled. Consecutive rings of a chain are one offset
+// apart everywhere, so this reads one spacing - EXCEPT across a medial pocket, where it reads the
+// thickness of whatever the marching could not reach from either side.
+double ring_gap(const Polygon &a, const Polygon &b)
+{
+    if (a.points.empty() || b.points.empty())
+        return 0.0;
+    auto coord = [&b](size_t i, size_t dim) -> double {
+        return dim == 0 ? double(b.points[i].x()) : double(b.points[i].y());
+    };
+    KDTreeIndirect<2, double, decltype(coord)> tree(coord, b.points.size());
+    const size_t step = std::max<size_t>(1, a.points.size() / 64);
+    std::vector<double> d;
+    for (size_t i = 0; i < a.points.size(); i += step) {
+        const std::array<double, 2> q{ double(a.points[i].x()), double(a.points[i].y()) };
+        const size_t k = find_closest_point(tree, q);
+        if (k != decltype(tree)::npos)
+            d.push_back((b.points[k] - a.points[i]).cast<double>().norm());
+    }
+    if (d.empty())
+        return 0.0;
+    std::nth_element(d.begin(), d.begin() + d.size() / 2, d.end());
+    return d[d.size() / 2];
+}
+
 bool chain_thick_enough(const ContourChain &cc, const WovenInfill &w)
 {
     return cc.has_bore ? cc.loops.size() > 2 * w.shell_loops + 1
@@ -1952,10 +1977,44 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
             // across the buried span INCLUSIVE OF BOTH ENDS instead, so each shell gets an
             // adjacent ring and the leftover is shared through the middle.
             std::vector<char> keep(n, 0);
+            // Rings that bound a MEDIAL POCKET are kept whatever the density asks, and pinned.
+            //
+            // A chain's ring list runs down one face to the medial and back up the other, so its
+            // two middle rings are the last the marching could reach from either side. On a wall
+            // of even thickness they meet one slot apart. On a wall of VARYING thickness they do
+            // not: the marching closes on the thin azimuth first and hands the remainder on as a
+            // separate chain, which fills the space between them. Those two rings are that
+            // pocket's faces, and the chain filling it has nothing else to weld to.
+            //
+            // Nothing here could see that. The gap cap looks only WITHIN a chain, and so does the
+            // weave, so the two chains' kept rings drifted four slots apart with a void between
+            // them. Measured on the eccentric object: its middle pair is 7.41 slots apart and the
+            // next chain's outermost ring sits exactly one slot inside EACH of them - yet the
+            // stride stepped over both. The printed part came apart into three concentric pieces.
+            //
+            // The threshold is not chosen so much as read off: on every chain of every object in
+            // the battery the consecutive gap is 0.70 to 1.11 slots, and the one pocket is 7.41.
+            std::vector<char> pocket(n, 0);
+            for (size_t i = 0; i + 1 < n; ++i)
+                if (ring_gap(cc.loops[i], cc.loops[i + 1]) > 1.5 * double(spacing))
+                    pocket[i] = pocket[i + 1] = 1;
             {
-                const size_t first = sl;
+                // The span starts at whatever the outer end actually HOLDS: a face holds sl shell
+                // rings, a pinch holds none. Starting at sl on a pinch chain spent that chain's
+                // outermost rings - the ones meeting the chain that pinched out - as if they were
+                // skin, and left the eccentric object's pocket three CONSECUTIVE rings, printed as
+                // the solid crescent visible between its two walls.
+                const size_t first = sl_out;
                 const size_t last  = annular ? (n - sl - 1) : (n - 2);
-                if (n > 2 * sl && last >= first) {
+                // The pocket's faces are forced into the keep set, ON TOP of one distribution
+                // across the whole span. Splitting the span at the pocket and anchoring a run
+                // either side is the tidier idea and was tried: it costs the same. A run bounded
+                // by two anchors needs a free ring between them to do the weaving - both its ends
+                // are pinned, and two pinned rings three slots apart weld over 0% of their length
+                // - so the run has to carry three rings, which is the ring the forcing added. It
+                // also came out worse where the arithmetic landed on two: chain 0 fell into four
+                // detached pieces, welded only across the pocket.
+                if (n > sl_out + sl && last >= first) {
                     const size_t span = last - first + 1;
                     // At least two where the span allows, so BOTH shells are tied; that floor is
                     // also what stops a thin interior degenerating into one ring down the middle.
@@ -2004,9 +2063,14 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
                                              : (j * (span - 1) + (m - 1) / 2) / (m - 1))] = 1;
                 }
             }
+            for (size_t i = 0; i < n; ++i)
+                if (pocket[i] != 0) keep[i] = 1;
+            std::vector<char> kept_pocket;
+            kept_pocket.reserve(n);
             for (size_t i = 0; i < n; ++i) {
                 const bool inf = is_infill(i);
                 if (!inf || keep[i]) {             // keep every shell/terminus ring + the chosen infill
+                    kept_pocket.push_back(pocket[i]);
                     kept_infill.push_back(inf ? char(1) : char(0));
                     // The slot map and any per-ring widths are compacted in LOCKSTEP with the
                     // rings. Without this a surviving ring would read the widths of whatever
@@ -2095,6 +2159,20 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
                     if (!kept_infill[j]) continue;
                     if ((j > 0 && !kept_infill[j - 1]) || (j + 1 < NR && !kept_infill[j + 1]))
                         pinned[j] = 1;
+                    // A pocket face anchors ANOTHER chain, and the reasoning that pins a ring
+                    // against a shell applies unchanged: if it weaves it swings away from that
+                    // chain's ring over half the circumference, which is the failure the shell
+                    // pin was introduced to fix.
+                    if (j < kept_pocket.size() && kept_pocket[j] != 0)
+                        pinned[j] = 1;
+                    // Pinning the ring on the OTHER side of that boundary as well - the pinch
+                    // chain's own outermost ring, which hugs foreign material exactly as an
+                    // anchor hugs a shell - was tried and reverted. It raised the boundary weld
+                    // from 69% to 88% and then detached the pocket chain internally: its second
+                    // ring is already pinned against its terminus, so pinning the first left two
+                    // pinned rings three slots apart with nothing free between them to reach.
+                    // The pin needs a free neighbour to do the reaching, and a three-ring chain
+                    // has none to spare.
                 }
 
                 const double overshoot   = 4.0;
