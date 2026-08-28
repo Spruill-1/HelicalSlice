@@ -2164,3 +2164,59 @@ sparsifier is not going to be steered by a measurement known to be wrong.
   material**. These are the two that separated the objects.
 - The weld map and total path BOTH said the eccentric was fine. Third time this ledger records it:
   per-azimuth statistics are blind to a radial fault, and now also to a Z one.
+
+### The millimetre gap cap: implemented, measured, backed out (2026-08-28)
+
+The second half of the diagnosis above said the gap cap counts slots where a slot is a distance
+only if consecutive offsets are parallel. That is still true, and the table that says so still
+orders the objects as the plastic does. The fix it implies - insert the midpoint ring wherever the
+real gap exceeds the cap - was built and does exactly what it says:
+
+- worst 90th-percentile gap on the eccentric **6.96 mm -> 4.50**, at **17% more material**
+- every other object in the battery **byte-identical** at any threshold from 4.5 to 8 slots
+  (its violation is 7-8 slots wide, so the threshold is not delicate)
+
+And it does not fix the thing it was aimed at:
+
+| eccentric | material | void/layer | through-void | moves/layer | biggest channel |
+|---|---|---|---|---|---|
+| clamp only | 204.4 mm2 | 107.5 | 42.2 (39%) | 17.2% | 1.79 mm2 |
+| + millimetre cap | 238.7 mm2 | 74.1 | 32.8 (44%) | **10.4%** | 1.42 mm2 |
+
+**The void shrank because it was filled in, not because it moved.** As a fraction of the void, the
+part persisting through ten layers went UP, and the lattice ended up half as mobile again. That is
+foam traded for solid, which is the opposite of the point.
+
+**So wide gaps are not the mechanism of the stacking.** Mobility is - and filling gaps costs
+mobility. The first half of the diagnosis survives the test and the second half does not, which is
+worth stating plainly because both came from the same session and both looked equally sound.
+
+**Kept from the attempt: `ring_gap` is now correct.** Both halves of it were wrong before, and
+they partly cancelled, which is why the pocket test worked at all:
+
+- it sampled ring A at its VERTICES - a square has four and all four are corners, where the
+  distance to the next offset is sqrt(2) times the distance along a face;
+- it measured to ring B's nearest VERTEX, which a point KD-tree gives and which on a coarse ring
+  is not the distance to the ring: from the middle of a square's edge the nearest vertex of the
+  next square is its corner, half a side away.
+
+Together they reported a 16 mm square's adjacent offsets **3.458 mm apart when they are 0.446**,
+and because the error shrank with the ring it read as a plausible ramp rather than a bug. It now
+samples A by arc length and measures to B's segments (`AABBTreeLines::LinesDistancer`), and reads
+0.4463 mm on that square - one spacing exactly. **Verified against known geometry before being
+trusted with a decision**, which is what the previous attempt did not do.
+
+### Where this leaves the eccentric
+
+Mobility is the live hypothesis and the only mechanism that has tracked the plastic across six
+objects. The clamp raised it 17.5% -> 20.9%; the objects that print well sit at 30-44%. What
+remains untried is to **move the voids rather than fill them**: the sparsifier picks the same ring
+indices on every layer, so the voids are at fixed radii by construction, and the weave is the only
+thing that disturbs them. Giving the kept-ring SET a radial phase that advances per layer - the
+distribution's interior placements shifting a slot, anchors staying put - would move every void
+radially between layers whether or not its bounding rings weave. With a three-layer cycle at a
+stride of three, a void at slots {1,2} becomes {2,3} then {3,4}, and the intersection over the
+cycle is empty: no channel can survive it.
+
+Untested, and it changes every object's geometry, so it is a print-gated proposal rather than a
+change. It is also the first idea in this arc that adds motion instead of taking it away.
