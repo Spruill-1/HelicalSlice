@@ -2052,3 +2052,115 @@ carries a median-over-rays widest gap of **2.13 mm**, five slots, wider than the
 wider than the cap. It does not move when the pocket faces are kept, so it is neither this defect
 nor caused by this fix. A wall that marches as one chain should not carry a five-slot median gap
 at density 25. **Queued.**
+
+## PlateQ round 3 result (2026-08-28), and the logical issue behind five rounds of patches
+
+**The crescent is done.** It prints well, does not peel, and its concave side is closed. It still
+has a solid core, which is the axial-core item already queued.
+
+**The eccentric holds together now but still has voids.** After five rounds of local fixes it was
+worth asking whether something structural was being missed. It was, and it is one thing that can
+be said two ways.
+
+### Said the first way: the weave has two jobs and only one was ever accounted for
+
+In plane the weave welds rings to each other. In Z it is the **only** mechanism that makes one
+layer's lattice differ from the next, so that voids precess instead of stacking into channels.
+
+Every fix in this campaign served the first job by TAKING MOTION AWAY:
+
+- pin the ring that hugs a shell (2 rings frozen per chain)
+- pin the two faces of a medial pocket (2 more)
+- reject a neighbour further off than a wall crossing (amplitude zeroed wherever it fires)
+
+Each was right in plane and each was print-validated in plane. Nothing was measuring Z.
+
+Fraction of ring length the weave actually moves, against how each object printed:
+
+| object | moves | printed |
+|---|---|---|
+| P6_solid | 44.0% | well |
+| P1_sparse | 39.1% | well |
+| P4_lobed | 38.6% | well ("just as I had envisioned") |
+| P5_crescent | 30.5% | well |
+| P7_taper | 24.7% | well |
+| **P3_ecc** | **17.5%** | **voids** |
+
+And it is the only object whose voids stack. Over ten consecutive layers, the void area present on
+ALL of them: **47% for the eccentric against 23% for the crescent**; material changed per layer
+14.4% against 26.1%. It also has the MOST rings (13) and the most material - dense and static,
+which is exactly what a cut face reads as solid walls with fixed channels between them.
+
+The eccentric's topology freezes seven rings outright - two outer shells, two bore shells, a
+pocket's two faces, a terminus - so its few free rings have to move MORE than another object's,
+not less.
+
+**Shipped:** the reject became a CLAMP (49ba568c74). A reject was the worst of the three available
+outcomes: no weld AND no motion. Clamping keeps the motion and still bounds the excursion at what
+a legal gap earns. Bounded at the reject's own threshold so it is purely additive - every point
+that weaves today is byte-identical:
+
+| object | before | after |
+|---|---|---|
+| P1_sparse, P4_lobed, P6_solid, P7_taper | 39.1 / 38.6 / 44.0 / 24.7% | unchanged |
+| P5_crescent | 30.5% | 34.2% |
+| P3_ecc | 17.5% | **20.9%** |
+
+Better, and still short of the objects that print well. It is part of the fix, not the fix.
+
+### Said the second way: the gap cap counts SLOTS, and a slot is not a distance
+
+The rule that guarantees the lattice is closable - no kept-ring gap wider than `CS_MAX_GAP_SLOTS` -
+is expressed in slot indices. A slot index equals a real distance only where consecutive offset
+contours are locally PARALLEL. They are on a wall of even thickness. They are not on a wall that
+varies, or on a lens tapering to a point: there the same slot count is one spacing at one azimuth
+and five at another. The sparsifier can therefore believe it has honoured its own cap while
+leaving gaps many times too wide - and the weave, which is sized from the real distance, can then
+neither close them nor sweep them, so the void sits in the same place on every layer.
+
+Real distance between consecutive KEPT rings, unwoven:
+
+| object | median | p90 | p99 | max | printed |
+|---|---|---|---|---|---|
+| P1_sparse | 0.647 | 1.201 | 1.202 | 1.202 | well |
+| P4_lobed | 0.566 | 1.256 | 1.332 | 1.333 | well |
+| P6_solid | 0.793 | 1.189 | 1.189 | 1.190 | well |
+| P7_taper | 0.397 | 1.192 | 1.192 | 1.192 | well |
+| P5_crescent | 0.793 | 1.403 | 3.121 | 3.609 | well, solid core |
+| **P3_ecc** | 0.396 | **3.085** | **7.447** | **8.406** | **voids** |
+
+Every object whose offsets stay parallel tops out AT the cap, because for them slots and
+millimetres are the same thing. The one object that fails is the one where they are not, and it is
+out by a factor of seven. **The ordering is the plastic's.**
+
+This also re-frames the two fixes that came before it. The pocket faces are the extreme case of
+the same rule - a slot gap of one that is really 7.41. The reach bound was a distance proxy for
+"is this neighbour across the wall from me", and it fires on exactly the geometry where slot and
+distance part company.
+
+### The fix, and why it is not here yet
+
+Enforce the cap in millimetres: where two kept rings are further apart than the cap allows in real
+terms, keep the ring between them and repeat. It terminates at adjacent rings, and it subsumes the
+pocket-face special case.
+
+Attempted and **backed out**. It needs a ring-to-ring distance sampled along the OUTLINE rather
+than at the vertices, since a marched ring's vertices sit wherever the geometry put them - a square
+has four and all four are corners. The arc-length sampler written for it reported a square's
+adjacent offsets 3.458 mm apart when they are 0.446, which turned that fixture solid. The existing
+vertex sampler is in use and correct enough for the pocket test; the replacement is not, and a
+sparsifier is not going to be steered by a measurement known to be wrong.
+
+### Instruments added
+
+- **Void CELL analysis** (rasterise the beads, complement inside the section, connected
+  components). What matters on a cut face is not how much void there is - at density 25 most of
+  the section is void by design - but whether it is broken into cells or runs as one region.
+  First run of it reported a 6.04 mm void on the eccentric, which was **the bore**: the complement
+  of the beads inside the section includes the part's own hole. Excluding it, the eccentric's
+  biggest cell is 9.78 mm2 at 1.55 mm wide against the crescent's 18.20 at 1.52 - no worse. That
+  is what sent the search to Z.
+- **Through-void** (AND the void masks of N consecutive layers), and **layer-to-layer XOR of the
+  material**. These are the two that separated the objects.
+- The weld map and total path BOTH said the eccentric was fine. Third time this ledger records it:
+  per-azimuth statistics are blind to a radial fault, and now also to a Z one.
