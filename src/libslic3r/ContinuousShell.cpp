@@ -2239,7 +2239,8 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
                                                                 : std::vector<size_t>();
                     const std::vector<size_t> ii = (j + 1 < NR) ? nearest_on(me, before[j + 1].points)
                                                                 : std::vector<size_t>();
-                    // A neighbour further off than a wall crossing is not a neighbour.
+                    // A gap wider than a wall crossing CLAMPS the excursion. It does not cancel
+                    // it, and the difference between those two is the whole point.
                     //
                     // The nearest point on the next ring is the right thing to weave toward while
                     // the two rings FACE each other. Where the next ring ends, or is much shorter
@@ -2257,13 +2258,38 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
                     // pocket the other chain had already filled. That is the solid chunk that
                     // survived the pinch-boundary fix.
                     //
-                    // The bound is the one the sparsifier already guarantees on the other side:
-                    // it raises the kept-ring count until no gap exceeds CS_MAX_GAP_SLOTS, and
-                    // consecutive band contours are one spacing apart, so a real crossing between
-                    // kept rings is at most that many spacings. The half-slot is margin, so a gap
-                    // that IS exactly at the cap - the crescent's 1.189 mm - is not excluded by
-                    // rounding. Per POINT, not per ring: a ring can face its neighbour over most
-                    // of its length and run past its end for the rest.
+                    // Rejecting such a neighbour was the first fix and it was the wrong
+                    // instrument. The weave does two jobs: in plane it welds rings to each other,
+                    // and in Z it is the ONLY thing that makes one layer's lattice differ from the
+                    // next, so that voids precess instead of stacking into channels. A reject
+                    // gives up both - no weld AND no motion - which is the worst of the three
+                    // outcomes. Measured across the battery as the fraction of ring length the
+                    // weave actually moves:
+                    //
+                    //   P6_solid 44.0%  P1_sparse 39.1%  P4_lobed 38.6%    all came out well
+                    //   P5_crescent 30.5%  P7_taper 24.7%
+                    //   P3_ecc 17.5%                                      the one that did not
+                    //
+                    // The eccentric is the least mobile lattice in the suite and the only one
+                    // whose voids stack: 47% of its void area is present on all ten consecutive
+                    // layers against the crescent's 23%, and it changes 14.4% per layer against
+                    // 26.1%. Its topology already freezes seven rings outright (two faces, a bore,
+                    // a pocket's two sides, a terminus), so its few free rings have to move MORE
+                    // than another object's, not less - and the reject had zeroed the amplitude
+                    // over 47% of the one free ring in its pocket chain.
+                    //
+                    // Clamping keeps the motion and still bounds the excursion at what a legal gap
+                    // would earn. The bound is what the sparsifier guarantees on the other side: it
+                    // raises the kept-ring count until no gap exceeds CS_MAX_GAP_SLOTS, plus the
+                    // half-slot of margin the reject carried, so every point that weaves today is
+                    // byte-identical afterwards and the change only gives motion back where there
+                    // was none. Per POINT, not per ring: a ring can face its neighbour over most of
+                    // its length and run past its end for the rest.
+                    //
+                    // This is a PART of the fix, not all of it: it takes the eccentric from 17.5%
+                    // to 20.9%, still short of the objects that print well. The rest is that the
+                    // gap cap counts SLOTS, and a slot is a fixed distance only where consecutive
+                    // offsets are parallel - see the handoff.
                     const double reach = (CS_MAX_GAP_SLOTS + 0.5) * double(spacing);
                     Points moved(me.size());
                     for (size_t i = 0; i < me.size(); ++i) {
@@ -2273,12 +2299,12 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
                         if (!io.empty()) {
                             const Vec2d d = before[j - 1].points[io[i]].cast<double>() - here;
                             const double g = d.norm();
-                            if (g > 1e-9 && g <= reach) { g_out = g; out += d / g; }
+                            if (g > 1e-9) { g_out = std::min(g, reach); out += d / g; }
                         }
                         if (!ii.empty()) {
                             const Vec2d d = here - before[j + 1].points[ii[i]].cast<double>();
                             const double g = d.norm();
-                            if (g > 1e-9 && g <= reach) { g_in = g; out += d / g; }
+                            if (g > 1e-9) { g_in = std::min(g, reach); out += d / g; }
                         }
                         const double len = out.norm();
                         if (len < 1e-9) { moved[i] = me[i]; continue; }
