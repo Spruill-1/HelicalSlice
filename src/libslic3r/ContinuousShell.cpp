@@ -5,6 +5,7 @@
 #include "Arachne/BeadingStrategy/BeadingStrategyFactory.hpp"
 #include "ClipperUtils.hpp"
 #include "KDTreeIndirect.hpp"
+#include "AABBTreeLines.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -1790,29 +1791,54 @@ bool apply_radial_serpentine(ContourChain &cc, const WovenInfill &woven, coord_t
 // from a 41 mm loop into an 80 mm one sweeping 4.2 mm of radius, because the ring it weaves
 // against is half its length and the gap to it is not a gap across the wall at all. The pocket
 // still printed solid, and the "too thin to sparsify" note stopped being emitted for it.
-// Typical distance from ring A to ring B, sampled. Consecutive rings of a chain are one offset
-// apart everywhere, so this reads one spacing - EXCEPT across a medial pocket, where it reads the
-// thickness of whatever the marching could not reach from either side.
-double ring_gap(const Polygon &a, const Polygon &b)
+// How far ring A is from ring B, at the given percentile of A's length.
+//
+// Consecutive rings of a chain are one offset apart everywhere, so this reads one spacing -
+// EXCEPT where the offsets are not parallel, which is the whole reason it exists.
+//
+// Two things it must not do, both of which were done and measured wrong first:
+//
+//  * Sample A at its VERTICES. A marched ring is a raw offset polygon and its vertices sit
+//    wherever the geometry put them - a square has four and all four are corners, where the
+//    distance to the next offset is sqrt(2) times the distance along a face. Sample by arc length.
+//
+//  * Measure to B's nearest VERTEX. That is what a point KD-tree gives, and on a coarse ring it
+//    is not the distance to the ring at all: from the middle of a square's edge the nearest
+//    vertex of the next square is its corner, half a side away. It reported a 16 mm square's
+//    adjacent offsets 3.458 mm apart when they are 0.446, and the error shrank with the ring, so
+//    it looked like a plausible ramp rather than a bug. Measure to B's SEGMENTS.
+double ring_gap(const Polygon &a, const Polygon &b, double pct = 0.5)
 {
-    if (a.points.empty() || b.points.empty())
+    if (a.points.size() < 2 || b.points.size() < 2)
         return 0.0;
-    auto coord = [&b](size_t i, size_t dim) -> double {
-        return dim == 0 ? double(b.points[i].x()) : double(b.points[i].y());
-    };
-    KDTreeIndirect<2, double, decltype(coord)> tree(coord, b.points.size());
-    const size_t step = std::max<size_t>(1, a.points.size() / 64);
+    const AABBTreeLines::LinesDistancer<Line> to_b{ b.lines() };
+    const size_t m = a.points.size();
+    std::vector<double> cum(m + 1, 0.0);
+    for (size_t i = 0; i < m; ++i)
+        cum[i + 1] = cum[i] + (a.points[(i + 1) % m] - a.points[i]).cast<double>().norm();
+    const double total = cum[m];
+    if (total <= 0.0)
+        return 0.0;
+    constexpr size_t NS = 64;
     std::vector<double> d;
-    for (size_t i = 0; i < a.points.size(); i += step) {
-        const std::array<double, 2> q{ double(a.points[i].x()), double(a.points[i].y()) };
-        const size_t k = find_closest_point(tree, q);
-        if (k != decltype(tree)::npos)
-            d.push_back((b.points[k] - a.points[i]).cast<double>().norm());
+    d.reserve(NS);
+    size_t seg = 0;
+    for (size_t k = 0; k < NS; ++k) {
+        const double at = total * double(k) / double(NS);
+        while (seg + 1 < m && cum[seg + 1] < at) ++seg;
+        const double len = cum[seg + 1] - cum[seg];
+        const double t   = len > 0.0 ? (at - cum[seg]) / len : 0.0;
+        const Vec2d p0 = a.points[seg].cast<double>();
+        const Vec2d p1 = a.points[(seg + 1) % m].cast<double>();
+        const Vec2d q  = p0 + (p1 - p0) * t;
+        d.push_back(std::abs(to_b.distance_from_lines<false>(
+            Point(coord_t(std::llround(q.x())), coord_t(std::llround(q.y()))))));
     }
     if (d.empty())
         return 0.0;
-    std::nth_element(d.begin(), d.begin() + d.size() / 2, d.end());
-    return d[d.size() / 2];
+    const size_t k = std::min(d.size() - 1, size_t(pct * double(d.size())));
+    std::nth_element(d.begin(), d.begin() + k, d.end());
+    return d[k];
 }
 
 bool chain_thick_enough(const ContourChain &cc, const WovenInfill &w)
@@ -2065,6 +2091,24 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
             }
             for (size_t i = 0; i < n; ++i)
                 if (pocket[i] != 0) keep[i] = 1;
+
+            // Enforcing the gap cap in MILLIMETRES rather than slot index was tried here and
+            // backed out on its own measurement. The reasoning was sound and the diagnosis it came
+            // from still stands: a slot is a fixed distance only where consecutive offsets are
+            // parallel, and on the eccentric object the real gap between kept rings runs to 8.4 mm
+            // where every object that prints well tops out at 1.33. Inserting the midpoint ring
+            // wherever the real gap exceeded the cap did narrow them - worst 90th-percentile gap
+            // 6.96 mm to 4.50 - and cost 17% more material. It did not fix what it was aimed at:
+            //
+            //     eccentric        material  void/layer  through-void  moves/layer  channel
+            //     clamp only        204.4       107.5      42.2 (39%)     17.2%     1.79 mm2
+            //     + millimetre cap  238.7        74.1      32.8 (44%)     10.4%     1.42 mm2
+            //
+            // The void shrank because it was FILLED IN, not because it moved: as a fraction of the
+            // void, the part that persists through ten layers went UP, and the lattice ended up
+            // half as mobile again. That is the foam being traded for solid, which is the opposite
+            // of the point. Wide gaps are therefore not the mechanism of the stacking - mobility
+            // is - and the next thing to try is to move the voids rather than fill them.
             std::vector<char> kept_pocket;
             kept_pocket.reserve(n);
             for (size_t i = 0; i < n; ++i) {
