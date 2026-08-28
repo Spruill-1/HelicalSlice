@@ -2220,3 +2220,65 @@ cycle is empty: no channel can survive it.
 
 Untested, and it changes every object's geometry, so it is a print-gated proposal rather than a
 change. It is also the first idea in this arc that adds motion instead of taking it away.
+
+### The radial stagger: it works, and it is a package deal (2026-08-28)
+
+Give the kept-ring SET a phase that advances a slot per layer - anchors fixed, interior
+redistributing, three-layer cycle - so voids move radially whether or not their bounding rings
+weave. Built, measured over twelve consecutive layers per object:
+
+| object | stagger | material | void/layer | through-void | % of void | moves/layer | channel |
+|---|---|---|---|---|---|---|---|
+| P5_crescent | off | 155.2 | 117.9 | 17.2 | 15% | 28.0% | 1.33 mm2 |
+| P5_crescent | **ON** | 154.6 | 118.5 | **10.3** | **9%** | **35.5%** | **1.14 mm2** |
+| P4_lobed | off | 167.0 | 148.7 | 39.6 | 27% | 33.1% | 0.44 mm2 |
+| P4_lobed | **ON** | 162.3 | 153.3 | **36.6** | **24%** | **40.9%** | 0.55 mm2 |
+| P1_sparse | off | 161.4 | 150.8 | 26.4 | 17% | 37.3% | 0.19 mm2 |
+| P1_sparse | **ON** | 158.0 | 154.3 | **25.1** | **16%** | **45.3%** | 0.22 mm2 |
+| P3_ecc | off | 204.8 | 107.5 | 40.0 | 37% | 17.3% | 1.79 mm2 |
+| P3_ecc | ON | 191.0 | 121.4 | 48.8 | 40% | 19.8% | 1.79 mm2 |
+
+**It is the first mechanism in this arc that adds motion instead of taking it away, and it works
+on every object that has motion to add.** Mobility up 7-8 points across the board; the crescent's
+through-void nearly halves. It costs no material - slightly less, in fact.
+
+**It does not help the eccentric**, and made it worse until gated off there. Its two pocket faces
+are force-kept at fixed indices, so a shifted placement lands ON one of them and the chain loses a
+ring: 204.8 mm2 of material per layer became 191.0 and the through-void went up. Gating the
+stagger off on any chain with a pocket removes the regression and leaves the eccentric exactly as
+it was. So the object this whole round was chasing is the one object the stagger cannot reach.
+
+### Why it was backed out anyway: it is coupled to the amplitude clamp
+
+The anchors must not move - the shell tie holding all the way round is the fix that stopped a part
+coming apart into concentric sections. With both ends pinned, a kept-ring set that varies per layer
+**must widen some gap by a slot**; there is nowhere else for the motion to go. And a gap the clamp
+cannot close is a pair that never welds: the suite caught it immediately, closest approach 0.604 mm
+against the 0.491 that counts as contact. Protecting the rings adjacent to the anchors only moves
+the widened gap one ring inward - 0.604 became 0.6043 - because the constraint is structural, not
+positional.
+
+Raising the clamp from 3.5 to 4.5 slots in step with the stagger fixes that, and the weld invariant
+comes back green. But then the ring lattice starts crossing the mid-wall **14 times a layer against
+3**, and those crossings are SUSTAINED - filtering for lobe-scale oscillation does not remove them.
+That is arguably a good thing, since radial members are what this lattice has always lacked. It is
+also the claim the radial serpentine exists to make, and it invalidates the test that distinguishes
+them.
+
+**So the stagger is not a one-line change; it is a package - stagger, clamp, and whatever the
+lattice's new radial crossings mean - and each part needs its own validation.** Backed out whole
+rather than landed piecemeal at the end of a long session. Everything needed to resume is here: the
+change is about fifteen lines in the keep distribution, the coupling is exact (clamp = 3.5 + stagger
+slots), and the measurement above is the acceptance test.
+
+### What this round establishes about the eccentric
+
+Three mechanisms have now been measured against it. Filling its gaps makes it denser and LESS
+mobile. Staggering its rings cannot reach it, because its pockets pin the set. Clamping instead of
+rejecting helped a little, 17.5% to 20.9% mobility, and shipped.
+
+The common thread is that its topology freezes seven of its thirteen rings by construction - two
+outer shells, two bore shells, two pocket faces, a terminus - and every mechanism that adds motion
+works on the rings that are already free. **The next idea has to make a FROZEN ring move**, or
+accept that a section which marches into two chains cannot be foamed the way a simple wall can and
+say so in the degrade notes.
