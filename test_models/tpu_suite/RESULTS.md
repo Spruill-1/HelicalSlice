@@ -2698,3 +2698,68 @@ outer shells, two bore shells, two pocket faces, a terminus - and every mechanis
 works on the rings that are already free. **The next idea has to make a FROZEN ring move**, or
 accept that a section which marches into two chains cannot be foamed the way a simple wall can and
 say so in the degrade notes.
+
+### Round 4 (2026-08-28): pin ONE face of a pocket, not both
+
+The best result of the arc, and it came from asking what each frozen ring is frozen FOR rather
+than looking for another rule to add.
+
+| eccentric | material | void/layer | through-void | moves/layer | worst channel |
+|---|---|---|---|---|---|
+| both faces pinned | 204.8 mm2 | 107.5 | 40.0 (37%) | 17.3% | 1.79 mm2 |
+| **outer face only** | 205.9 mm2 | 106.4 | **34.2 (32%)** | **20.6%** | **0.59 mm2** |
+
+Same material, and **the worst persistent channel falls to a third**. The section is still one
+connected piece and the two chains still meet over **58.5%** of that interface (68.7% with both
+pinned, 15.4% in the version that printed acceptably), and the pocket chain's ring now welds to
+four rings rather than two, so the load is better spread.
+
+The reasoning: a pin buys a weld that holds all the way round and costs the ring all of its
+motion, and motion is what stops a void sitting at the same radius on every layer. The chain
+filling a pocket welds to whichever face is held, so connectivity needs one pin. The second was
+spending a ring's motion for nothing.
+
+Only chains with a pocket are affected, and the eccentric is the only battery object that has
+one. P1_sparse, P4_lobed, P6_solid and P7_taper come out identical ring for ring and to 0.1 mm of
+path. Fence byte-identical; suite green at 51.
+
+### The rule the round established, which is not the one it started with
+
+**A pin's criterion is not what the neighbour IS, it is whether the neighbour MOVES.**
+
+"Pin only against a printed FACE" was tried first - a terminus and a pocket boundary are not
+surfaces - and it is wrong, which is worth writing down because it sounds right:
+
+| eccentric | through-void | worst channel |
+|---|---|---|
+| pin against terminus + pocket | 37% | **1.79 mm2** |
+| terminus not a face | 36% | **3.32 mm2** |
+| neither is a face | 32% | **3.02 mm2** |
+
+Every average improves and the worst channel nearly doubles. A shell, a terminus and a pocket face
+are all immovable, so a ring that weaves beside any of them opens a void at a FIXED radius - and a
+fixed-radius void is the one thing that stacks. **A peel needs one continuous void, not a good
+average**, so the worst channel is the number to read and the averages are the distraction.
+
+That also settles the "make a frozen ring move" question from the last round: you cannot unfreeze
+a ring that faces something immovable. What you can do is stop freezing rings that face something
+ALREADY held by another ring - which is exactly the second pocket face.
+
+### Also tried and not kept
+
+Counting pinned rings in the anti-phase index, so a ring's phase depends on where it sits in the
+wall rather than on how many neighbours happen to be pinned. It is the more principled definition
+and it is a wash: the crescent's worst channel 1.33 -> 1.21 mm2, the lobed one's 0.44 -> 0.53,
+everything else unmoved. Not worth changing every object's geometry for.
+
+### PlateQ round 4 published
+
+6.12 g, 32 min. P3_ecc and P5_crescent. **P5 is a reference but NOT a null one**: same ring count
+and within 0.3% of the path of the part in hand, but its beads differ by a median 0.05 mm and 1.15
+at the 99th percentile, because the ring-gap measurement was corrected after that print. The brief
+says so rather than claiming byte-identity it does not have.
+
+The question this time is voids rather than peeling: look DOWN at the top face and see whether the
+dark crescents are shorter and broken up. Falsified by P3 peeling at the pocket (one pin is not
+enough), or by its channels being unchanged (the through-void measure does not track what the eye
+reads as a void, and the whole Z line needs re-grounding).

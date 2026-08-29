@@ -9,6 +9,28 @@ ROUND 2 (2026-08-27) fixed the crescent and broke the eccentric. The crescent st
 its concave side went from 5.7% of that interface welded to 38.1%, against 41.5% convex - and the
 lobed object came out as the foam is meant to look. The eccentric came apart into three pieces.
 
+ROUND 4 (2026-08-28) - pin ONE face of the pocket, not both. Round 3 held together but had
+voids, and the reason turned out to be Z, not the layer: the eccentric's lattice barely moves
+between layers, so its voids sit at the same radius on every one and stack into channels. Of the
+six battery objects it is the least mobile, and the only one whose voids stack:
+
+    fraction of ring length the weave moves    P6 44.0  P1 39.1  P4 38.6  P5 30.5  P7 24.7
+                                               P3_ecc 17.5   <- the one with voids
+    void area present on ALL of ten layers     P3_ecc 47%    P5_crescent 23%
+
+A pin buys a weld that holds all the way round and costs the ring all of its motion. The chain
+filling a pocket welds to whichever face is held, so connectivity needs ONE pin, not two:
+
+    eccentric      material  void/layer  through-void  moves/layer  worst channel
+    both pinned      204.8      107.5      40.0 (37%)     17.3%       1.79 mm2
+    outer only       205.9      106.4      34.2 (32%)     20.6%       0.59 mm2
+
+Same material; the worst persistent channel falls to a third. Still one connected piece, the two
+chains still meeting over 58.5% of that interface (68.7% with both pinned; 15.4% in the version
+that printed acceptably), and the pocket chain's ring now welds to four rings rather than two.
+
+Only chains with a pocket change, and the eccentric is the only object that has one.
+
 ROUND 3 (2026-08-28) - the pocket a pinching wall leaves behind. Band marching walks a chain down
 one face to the medial and back up the other; on a wall of varying thickness those two middle
 rings do not meet, and the remainder is handed on as a separate chain that fills the space between
@@ -185,18 +207,19 @@ def main():
     t2 = re.search(r"prediction[^\d]*(\d+)", meta)
     print(f"\n{OUTNAME}: {w.group(1) if w else '?'} g, "
           f"{int(t2.group(1)) // 60 if t2 else '?'} min")
-    print("\nPeel both, bottom shell off first, against the round-2 parts already in hand.")
-    print("  P3: THE question. Last time it came apart into three pieces - outer wall, bore wall,")
-    print("      and a solid crescent between them, with nothing joining any of it. It should now")
-    print("      resist peeling like the others, and sectioning it should show foam where that")
-    print("      solid crescent was. It costs 18% more material than the version you called")
-    print("      acceptable; that is the pocket's two faces plus a properly strided pocket.")
-    print("  P5: byte-identical to the one in hand, printed only as a peel reference in the same")
-    print("      filament and session. If it peels this time, the machine moved and not the code.")
-    print("\nWhat would falsify this: P3 still separating at the same surface, which would mean")
-    print("the two chains need the weave to cross between them and not merely to touch; or P3")
-    print("holding but reading as solid again, which would mean the pocket wants a stride of its")
-    print("own rather than two pinned faces.")
+    print("\nP3 is the question again, and this time it is about VOIDS rather than peeling.")
+    print("  P3: it held last time but showed channels. The worst persistent void is now a third")
+    print("      of what it was, at the same material, so look DOWN at the top face: the dark")
+    print("      crescents that ran into the part should be shorter and broken up rather than")
+    print("      running the height. Peel it too - the two chains still meet over 58.5% of that")
+    print("      interface and it must not go back to separating.")
+    print("  P5: the reference, and NOT a null one. Same ring count and within 0.3% of the path")
+    print("      of the part in hand, but its beads differ by a median 0.05 mm and 1.15 at the")
+    print("      99th percentile, because the ring-gap measurement was corrected since that")
+    print("      print. It should look and peel the same; it is not bit-for-bit the same file.")
+    print("\nWhat would falsify this: P3 peeling at the pocket, which would mean one pin is not")
+    print("enough after all; or its channels unchanged, which would mean the through-void measure")
+    print("does not track what the eye reads as a void and the whole Z line needs re-grounding.")
 
 
 if __name__ == "__main__":
