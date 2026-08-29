@@ -9,6 +9,37 @@ ROUND 2 (2026-08-27) fixed the crescent and broke the eccentric. The crescent st
 its concave side went from 5.7% of that interface welded to 38.1%, against 41.5% convex - and the
 lobed object came out as the foam is meant to look. The eccentric came apart into three pieces.
 
+ROUND 6 (2026-08-29) - raise the gap cap to 4 slots on a plain wall. Round 5's medial change was
+real and small: "slightly better but mostly the same". So the question became where the material
+actually is, and on the crescent 92 of its 158 mm2 is SHELL - two wall loops plus the pinned
+anchor on every face, unavoidable on a 20 mm part and not the density setting's business. Of what
+is left, the interior ran at 36% against a requested 25%.
+
+That difference is the gap cap, arithmetically: a 0.45 mm bead every 3 slots of 0.3963 covers 38%
+of the interior; at 4 slots it covers 28%. The cap has been the density setting's ceiling all
+along.
+
+  object        material          interior density   worst void over 12 layers
+  P5_crescent   155.1 -> 141.5     36% -> 28%        1.33 -> 1.32 mm2, 0.96 mm wide
+  P1_sparse     161.4 -> 143.8     38% -> 30%        0.19 -> 0.34
+  P4_lobed      167.0 -> 148.6     39% -> 31%        0.44 -> 0.72
+  P6_solid      115.0 -> 102.3     41% -> 32%        0.07 -> 0.23
+  P3_ecc        205.9 -> 205.3     56% -> 56%        0.59 -> 0.29   (guarded, see below)
+
+This plate exists because CS_MAX_GAP_SLOTS = 3 was set by a PEEL TEST, and 4 has to earn its place
+the same way. The de-lid pair decided it: the sparse object parted down the middle with 4.0-slot
+voids where the dense one held at 2.0. What has changed since is the per-gap amplitude, the anchor
+pin, the nearest-point fix and the excursion clamp - four changes whose whole subject is how a
+wide gap closes - and the woven void is now no wider at 4 slots than at 3. That is a desk result.
+
+Two guards, both measured: not on a chain out of a pinch or holding a pocket (the eccentric opened
+a 39.76 mm2 ribbon at 4.0, sixty-seven times its worst), and not where fewer than four kept rings
+would remain (both ends are pinned, so below four nothing in the middle moves and the lattice
+becomes nested tubes).
+
+P1_sparse is on the plate because it is the geometry the cap was set on - a plain sparse annulus
+at density 25 - and it is the object most at risk if 4 slots is too far.
+
 ROUND 5 (2026-08-29) - weave the medial terminus. Round 4 passed the peel test on both objects,
 which closed the eccentric's peel problem after four rounds. What was left on both was a solid in
 the middle of the foam, and rendering the material present on ALL of twelve consecutive layers
@@ -153,10 +184,10 @@ def main():
         write_stl(p, tris)
         objs.append((p, dens))
 
-    eo, ei = ecc_pair(10.0, 3.0, 2.0)
-    add("P3_ecc", tube(eo, ei, H))
-    # P4_lobed is byte-identical to the part in hand and is not reprinted. P5 is, as the peel
-    # reference: it is also byte-identical, so if it peels this time the machine moved, not the code.
+    # P1_sparse: the plain annulus the gap cap was originally set on, and the object most at risk
+    # if 4 slots is too far. P3_ecc is NOT reprinted - the guard leaves it within 0.3% of the part
+    # in hand - and P4/P6/P7 move the same way P1 does, so P1 speaks for them.
+    add("P1_sparse", tube(circle(10.0), circle(2.5), H))
     cre = crescent(12.0, 9.0, 8.0)
     if not star_ok(cre, (-6.0, 0.0)):
         sys.exit("P5: the fan anchor does not see the whole crescent boundary")
@@ -232,20 +263,19 @@ def main():
     t2 = re.search(r"prediction[^\d]*(\d+)", meta)
     print(f"\n{OUTNAME}: {w.group(1) if w else '?'} g, "
           f"{int(t2.group(1)) // 60 if t2 else '?'} min")
-    print("\nP5 is the question this time, and it is about the SOLID down the middle.")
-    print("  P5: cut it across and look at the centre of the foam. The solid lens running along")
-    print("      the medial should be roughly half the width it was - 10.7 mm2 of section down to")
-    print("      4.6 - at the same material, with the cells either side of it unchanged. Peel it")
-    print("      as well: the whole point is that halving it costs nothing, so it must still hold.")
-    print("  P3: the control, and a real one this time - BIT-FOR-BIT identical to the part in")
-    print("      hand (0.0000 mm displacement at every point), because its pocket chain is too")
-    print("      short to qualify for the change. It is here to say whether the machine or the")
-    print("      filament moved, and to re-check the peel that round 4 won. Its own middle solid")
-    print("      is the pocket band and is NOT expected to change.")
-    print("\nWhat would falsify this: P5's middle looking the same, which would mean what the eye")
-    print("reads as solid is not the persistent-material measure; or P5 peeling at the medial,")
-    print("which would mean the terminus was load-bearing frozen and the ring beside it was doing")
-    print("work the weave cannot replace.")
+    print("\nBOTH are peel tests, and this plate can only be read by peeling. The cap it loosens")
+    print("was set by a peel test in the first place and nothing at the desk can overrule that.")
+    print("  P1: the plain sparse annulus, the geometry the cap was set on. It is the one at risk.")
+    print("      Peel it hard. If the lattice parts down the middle, 4 slots is too far and the")
+    print("      answer is that the density setting simply cannot be delivered on a wall this")
+    print("      thin - which is worth knowing plainly rather than working around.")
+    print("  P5: 9% lighter and its interior 36% -> 28% dense, against the part in hand from this")
+    print("      morning in the same filament. It should feel noticeably less solid and peel no")
+    print("      more easily. Cut it too: the cells should be bigger, not the solids smaller.")
+    print("\nWhat would falsify this: either object peeling where its predecessor did not. The")
+    print("desk measure says no void got wider - worst void 1.33 -> 1.32 mm2 on P5 - but the desk")
+    print("measure is of ONE object's twelve layers, and peel resistance has already been shown")
+    print("once in this campaign not to follow the tie metric.")
 
 
 if __name__ == "__main__":

@@ -2427,3 +2427,78 @@ is the pocket band, three rings at one slot: the pinned pocket face, the pocket 
 ring, and the second pocket face. It is what holds the two chains together and it is the last
 large solid in the suite. The medial-terminus trick does not apply to it (its chain is too short),
 and the pocket band is exactly the structure that the peel test says is doing its job.
+
+## PlateQ round 5 result (2026-08-29), and where the material actually is
+
+**"Slightly better - but mostly the same."** A fair verdict on a change the model put at 4% of the
+section (medial core 10.7 -> 4.6 mm2 of 155). The medial fix is validated and it is small.
+
+So the question became where the material actually IS. Decomposing the section by distance from a
+face - the shell being two wall loops plus the pinned anchor, which is not the density setting's
+business:
+
+| object | section | material | in shell | interior | material there | interior density |
+|---|---|---|---|---|---|---|
+| P5_crescent | 273.1 | 157.7 | **92.4** | 176.5 | 65.3 | **37%** |
+| P3_ecc | 312.4 | 205.3 | 72.6 | 237.1 | 132.8 | 56% |
+
+**Well over half the crescent's material is shell**, which is unavoidable on a 20 mm part with two
+wall loops on every face, and explains a good part of "mostly the same": these test objects are
+small enough that the shell dominates whatever the interior does.
+
+And the interior ran at **37% against a requested 25%**.
+
+### That difference is the gap cap, arithmetically
+
+A 0.45 mm bead every 3 slots of 0.3963 covers 38% of the interior. At 4 slots it covers 28%.
+**`CS_MAX_GAP_SLOTS` has been the density setting's ceiling all along** - the setting could never
+deliver 25% because the cap would not allow the stride.
+
+The cap was chosen against the plastic, and that evidence stands for the geometry it was measured
+on: the de-lid pair, where the sparse object parted down the middle with 4.0-slot voids while the
+dense one held at 2.0. But it was measured **before** the per-gap amplitude, the anchor pin, the
+nearest-point fix and the excursion clamp - four changes whose entire subject is how a wide gap
+closes. Re-measured now, at 4 slots with two guards:
+
+| object | material | interior density | worst void over 12 layers |
+|---|---|---|---|
+| P5_crescent | 155.1 -> **141.5** | 36% -> **28%** | 1.33 -> **1.32** mm2, 0.96 mm wide |
+| P1_sparse | 161.4 -> **143.8** | 38% -> **30%** | 0.19 -> 0.34 |
+| P4_lobed | 167.0 -> **148.6** | 39% -> **31%** | 0.44 -> 0.72 |
+| P6_solid | 115.0 -> **102.3** | 41% -> **32%** | 0.07 -> 0.23 |
+| P7_taper | 150.4 -> **145.6** | -> **31%** | 0.21 -> 0.22 |
+| P3_ecc | 205.9 -> 205.3 | 56% -> 56% | 0.59 -> 0.29 |
+
+**Nine to eleven per cent less material, the setting nearly delivered, and no void wider than a
+millimetre anywhere.** This is a DESK result and it cannot settle the question: 3.0 was set by a
+peel test and 4.0 has to earn its place the same way.
+
+### Two guards, both measured rather than assumed
+
+- **Not on a chain out of a pinch, or holding a pocket.** At 4.0 the eccentric opened a void of
+  **39.76 mm2 - sixty-seven times its worst** - a long thin ribbon running the section, which is a
+  parting plane by any name. Those are exactly the chains whose rings do not run parallel, so a
+  slot of extra stride buys them far more real distance than it buys a plain wall.
+- **Not where fewer than four kept rings would remain.** Both ends of the span are pinned against
+  a face, so below four there is nothing in the middle that moves, and a lattice that does not
+  move is nested tubes. On the deep-crescent fixture the loose cap took the weave to exactly zero,
+  and the suite caught it immediately.
+
+### One test rewritten rather than retuned
+
+The serpentine traverse test counted sign flips of the mid-wall signal. A woven ring sitting near
+the midline crosses it on every lobe without going anywhere, and with a bigger excursion three
+flips became fourteen while nothing about the path became a traverse. It now uses hysteresis - the
+signal must get a quarter of the way to a face before it counts as having arrived - which is
+scale-free and is what the test's own sentence says.
+
+### PlateQ round 6 published
+
+4.79 g, 27 min. **P1_sparse and P5_crescent, and both are peel tests.** P1 is the plain sparse
+annulus, the geometry the cap was originally set on and the object most at risk if 4 slots is too
+far. P5 is 9% lighter with its interior at 28%, against the part in hand from the same morning and
+filament. P3_ecc is not reprinted: the guard leaves it within 0.3% of the part in hand.
+
+Falsified by either object peeling where its predecessor did not. The desk measure says no void
+got wider, but it is of one object's twelve layers - and peel resistance has already been shown
+once in this campaign not to follow the tie metric.
