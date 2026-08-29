@@ -1972,9 +1972,25 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
                     if (m.contains(pts[k])) return true;
             return false;
         };
+        // The medial TERMINUS of a long bore-less chain is treated as infill - woven, and not a
+        // thing its neighbour must be pinned against - while still being kept whatever the
+        // density asks (see the keep set below). It is the one held ring in this subsystem with
+        // no face behind it: a shell backs onto the printed surface and a pocket face onto
+        // another chain's material, but a terminus is just where the marching ran out. Freezing
+        // it freezes its neighbour too, and two frozen rings one slot apart are the solid ridge
+        // that runs down the middle of every solid section.
+        //
+        // Only on a chain with rings to spare. Weaving the terminus also releases its neighbour,
+        // and on a SHORT chain that neighbour was the one ring holding the interface shut: the
+        // eccentric's five-ring pocket chain traded 10.8 mm2 of solid for a worst void that went
+        // 0.59 to 1.25 mm2. On a long one the release costs nothing measurable.
+        const bool weave_terminus = !annular && n > sl_out + 6 &&
+                                    !(std::getenv("CS_TERMWEAVE") &&
+                                      std::atoi(std::getenv("CS_TERMWEAVE")) == 0);
         auto is_infill = [&](size_t i) -> bool {
             if (i < sl_out) return false;
             if (touches_mask(i)) return false;          // must stay solid here
+            if (!annular && i + 1 == n) return weave_terminus;
             return annular ? (i + sl < n) : (i + 1 < n);
         };
         const bool thick = chain_thick_enough(cc, woven);   // one definition, shared
@@ -2109,6 +2125,7 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
             }
             for (size_t i = 0; i < n; ++i)
                 if (pocket[i] != 0) keep[i] = 1;
+            if (weave_terminus) keep[n - 1] = 1;        // woven, but never dropped
 
             // Enforcing the gap cap in MILLIMETRES rather than slot index was tried here and
             // backed out on its own measurement. The reasoning was sound and the diagnosis it came
