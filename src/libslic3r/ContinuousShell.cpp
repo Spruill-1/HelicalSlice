@@ -1679,7 +1679,30 @@ std::vector<Point> resample_ring(const Polygon &ring, size_t S, const Point &anc
 //
 // Note this LOWERS the tie fraction (28.8% -> 19.1% on the sparse object). That is accepted
 // deliberately rather than overlooked.
-static const double CS_MAX_GAP_SLOTS = 3.0;
+// RAISED FROM 3.0 TO 4.0 on 2026-08-29, which re-opens a print-validated constant deliberately.
+//
+// 3.0 was chosen against the plastic in the paragraph above, and everything it says is still true
+// of the geometry it was measured on. But it was measured BEFORE the per-gap amplitude, the anchor
+// pin, the nearest-point fix and the excursion clamp - four changes whose whole subject is how a
+// WIDE gap gets closed. The cap is also the single biggest lever on how dense the interior comes
+// out: at 3.0 a bead of 0.45 every 3 slots of 0.3963 covers 38% of the interior, which is why
+// parts at density 25 keep reading as solid in the hand. At 4.0 it is 28%.
+//
+// Re-measured on the battery, interior density and the worst void that persists through twelve
+// consecutive layers - the closest thing here to a peel plane:
+//
+//   object        material          interior density   worst void
+//   P5_crescent   155.1 -> 141.5     36% -> 28%        1.33 -> 1.32 mm2 (0.96 mm wide)
+//   P1_sparse     161.4 -> 143.8     38% -> 30%        0.19 -> 0.34
+//   P4_lobed      167.0 -> 148.6     39% -> 31%        0.44 -> 0.72
+//   P6_solid      115.0 -> 102.3     41% -> 32%        0.07 -> 0.23
+//   P7_taper      150.4 -> 144.4       -> 30%          0.21 -> 0.22
+//   P3_ecc        205.9 -> 205.3     56% -> 56%        0.59 -> 0.29
+//
+// Nine to eleven per cent less material, the density setting nearly delivered, and no void wider
+// than a millimetre anywhere. THIS IS A DESK RESULT ONLY: 3.0 was set by a peel test and 4.0 has
+// to earn its place the same way.
+static const double CS_MAX_GAP_SLOTS = 4.0;
 
 bool apply_radial_serpentine(ContourChain &cc, const WovenInfill &woven, coord_t spacing,
                              size_t layer_index, std::string *degrade_note)
@@ -2098,25 +2121,45 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
                     // where the printed part came apart. So the count is raised until no gap
                     // exceeds the limit, even where the requested density would allow wider.
                     // Denser walls are unaffected: their natural stride is already inside it.
+                    // ...but only on a plain wall. A chain that came out of a pinch, or that
+                    // holds a medial pocket, keeps the tight cap: at 4.0 the eccentric object
+                    // opened a void of 39.76 mm2 - sixty-seven times its worst - a long thin
+                    // ribbon running the section, which is a parting plane by any name. Those
+                    // chains are exactly the ones whose rings do not run parallel, so a slot of
+                    // extra stride buys them far more real distance than it buys a plain wall.
+                    bool chain_pocket = cc.outer_pinch;
+                    for (size_t i = 0; i < n; ++i) chain_pocket = chain_pocket || pocket[i] != 0;
+                    const double gapcap = chain_pocket ? 3.0 : CS_MAX_GAP_SLOTS;
                     size_t m = 1;
                     if (span > 1) {
-                        auto max_gap = [&](size_t cand) {
-                            size_t prev = 0, worst = 0;
-                            for (size_t j = 0; j < cand; ++j) {
-                                const size_t at = (cand == 1 ? (span - 1) / 2
-                                                             : (j * (span - 1) + (cand - 1) / 2) / (cand - 1));
-                                if (j) worst = std::max(worst, at - prev);
-                                prev = at;
+                        auto pick = [&](double cap_slots) {
+                            auto max_gap = [&](size_t cand) {
+                                size_t prev = 0, worst = 0;
+                                for (size_t j = 0; j < cand; ++j) {
+                                    const size_t at = (cand == 1 ? (span - 1) / 2
+                                                                 : (j * (span - 1) + (cand - 1) / 2) / (cand - 1));
+                                    if (j) worst = std::max(worst, at - prev);
+                                    prev = at;
+                                }
+                                return worst;
+                            };
+                            double best = std::numeric_limits<double>::max();
+                            size_t got = 1;
+                            for (size_t cand = 2; cand <= span; ++cand) {
+                                if (double(max_gap(cand)) > cap_slots && cand < span) continue;
+                                const double err = std::abs(double(span - 1) / double(cand - 1) - double(K));
+                                if (err < best - 1e-9) { best = err; got = cand; }
                             }
-                            return worst;
+                            return got == 1 ? span : got;
                         };
-                        double best = std::numeric_limits<double>::max();
-                        for (size_t cand = 2; cand <= span; ++cand) {
-                            if (double(max_gap(cand)) > CS_MAX_GAP_SLOTS && cand < span) continue;
-                            const double err = std::abs(double(span - 1) / double(cand - 1) - double(K));
-                            if (err < best - 1e-9) { best = err; m = cand; }   // ties keep the sparser
-                        }
-                        if (m == 1) m = span;          // nothing fits the limit: take the densest
+                        // The looser cap only where it still leaves rings FREE TO WEAVE. Both ends
+                        // of the span are pinned - one against each face - so below four kept
+                        // rings there is nothing left in the middle that moves, and a lattice that
+                        // does not move is nested tubes. On the deep-crescent fixture the loose
+                        // cap took the weave to exactly zero.
+                        m = pick(gapcap);
+                        if (gapcap > 3.0 && m < 4)
+                            m = pick(3.0);
                     }
                     for (size_t j = 0; j < m; ++j)
                         keep[first + (m == 1 ? (span - 1) / 2

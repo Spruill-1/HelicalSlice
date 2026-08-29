@@ -2762,9 +2762,25 @@ TEST_CASE("Radial serpentine crosses the wall on every topology the marching pro
                 for (const Point &o : inner.points) din  = std::min(din,  (o - pt).cast<double>().norm());
                 sig.push_back(dout - din);
             }
+        // A TRAVERSE crosses the WHOLE wall, from near one face to near the other. Counting sign
+        // flips of the mid-wall signal is not that: a woven ring sitting near the midline crosses
+        // it on every lobe without going anywhere, and the ring lattice began doing exactly that
+        // once the gap cap was loosened and its excursions grew - three midline flips became
+        // fourteen while nothing about the path became a traverse.
+        //
+        // Hysteresis instead: the signal must get a quarter of the way to a face before it counts
+        // as having arrived there. Scale-free, so it reads the same on any wall.
+        double amp = 0.0;
+        for (double v : sig) amp = std::max(amp, std::abs(v));
+        const double T = 0.25 * amp;
         int flips = 0;
-        for (size_t i = 1; i < sig.size(); ++i)
-            if ((sig[i - 1] < 0.0) != (sig[i] < 0.0)) ++flips;
+        int side = 0;
+        for (double v : sig) {
+            const int now = v > T ? 1 : (v < -T ? -1 : 0);
+            if (now == 0 || now == side) continue;
+            if (side != 0) ++flips;
+            side = now;
+        }
         return flips;
     };
 
