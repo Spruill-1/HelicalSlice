@@ -2990,3 +2990,88 @@ Also worth recording plainly, from the same measurement: on a 20 mm test object 
 the material is shell** - two wall loops plus the pinned anchor on every face - so these parts
 will read substantially solid whatever the interior does. The density setting only ever governs
 the middle.
+
+## The prismatic-void criterion (2026-08-29): what gyroid has that a concentric lattice may not
+
+Stated by the user, and it is the sharpest target this campaign has had: **there is no shape which,
+extruded vertically from the bottom shell to the top shell, stays entirely in empty space.** Gyroid
+has that property. A concentric lattice need not.
+
+It is directly measurable - AND the void masks of every layer of the part - and `tools/prism.py`
+now does it, with the part's own bores excluded (a through-hole is not a fill defect, and this
+instrument counted one as a 20 mm2 void on its first run, the third time in this campaign).
+
+### Where we stand against it
+
+| object | prismatic void | biggest piece |
+|---|---|---|
+| **P1_sparse (annulus)** | **0.23 mm2 in 122 specks** | 0.02 mm2, **0.08 mm across** |
+| **P5_crescent** | **4.27 mm2** | 1.20 mm2, **0.94 mm across** (and a second at 0.97) |
+
+The annulus already satisfies the criterion: its largest prismatic void is a fifth of a bead wide,
+which is rasterisation noise. **The crescent does not** - and rendering it shows both large pieces
+are **at the tips**, inside the V where the shell wraps each horn. Not in the foam at all.
+
+### What causes the tip void
+
+A tip is a wedge. Consecutive offsets there recede ALONG the taper by spacing/sin(half-angle),
+far more than one spacing, so the shell wraps the horn while the first infill ring has already
+receded out of it. The stride is counted in slots and steps over that, and the weave's clamped
+excursion cannot span it. Same "a slot is not a distance" family as the medial pocket, with a
+different symptom.
+
+Ruled out first, by measurement: it is **not** the sliver-drop rule. Setting `min_foot` to zero
+changes the prismatic void by nothing at all.
+
+### Two candidate fixes, both measured
+
+**Fill it - the millimetre gap cap** (insert a ring where the REAL gap exceeds what the weave can
+sweep). The trade is a CLIFF, not a curve:
+
+| threshold | prismatic void | biggest piece | material |
+|---|---|---|---|
+| off | 4.27 mm2 | 1.20 mm2 @ 0.94 mm | - |
+| 4x the slot cap | 4.27 | 1.20 @ 0.94 | 0.0% |
+| 3x | 4.27 | 1.20 @ 0.94 | 0.0% |
+| **2x** | **0.60** | **0.12 @ 0.32 mm** | **+28.2%** |
+| 1.5x | 0.41 | 0.08 @ 0.24 | +51.7% |
+
+Nothing happens above 3x, everything happens at 2x, and going further buys almost nothing for
+another 23 points of material. The annulus pays 0% at every setting.
+
+**Why 28%: whole-ring granularity.** The tip needs a short arc of material and the only unit
+available is a closed loop. The cap adds three rings to the crescent (8 -> 11, lengths 59/45/28 mm
+of a 410 mm total) and only part of one of them is at a tip. The architecture cannot buy the arc
+without buying the ring.
+
+**Move it - the radial stagger** (kept-ring set gains a per-layer phase). Nearly free, and it does
+not solve this:
+
+| | prismatic void | biggest piece | material |
+|---|---|---|---|
+| P5_crescent, stagger | 4.27 -> **3.07 mm2** | **1.19 @ 0.93 mm, unchanged** | +0.4% |
+| P1_sparse, stagger | 0.23 -> 0.23 | unchanged | -1.6% |
+
+It removes the diffuse sub-bead specks (101 pieces -> 60) and leaves **both tip channels exactly
+as they were**, because a tip is a geometric feature the ring set cannot move away from. It also
+moves the peel metric the wrong way on the one object that matters: widest void at an untied
+azimuth, crescent **3.861 -> 4.355 mm**, while improving P1_sparse (2.251 -> 2.134) and P4_lobed
+(2.370 -> 2.208). After what cap 4 cost, a 13% worsening on an object that currently holds is not
+something to ship on a desk number.
+
+### Where that leaves it
+
+Nothing shipped. The criterion is right and now measured; the annulus meets it; the crescent's
+failure is 2.4 mm2 of a 273 mm2 section, 1 mm across, at the two horns of a deliberately extreme
+test shape, **enclosed by the shell** and in the least-loaded part of the section.
+
+Closing it costs 28% more material on every tapering part. By the campaign's own north star -
+strength first - that is a poor trade, and the recommendation is not to take it by default. It is
+a real choice though, and the numbers above are what it costs.
+
+**One thing the gyroid comparison settles:** gyroid gets this property by putting material in
+those tips too. The difference is not that gyroid is cleverer about voids - it is that a gyroid's
+cells sit at fixed 3D positions independent of the section, while a concentric lattice's voids are
+at radii the section's own offsets decide. **A concentric lattice inherits the part's geometry into
+its void structure, tapers and all.** That is the structural reason this keeps coming back, and it
+is not fixable by another rule.
