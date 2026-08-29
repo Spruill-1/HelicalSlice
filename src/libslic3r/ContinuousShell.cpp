@@ -2020,10 +2020,28 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
             //
             // The threshold is not chosen so much as read off: on every chain of every object in
             // the battery the consecutive gap is 0.70 to 1.11 slots, and the one pocket is 7.41.
-            std::vector<char> pocket(n, 0);
+            std::vector<char> pocket(n, 0), pocket_pin(n, 0);
             for (size_t i = 0; i + 1 < n; ++i)
-                if (ring_gap(cc.loops[i], cc.loops[i + 1]) > 1.5 * double(spacing))
+                if (ring_gap(cc.loops[i], cc.loops[i + 1]) > 1.5 * double(spacing)) {
                     pocket[i] = pocket[i + 1] = 1;
+                    // BOTH faces are kept; only ONE is pinned.
+                    //
+                    // The pin buys a weld that holds all the way round, and it costs the ring all
+                    // of its motion - and motion is what stops a void sitting at the same radius
+                    // on every layer and stacking into a channel. The chain filling the pocket
+                    // welds to whichever face is held, so connectivity needs one pin, not two.
+                    // The second was spending a ring's motion for nothing:
+                    //
+                    //   eccentric      material  void/layer  through-void  moves/layer  channel
+                    //   both pinned      204.8      107.5      40.0 (37%)     17.3%    1.79 mm2
+                    //   outer only       205.9      106.4      34.2 (32%)     20.6%    0.59 mm2
+                    //
+                    // Same material, and the worst persistent channel - the closest thing here to
+                    // a peel plane - falls to a third. The section is still ONE connected piece
+                    // and the two chains still meet over 58.5% of that interface, against 68.7%
+                    // with both pinned and 15.4% in the version that printed acceptably.
+                    pocket_pin[i] = 1;
+                }
             {
                 // The span starts at whatever the outer end actually HOLDS: a face holds sl shell
                 // rings, a pinch holds none. Starting at sl on a pinch chain spent that chain's
@@ -2114,7 +2132,7 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
             for (size_t i = 0; i < n; ++i) {
                 const bool inf = is_infill(i);
                 if (!inf || keep[i]) {             // keep every shell/terminus ring + the chosen infill
-                    kept_pocket.push_back(pocket[i]);
+                    kept_pocket.push_back(pocket_pin[i]);
                     kept_infill.push_back(inf ? char(1) : char(0));
                     // The slot map and any per-ring widths are compacted in LOCKSTEP with the
                     // rings. Without this a surviving ring would read the widths of whatever
@@ -2198,15 +2216,45 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
                 // their gap instead of half. Without it the anchor's swing toward the interior
                 // carried it off the shell for half the circumference, and the printed part came
                 // apart into concentric sections along exactly that surface.
+                // PIN ONLY AGAINST A REAL FACE.
+                //
+                // The pin costs a ring all of its motion, and motion is what stops voids stacking.
+                // It is worth that price against a printed SURFACE: a lattice that parts from the
+                // wall it is supposed to brace is how a part comes apart into concentric sections,
+                // which is what the pin was introduced to stop. It is not obviously worth it
+                // against anything else, and `kept_infill == 0` catches three different things:
+                // shell rings, which are faces; the medial TERMINUS, which is a buried point; and
+                // (below) a pocket face, which is the boundary with another chain's material.
+                //
+                // A terminus is not a face - the same argument that stopped a pinch end being
+                // skinned. Neither is a pocket boundary: what is needed there is that the two
+                // chains are connected, not that they touch at every azimuth, and every other
+                // interface in this lattice does its job at 40-70%.
+                //
+                // On the eccentric object that is the difference between three of thirteen rings
+                // free to move and six.
+                // "Pin only against a printed FACE" was tried - a terminus and a pocket boundary
+                // are not surfaces - and it is wrong, which is worth recording because it sounds
+                // right. The pin's criterion is not what the neighbour IS, it is whether the
+                // neighbour MOVES. A shell, a terminus and a pocket face are all immovable, so a
+                // ring that weaves beside any of them opens a void at a FIXED radius, and a void
+                // at a fixed radius is the one thing that stacks. Measured on the eccentric:
+                //
+                //     pin against terminus + pocket   through-void 37%, worst channel 1.79 mm2
+                //     terminus not a face             through-void 36%, worst channel 3.32 mm2
+                //     neither is a face               through-void 32%, worst channel 3.02 mm2
+                //
+                // Every average improves and the worst channel nearly doubles, which is the trade
+                // that matters the wrong way round: a peel needs one continuous void, not a good
+                // average.
                 std::vector<char> pinned(NR, 0);
                 for (size_t j = 0; j < NR; ++j) {
                     if (!kept_infill[j]) continue;
                     if ((j > 0 && !kept_infill[j - 1]) || (j + 1 < NR && !kept_infill[j + 1]))
                         pinned[j] = 1;
-                    // A pocket face anchors ANOTHER chain, and the reasoning that pins a ring
-                    // against a shell applies unchanged: if it weaves it swings away from that
-                    // chain's ring over half the circumference, which is the failure the shell
-                    // pin was introduced to fix.
+                    // A pocket face is NOT a printed surface, so under the face-only rule it is
+                    // not pinned either - see above. Kept, so the boundary has something to weld
+                    // to; free, so it is not two more rings that never move.
                     if (j < kept_pocket.size() && kept_pocket[j] != 0)
                         pinned[j] = 1;
                     // Pinning the ring on the OTHER side of that boundary as well - the pinch
@@ -2272,6 +2320,11 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
                     }
                 }
 
+                // Counting PINNED rings in this index too - so a ring's phase depends on where
+                // it sits rather than on how many neighbours happen to be pinned - was tried and
+                // is a wash: the crescent's worst channel 1.33 -> 1.21 mm2, the lobed one's
+                // 0.44 -> 0.53, everything else unmoved. Not worth changing every object's
+                // geometry for.
                 size_t infill_ring = 0;
                 for (size_t j = 0; j < NR; ++j) {
                     if (!kept_infill[j] || pinned[j]) continue;
