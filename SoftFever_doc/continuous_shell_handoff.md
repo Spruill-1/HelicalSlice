@@ -2502,3 +2502,75 @@ filament. P3_ecc is not reprinted: the guard leaves it within 0.3% of the part i
 Falsified by either object peeling where its predecessor did not. The desk measure says no void
 got wider, but it is of one object's twelve layers - and peel resistance has already been shown
 once in this campaign not to follow the tie metric.
+
+## PlateQ round 6 result (2026-08-29): the cap at 4 slots PEELED, and the instrument was wrong
+
+**P1_sparse came apart.** The plain sparse annulus - the very geometry `CS_MAX_GAP_SLOTS = 3` was
+set on - failed the peel test at 4 slots. The description is the diagnosis: *"the foam is now well
+anchored to the interior and walls of the outside and the bore, but the area previously solid in
+between the two is now just a void."* Anchored at both faces, parted in the middle. The cap is
+back at 3.0.
+
+**P5_crescent held, and round 5's medial change is confirmed in the hand**: "still a slight solid
+bar in the middle, but less than before".
+
+### Every desk number said it was safe, and that is the finding
+
+| measure | cap 3 | cap 4 |
+|---|---|---|
+| through-void over twelve layers | 0.19 mm2 | 0.34 mm2, 0.43 mm wide |
+| interior density | 38% | 30% |
+| material | 161.4 | 143.8 |
+| weld graph (run afterwards) | all rings 24-49%, one piece | all rings 23-49%, one piece |
+
+All true. All blind to it.
+
+**A peel plane is a CYLINDER at a fixed radius.** Its azimuth precesses with the weave, so ANDing
+consecutive layers - which is exactly what the through-void measure does - erases the thing that
+parts the part. Through-void answers *is there a vertical channel*; peel asks *is there a cylinder
+of poor bond*. Those are different questions, and the first was used to green-light a change to
+the second. The weld graph does not catch it either: per-interface weld fractions are
+indistinguishable between the two.
+
+### The metric that does catch it was already written down, and was not run
+
+**Void width at an untied azimuth**, per interface, at its widest point:
+
+| interface | cap 3 (holds) | cap 4 (peeled) |
+|---|---|---|
+| 2 -> 3 | 1.644 mm | 2.006 mm |
+| 3 -> 4 | 2.251 | **3.013** |
+| 4 -> 5 | 1.531 | 2.250 |
+| 5 -> 6 | 1.918 | 1.805 |
+| **worst** | **2.251 (5.7 slots)** | **3.013 (7.6 slots)** |
+
+A third wider, and that is the whole difference.
+
+**The threshold does not transfer between geometries.** The de-lid part parted at 4.0 slots where
+2.0 held; this annulus holds at 5.7 and parts at 7.6. Only the ORDERING transfers - so the rule is
+to compare a candidate against a geometry known to hold, never against an absolute number.
+
+### The pre-flight rule, stated so it is not skipped again
+
+Before shipping anything that loosens the lattice: **measure the widest void at an untied azimuth,
+per interface, and compare it against the same object's known-good geometry.** Through-void,
+weld-graph connectivity, interior density and material are all worth having and none of them
+substitutes for it.
+
+### What was kept
+
+The finding underneath the change stands: the interior really does fill at **38% when the setting
+says 25%**, and the cap is why - a 0.45 mm bead every 3 slots of 0.3963 covers 38%. That cannot be
+fixed without the part coming apart. It can stop being SILENT, and now does:
+
+> continuous shell: infill density not delivered - the lattice gap cap holds the stride at 2.8
+> slots where 4 were asked, so this wall fills at about 36% rather than the requested 25%
+
+Tested both ways: it fires at density 25 on a wall this thin, and is silent at density 50 where
+the requested stride fits inside the cap. "Why is my 25% part solid" cost two print rounds to
+answer and will not cost a third.
+
+Also worth recording plainly, from the same measurement: on a 20 mm test object **more than half
+the material is shell** - two wall loops plus the pinned anchor on every face - so these parts
+will read substantially solid whatever the interior does. The density setting only ever governs
+the middle.
