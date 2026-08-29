@@ -1702,7 +1702,41 @@ std::vector<Point> resample_ring(const Polygon &ring, size_t S, const Point &anc
 // Nine to eleven per cent less material, the density setting nearly delivered, and no void wider
 // than a millimetre anywhere. THIS IS A DESK RESULT ONLY: 3.0 was set by a peel test and 4.0 has
 // to earn its place the same way.
-static const double CS_MAX_GAP_SLOTS = 4.0;
+// AND PUT BACK TO 3.0 on 2026-08-29, by the peel test, which is the only thing that can settle
+// it. P1_sparse - the plain sparse annulus, the very geometry 3.0 was set on - came apart at 4.0.
+// The user's description is the diagnosis: "the foam is now well anchored to the interior and
+// walls of the outside and the bore, but the area previously solid in between the two is now just
+// a void". Anchored at both faces, parted in the middle.
+//
+// Every desk number said it was safe. Worst void over twelve layers 0.19 -> 0.34 mm2, 0.43 mm
+// wide; interior density 38% -> 30%; 11% less material. All true, and all blind to this: the
+// through-void measure asks whether a void sits at the same PLACE on every layer, and a mid-wall
+// parting surface does not have to. It is a cylinder at a fixed RADIUS whose azimuth precesses
+// with the weave, so ANDing consecutive layers erases exactly the thing that matters.
+//
+// The weld graph does not catch it either: run afterwards on both, every ring is welded to its
+// neighbours at 23-49% and the section is ONE connected piece at 4.0 just as at 3.0.
+//
+// What catches it is the metric this campaign wrote down long ago and I did not run - the VOID
+// WIDTH AT AN UNTIED AZIMUTH, per interface, at its widest point:
+//
+//     interface     cap 3 (holds)   cap 4 (peeled)
+//     2 -> 3           1.644 mm        2.006 mm
+//     3 -> 4           2.251           3.013
+//     4 -> 5           1.531           2.250
+//     5 -> 6           1.918           1.805
+//     WORST            2.251 (5.7 slots)  3.013 (7.6 slots)
+//
+// A third wider, and that is the whole difference. A peel plane is a CYLINDER at a fixed radius;
+// its azimuth precesses with the weave, so ANDing consecutive layers - which is what the
+// through-void measure does - erases the very thing that parts the part. Through-void answers
+// "is there a vertical channel"; peel asks "is there a cylinder of poor bond". They are not the
+// same question and I used the first to green-light a change to the second.
+//
+// The absolute number does not transfer between geometries either: the de-lid part parted at 4.0
+// slots where 2.0 held; this annulus holds at 5.7 and parts at 7.6. The ORDERING transfers; the
+// threshold does not.
+static const double CS_MAX_GAP_SLOTS = 3.0;
 
 bool apply_radial_serpentine(ContourChain &cc, const WovenInfill &woven, coord_t spacing,
                              size_t layer_index, std::string *degrade_note)
@@ -2160,6 +2194,27 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
                         m = pick(gapcap);
                         if (gapcap > 3.0 && m < 4)
                             m = pick(3.0);
+                        // SAY SO when the cap, not the density setting, chose the stride.
+                        //
+                        // The requested density asks for a stride of K slots; the cap refuses any
+                        // gap wider than CS_MAX_GAP_SLOTS, so on a thin wall the delivered stride
+                        // is the cap's and the interior comes out denser than asked - a 0.45 bead
+                        // every 3 slots of 0.3963 covers 38% where the setting said 25%. That is
+                        // not a bug: loosening the cap was tried and the plain sparse annulus came
+                        // apart in the hand. But it was SILENT, which is the thing this subsystem
+                        // is not allowed to be, and "why is my 25% part solid" has now cost two
+                        // print rounds to answer.
+                        const double got = double(span - 1) / double(std::max<size_t>(2, m) - 1);
+                        if (m > 1 && got < double(K) - 0.25) {
+                            char msg[192];
+                            std::snprintf(msg, sizeof(msg),
+                                          "continuous shell: infill density not delivered - the "
+                                          "lattice gap cap holds the stride at %.1f slots where "
+                                          "%zu were asked, so this wall fills at about %.0f%% "
+                                          "rather than the requested %.0f%%",
+                                          got, K, 100.0 / got, 100.0 / double(K));
+                            add_note(degrade_note, msg);
+                        }
                     }
                     for (size_t j = 0; j < m; ++j)
                         keep[first + (m == 1 ? (span - 1) / 2

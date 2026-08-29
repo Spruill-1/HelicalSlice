@@ -2431,6 +2431,44 @@ Surfaces cs_fence_disc(double r_out)
 
 } // namespace
 
+TEST_CASE("A wall whose gap cap overrides the density setting says so", "[ContinuousShell]") {
+    // The density setting asks for a stride of K = round(1/density) slots. The gap cap refuses any
+    // gap wider than CS_MAX_GAP_SLOTS, so on a wall this thin the delivered stride is the CAP's,
+    // and the interior fills denser than asked: a 0.45 mm bead every 3 slots of 0.3963 covers 38%
+    // where the setting said 25%.
+    //
+    // That is not a bug. Loosening the cap to 4 slots was tried and printed, and the plain sparse
+    // annulus came apart in the hand - anchored to both faces and parted down the middle. The cap
+    // is what holds the lattice together.
+    //
+    // But it was SILENT, and "why is my 25% part solid" cost two print rounds to answer. This
+    // subsystem's standing rule is that a layer which takes a weaker path than the options asked
+    // for must say so.
+    Flow flow(0.5f, 0.25f, 0.5f);
+    Surfaces surfaces = cs_fence_tube(10.0, 2.5);
+    PrintRegionConfig cfg;
+    cfg.wall_loops.value = 2;
+    cfg.continuous_shell_infill_density.value = 25;      // asks for a 4-slot stride
+    ExtrusionEntityCollection e;
+    std::string reason, note;
+    REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.25, &cfg, e, &reason,
+                                                            false, 3, false, {}, nullptr, &note));
+    INFO("note='" << note << "'");
+    REQUIRE(note.find("infill density not delivered") != std::string::npos);
+    // ...and it says what it actually delivered, not merely that something happened.
+    REQUIRE(note.find("slots where 4 were asked") != std::string::npos);
+
+    // A wall whose requested stride the cap can honour says nothing. Density 50 asks for 2 slots,
+    // which is inside the cap, so there is no shortfall to report.
+    cfg.continuous_shell_infill_density.value = 50;
+    ExtrusionEntityCollection e2;
+    std::string note2;
+    REQUIRE(ContinuousShellPathBuilder::build_cross_section(surfaces, flow, 0.25, &cfg, e2, &reason,
+                                                            false, 3, false, {}, nullptr, &note2));
+    INFO("note2='" << note2 << "'");
+    REQUIRE(note2.find("infill density not delivered") == std::string::npos);
+}
+
 TEST_CASE("A wall that pinches keeps the faces of the pocket it leaves", "[ContinuousShell]") {
     // Band marching walks a chain down one face to the medial and back up the other, so a chain's
     // two middle rings are the last it could reach from either side. On a wall of even thickness
