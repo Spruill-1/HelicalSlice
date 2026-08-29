@@ -2763,3 +2763,83 @@ The question this time is voids rather than peeling: look DOWN at the top face a
 dark crescents are shorter and broken up. Falsified by P3 peeling at the pocket (one pin is not
 enough), or by its channels being unchanged (the through-void measure does not track what the eye
 reads as a void, and the whole Z line needs re-grounding).
+
+## PlateQ round 4 result (2026-08-29): both peel-clean, and the medial core named
+
+**Both objects pass the peel test.** The eccentric's peel problem, which took four rounds, is
+closed: it held, and so did the crescent. What remains on both is a solid in the middle of the
+foam, which the user read as "collapsing-density foam".
+
+### It is the MEDIAL CORE, and rendering it settled that in one picture
+
+Material present on ALL of twelve consecutive layers, rendered over one layer's material:
+
+- the outer shell band, expected and correct;
+- for the eccentric, the pocket band;
+- and on both, **a lens along the medial axis** - the terminus plus the ring the distribution puts
+  beside it, one slot apart, both immovable, therefore identical on every layer. On the crescent
+  it is 10.7 mm2 of a 155 mm2 section, a millimetre wide, running its whole length.
+
+Two of the three are structure doing its job. The medial lens is not.
+
+### Why it is there, and why the obvious fix is wrong
+
+The terminus is the one held ring in this subsystem **with no face behind it**. A shell backs onto
+the printed surface; a pocket face backs onto another chain's material; a terminus is just where
+the marching ran out. But the pin rule holds a ring beside anything that does not move, so the
+terminus freezes its neighbour too, and two frozen rings one slot apart are solid.
+
+The obvious fix - stop putting a ring beside it - was built and measured:
+
+| | material | interior solid | worst void |
+|---|---|---|---|
+| P5_crescent as shipped | 155.2 | 10.7 | **1.33** |
+| P5_crescent, no ring beside the terminus | 148.6 | 15.9 | **14.72** |
+| P6_solid as shipped | 114.9 | 2.8 | **0.07** |
+| P6_solid, no ring beside the terminus | 111.2 | 5.4 | **6.80** |
+
+It removes the ridge and puts a **void in the same place**, an order of magnitude bigger. That is
+the pin rule restated: a gap next to something immovable sits at a fixed radius and stacks. **The
+medial wants a ring there. It does not want a frozen one.**
+
+### What worked: weave the terminus
+
+Keep it whatever the density asks - it is the innermost geometry - but tag it infill, so it weaves
+and so its neighbour is no longer pinned against it.
+
+| object | material | interior solid | worst void | moves/layer |
+|---|---|---|---|---|
+| P5_crescent | 155.1 (=) | **10.7 -> 4.6** | 1.33 (=) | 28.0 -> 29.7% |
+| P3_ecc | 205.9 (=) | 49.7 (=) | 0.59 (=) | 20.6% (=) |
+| P6_solid | 115.0 (=) | 2.8 (=) | 0.07 (=) | 38.7% (=) |
+
+The crescent's medial solid **more than halves at no material cost**, its worst void does not
+move, and its lattice gets slightly more mobile. Annular chains are untouched by a bore-less rule.
+
+**The guard is measured, not guessed.** Weaving the terminus also releases the ring beside it, and
+on a SHORT chain that ring was the one holding the interface shut: at `n > sl_out + 4` the
+eccentric's five-ring pocket chain traded 10.8 mm2 of solid for a worst void that went 0.59 to
+1.25 mm2. At `n > sl_out + 6` it is excluded and unchanged.
+
+### The rule this arc has converged on
+
+Three rounds have now produced the same statement from three directions:
+
+> **A pin costs a ring all of its motion, and motion is what stops a void sitting at the same
+> radius on every layer. Spend it only where something immovable would otherwise be left
+> unbraced - and never spend it twice on the same interface.**
+
+- Pin BOTH pocket faces: the second pin is the second spend on one interface. Removing it took the
+  eccentric's worst channel to a third.
+- Pin against a terminus: the terminus has no face behind it, so the right move is not to unpin
+  the neighbour but to unfreeze the TERMINUS.
+- Pin only against printed faces: wrong, because the criterion is whether the neighbour moves, not
+  what it is.
+
+### Still open
+
+The eccentric's interior solid is 49.7 mm2 against the crescent's 4.6 - ten times as much - and it
+is the pocket band, three rings at one slot: the pinned pocket face, the pocket chain's outermost
+ring, and the second pocket face. It is what holds the two chains together and it is the last
+large solid in the suite. The medial-terminus trick does not apply to it (its chain is too short),
+and the pocket band is exactly the structure that the peel test says is doing its job.
