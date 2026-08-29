@@ -9,6 +9,31 @@ ROUND 2 (2026-08-27) fixed the crescent and broke the eccentric. The crescent st
 its concave side went from 5.7% of that interface welded to 38.1%, against 41.5% convex - and the
 lobed object came out as the foam is meant to look. The eccentric came apart into three pieces.
 
+ROUND 5 (2026-08-29) - weave the medial terminus. Round 4 passed the peel test on both objects,
+which closed the eccentric's peel problem after four rounds. What was left on both was a solid in
+the middle of the foam, and rendering the material present on ALL of twelve consecutive layers
+named it: the MEDIAL CORE, the terminus plus the ring the distribution puts beside it, one slot
+apart and both immovable, so identical on every layer. On the crescent that is 10.7 mm2 of a
+155 mm2 section, a millimetre wide, running its whole length.
+
+The terminus is the one held ring here with no face behind it - a shell backs onto the printed
+surface, a pocket face onto another chain's material, a terminus is just where the marching ran
+out - and the pin rule freezes its neighbour along with it. So weave it: kept whatever the density
+asks, but tagged infill, which releases the neighbour too.
+
+    object         material  interior solid  worst void  moves/layer
+    P5_crescent      155.1      10.7 -> 4.6    1.33 (=)   28.0 -> 29.7%
+    P3_ecc           205.9         49.7 (=)    0.59 (=)      20.6% (=)
+    P6_solid         115.0          2.8 (=)    0.07 (=)      38.7% (=)
+
+ONE object changes. P3_ecc is unchanged by it - its pocket chain is too short to qualify - so it
+rides along as a same-session control and as the peel re-check.
+
+The obvious alternative, dropping the ring beside the terminus, was built and measured and is
+worse: it removes the ridge and puts a VOID in the same place an order of magnitude bigger
+(crescent worst void 1.33 -> 14.72 mm2). A gap next to something immovable sits at a fixed radius
+and stacks. The medial wants a ring there; it does not want a frozen one.
+
 ROUND 4 (2026-08-28) - pin ONE face of the pocket, not both. Round 3 held together but had
 voids, and the reason turned out to be Z, not the layer: the eccentric's lattice barely moves
 between layers, so its voids sit at the same radius on every one and stack into channels. Of the
@@ -207,19 +232,20 @@ def main():
     t2 = re.search(r"prediction[^\d]*(\d+)", meta)
     print(f"\n{OUTNAME}: {w.group(1) if w else '?'} g, "
           f"{int(t2.group(1)) // 60 if t2 else '?'} min")
-    print("\nP3 is the question again, and this time it is about VOIDS rather than peeling.")
-    print("  P3: it held last time but showed channels. The worst persistent void is now a third")
-    print("      of what it was, at the same material, so look DOWN at the top face: the dark")
-    print("      crescents that ran into the part should be shorter and broken up rather than")
-    print("      running the height. Peel it too - the two chains still meet over 58.5% of that")
-    print("      interface and it must not go back to separating.")
-    print("  P5: the reference, and NOT a null one. Same ring count and within 0.3% of the path")
-    print("      of the part in hand, but its beads differ by a median 0.05 mm and 1.15 at the")
-    print("      99th percentile, because the ring-gap measurement was corrected since that")
-    print("      print. It should look and peel the same; it is not bit-for-bit the same file.")
-    print("\nWhat would falsify this: P3 peeling at the pocket, which would mean one pin is not")
-    print("enough after all; or its channels unchanged, which would mean the through-void measure")
-    print("does not track what the eye reads as a void and the whole Z line needs re-grounding.")
+    print("\nP5 is the question this time, and it is about the SOLID down the middle.")
+    print("  P5: cut it across and look at the centre of the foam. The solid lens running along")
+    print("      the medial should be roughly half the width it was - 10.7 mm2 of section down to")
+    print("      4.6 - at the same material, with the cells either side of it unchanged. Peel it")
+    print("      as well: the whole point is that halving it costs nothing, so it must still hold.")
+    print("  P3: the control, and a real one this time - BIT-FOR-BIT identical to the part in")
+    print("      hand (0.0000 mm displacement at every point), because its pocket chain is too")
+    print("      short to qualify for the change. It is here to say whether the machine or the")
+    print("      filament moved, and to re-check the peel that round 4 won. Its own middle solid")
+    print("      is the pocket band and is NOT expected to change.")
+    print("\nWhat would falsify this: P5's middle looking the same, which would mean what the eye")
+    print("reads as solid is not the persistent-material measure; or P5 peeling at the medial,")
+    print("which would mean the terminus was load-bearing frozen and the ring beside it was doing")
+    print("work the weave cannot replace.")
 
 
 if __name__ == "__main__":
