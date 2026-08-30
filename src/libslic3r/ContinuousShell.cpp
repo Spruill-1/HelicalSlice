@@ -1995,7 +1995,7 @@ coord_t vanish_depth(const ExPolygons &shape, coord_t hi)
 // loop), and whether it is pinned in place. Everything else it derives from the geometry.
 void apply_weave(ContourChain &cc, const std::vector<char> &kept_infill,
                  const std::vector<char> &kept_pocket, const WovenInfill &woven,
-                 coord_t spacing, size_t layer_index)
+                 coord_t spacing, size_t layer_index, double closure_in = 0.8)
 {
 // THE WEAVE, LOCAL TO EACH POINT.
 //
@@ -2147,6 +2147,19 @@ for (size_t j = 0; j < NR; ++j) {
 // across the depth go 23.0% to 36.3% with the tallest dead run 2 layers to 5. That
 // is the columnar failure this subsystem started with. The drift buys per-azimuth
 // coverage with per-interface bond, and it is the right trade.
+// How close two rings' centres may come at a weld, in spacings.
+//
+// 0.8 was tuned against bonded fraction alone, and it sits BELOW one bead: two beads whose
+// centres are 0.8 spacings apart on a 0.45 mm line overlap by about a quarter of their width.
+// The engine's volumetric cap then thins them to keep the volume honest, which is where the
+// near-zero extrusion segments come from - beads that "might as well be travel moves", in a
+// mode whose whole premise is that there are none. A weld is two beads TOUCHING, so the
+// allowance wants to be about one bead width expressed in spacings, not 0.8.
+// Passed in rather than fixed, because changing it for the marched path would move output that
+// two peel tests have already validated. The interpolated path passes one bead width.
+const char  *_cl = std::getenv("CS_CLOSURE");
+const double closure = _cl ? std::atof(_cl) : closure_in;
+
 const double overshoot   = 8.0;
 const double drift_slots = 2.0;
 size_t n_infill = 0;
@@ -2288,8 +2301,8 @@ for (size_t j = 0; j < NR; ++j) {
         out /= len;
         const double sh_out = (j > 0 && kept_infill[j - 1] && !pinned[j - 1]) ? 0.5 : 1.0;
         const double sh_in  = (j + 1 < NR && kept_infill[j + 1] && !pinned[j + 1]) ? 0.5 : 1.0;
-        const double cap_out = std::max(0.0, woven.weave * sh_out * (g_out - 0.8 * double(spacing)));
-        const double cap_in  = std::max(0.0, woven.weave * sh_in  * (g_in  - 0.8 * double(spacing)));
+        const double cap_out = std::max(0.0, woven.weave * sh_out * (g_out - closure * double(spacing)));
+        const double cap_in  = std::max(0.0, woven.weave * sh_in  * (g_in  - closure * double(spacing)));
         const double e = std::clamp(
             overshoot * std::sin(basephase[j][i] + ring_phase), -1.0, 1.0);
         const Vec2d q = here + out * (e * (e >= 0.0 ? cap_out : cap_in));
@@ -2929,13 +2942,20 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
     std::vector<Build> done, active;
     for (size_t k = 0; k < levels.front().size(); ++k) {
         Build b;
-        if (attach_skin && k == 0)                    // the skin belongs to the trunk
+        if (attach_skin && k == 0) {                  // the skin belongs to the trunk
+            // The INNERMOST wall loop is the OUTERMOST ring of the lattice - one bead, not two.
+            // Emitting it as skin and then starting the level sets a gap inside it put three
+            // smooth rings against the wall before any weaving began: the two wall loops, and
+            // then the first lattice ring, pinned because its outward neighbour was not lattice.
+            // Tagging the innermost wall loop as lattice makes IT the anchor, so the lattice
+            // starts at the wall and the ring behind it is free to weave.
             for (size_t j = 0; j < sl; ++j) {
                 b.cc.loops.push_back(peel[j].contour);
-                b.lat.push_back(0);
+                b.lat.push_back(j + 1 == sl ? 1 : 0);
             }
-        else
+        } else {
             b.cc.outer_pinch = true;
+        }
         b.cc.loops.push_back(levels.front()[k]->poly);
         b.lat.push_back(1);
         b.last = levels.front()[k];
@@ -2987,9 +3007,10 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
         const size_t h = size_t(std::max_element(tally.begin(), tally.end()) - tally.begin());
         if (tally[h] * 2 < b.last->bore.size())
             continue;                              // not decisively any bore's: a site's cell
+        // Mirror at the bore: the OUTERMOST bore loop is the INNERMOST ring of the lattice.
         for (size_t k = sl; k-- > 0; ) {
             b.cc.loops.push_back(peel[k].holes[h]);
-            b.lat.push_back(0);
+            b.lat.push_back(k + 1 == sl ? 1 : 0);
         }
         b.cc.has_bore = true;
     }
@@ -3013,7 +3034,14 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
             b.cc.woven_infill = true;              // tag [shell | infill | shell] downstream
             if (woven.weave > 0.0) {
                 const std::vector<char> pinned(b.cc.loops.size(), 0);
-                apply_weave(b.cc, b.lat, pinned, woven, spacing, layer_index);
+                // One bead width, expressed in spacings: a weld is two beads touching. The
+                // marched path keeps 0.8, which is a quarter of a bead of OVERLAP - the engine's
+                // volumetric cap then thins those beads to keep the volume honest, and what comes
+                // out is the near-zero segments that read as travel moves in a mode that has
+                // none. Measured on the eccentric, moving to one bead halves the extrusion below
+                // 0.20 mm, 0.81% of path to 0.45%.
+                apply_weave(b.cc, b.lat, pinned, woven, spacing, layer_index,
+                            double(flow.scaled_width()) / double(spacing));
             }
         }
         out.push_back(std::move(b.cc));
