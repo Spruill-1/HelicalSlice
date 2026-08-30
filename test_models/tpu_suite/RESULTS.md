@@ -3223,3 +3223,71 @@ is right for a PAIR and wrong for a stack.
 Points 4 and 5 are built and, on the evidence, built better than specified. Points 1, 2 and 6 are
 not built, and **point 2 is the one that would dissolve the bug family rather than patch it again**.
 It is also the largest change: ring generation is the base of everything downstream.
+
+## Interpolated rings, stage 1: the generator (2026-08-29)
+
+The plan agreed after the hypothesis mapping: replace offset marching with rings
+interpolated between the wall and the bore, with Voronoi subsectioning built in from the
+start, and the outer surface kept as a single uncut ring per layer. Points 4 and 5 of the
+hypothesis carry over unchanged - they measured better than specified.
+
+Stage 1 is `src/libslic3r/ContinuousShellRings.{hpp,cpp}` plus
+`tests/libslic3r/test_continuous_shell_rings.cpp`. Nothing is wired in: ContinuousShell.cpp
+is byte-unchanged and the 52-case suite is still 33834 assertions green.
+
+### What it builds on
+
+All four pieces were already in the tree, which is most of why this was a day and not a
+fortnight: `marchsq::execute` for the iso-contours (sub-cell interpolating, already used by
+FillGyroid), `AABBTreeLines::LinesDistancer` for exact distance and nearest point (already
+used by `ring_gap`), `EdgeGrid`'s Danielsson SDF for the raster, and Arachne's beading
+strategy stack waiting downstream.
+
+### Two findings worth keeping
+
+**The raster is accurate enough for topology and not for statistics.** Every vertex the
+grid yields is Newton-corrected against the exact trees, so a gridded SDF costs nothing in
+geometry. But the ring COUNT comes from a percentile of the local extent, and the gridded
+field reads a 6.000 mm wall as 6.206 - an error that would land in n. The extent statistic
+is therefore measured exactly, on a subsample; a percentile does not need every cell.
+
+**Newton has no gradient exactly where the design lives.** u is continuous across a
+Voronoi cut - that is the property the whole subsectioning rests on - but it is not
+DIFFERENTIABLE there, because the nearest bore swaps from one to the other. The first
+version failed to place 30% of a near-wall level set in a two-bore slab. The corrector now
+falls back to bisection between a point's two nearest boundary points, where u runs 0 to 1
+and is bracketed by construction; that also covers a crescent's tangency and the medial
+axis. A vertex neither method can place is dropped, and a ring that loses more than 2% of
+itself that way fails loudly rather than emitting a chord across the scar.
+
+### A bug worth remembering
+
+`EdgeGrid::Contour` stores raw POINTERS into the caller's `Points`. Handing `create` a
+temporary `Polygons{...}` reads freed memory. It presented as a test that passed alone and
+failed in a suite, deterministically in each case - which reads exactly like a race, and is
+not one. The tell was that no single predecessor reproduced it and serialising the parallel
+loop did not fix it.
+
+### Measured
+
+| fixture | bores | W p50 | W max | loops | max edge | gap p50 | gap p99 | field ms | rings ms |
+|---|---|---|---|---|---|---|---|---|---|
+| concentric annulus r10/bore4 | 1 | 5.999 | 6.000 | 4 | 0.594 | 1.001 | 1.004 | 33.0 | 8.0 |
+| eccentric annulus bore@+2 | 1 | 6.611 | 7.999 | 4 | 0.608 | 1.006 | 1.013 | 30.3 | 7.8 |
+| crescent bore@+4.6 r5 | 1 | 7.841 | 9.599 | 4 | 0.593 | 1.029 | **2.207** | 30.4 | 8.8 |
+| solid disc r8 (centroid) | 0 | 7.999 | 8.000 | 4 | 0.575 | 1.002 | 1.008 | 30.1 | 4.3 |
+| two unequal bores in a slab | 2 | 7.112 | 13.400 | 5 | 0.923 | 1.029 | 1.161 | 39.3 | 9.3 |
+| annulus r50/bore20 | 1 | 29.996 | 30.000 | 6 | 0.610 | 1.000 | 1.001 | 241.7 | 55.3 |
+
+`gap` is the consecutive-ring gap divided by the local extent over (n+1), so 1.000 is
+"exactly where interpolation says it should be". Read the crescent's 2.207 as the signal it
+is: its tip is thin enough that four levels crowd, which is precisely the coalescence the
+point-6 ladder exists to catch, and it is now a number rather than a void in a print.
+
+The two-bore row is the design claim standing up in geometry: one loop near the wall
+carrying both cell labels, two loops past the saddle, and the cut crossed in two places with
+no gap wider than a bead.
+
+Cost is at budget for the sections under test and 8x over on a 100 mm annulus, where the
+cell cap binds. The raster is a topology carrier, so the lever is a coarser pitch where the
+wall is thick; stage 2 knows the gap it wants and can ask for it.
