@@ -3443,3 +3443,70 @@ clean; both times the check could not have failed.
 
 PlateR_interp republished at 7.96 g / 40 min, one continuous run per layer on all three
 objects, 250 of a possible 250 Z heights per layer on P3_ecc.
+
+## Why the crowding happens - and it is not the sharp points (2026-08-30)
+
+The question was why sharp tips seem to kill the interpolation. Measured, they do not. Two
+distinct things were happening, neither of them about corners.
+
+**The gap is proportional to the local extent.** n is set by W_max and the gap is W(p)/(n+1),
+so gap_min/gap_max = W_min/W_max exactly. With the widest gap pinned just under the weld bound,
+the wall collapses wherever W falls more than (weld bound)/(bead floor) = 1.19/0.425 = 2.8-fold
+below its maximum. That is the whole rule:
+
+| section | W range (mm) | spread | n | min gap | collapsed |
+|---|---|---|---|---|---|
+| concentric annulus | 7.50..7.57 | 1.0x | 6 | 1.071 | 0.0% |
+| eccentric bore@+4 | 3.54..11.56 | 3.3x | 9 | 0.354 | 9.3% |
+| crescent (centroid target) | 2.71..14.70 | 5.4x | 12 | 0.208 | 9.2% |
+
+The eccentric annulus has no sharp anything and collapses. The concentric one is uniform and
+does not. It is the SPREAD.
+
+**And half the crescent's spread was an artefact of my own inner target.** The hypothesis said
+"the centroid or the inner wall of a bore". For a disc the centroid is exactly right -
+d_out + d_centroid is the radius everywhere, constant. For anything elongated or curved it is
+not a thickness at all but "distance from the wall plus distance to a far-away point", and it
+inflated the crescent's extent to 14.7 mm on a wall whose half-thickness never exceeds 5.5 mm.
+The ring count that came out was 12 where 4 is called for.
+
+The MEDIAL AXIS is what the centroid was standing in for. d_out + d_medial is the local
+half-thickness, which is the quantity that decides how many rings fit, and it degenerates to
+the centroid for a disc - which stays byte-identical. The crescent's count drops 11 -> 6, and
+its beads stop needing to be squeezed at all, so the rung-1 test had to move to a strongly
+eccentric annulus to find a wall that genuinely tapers.
+
+A trap on the way: `medial_axis`' max_width filters the axis by the local width it stands for.
+Passed the couple of millimetres the sub-bead fallback uses, it rejects every part of a thicker
+wall and returns nothing - which reverts to the centroid in silence.
+
+### And the re-section sites were in the wrong place
+
+The extent at a site is just d_out there. A site dropped at the argmax of d_out + d_in
+therefore lands where d_out is SMALL, the extent collapses to nearly nothing around it, and the
+spread the site was meant to tighten explodes. Swept on the eccentric:
+
+| sites at argmax(W) | spread | collapsed | | sites at argmax(d_out) | spread | collapsed |
+|---|---|---|---|---|---|---|
+| 0 | 3.3x | 9.3% | | 0 | 3.3x | 9.3% |
+| 1 | 231x | 13.2% | | 1 | 2.8x | 5.7% |
+| 4 | 231x | 24.9% | | 4 | 2.8x | 5.7% |
+
+At the deepest point the extent is locally at its largest, so no singularity is created. This
+also explains the previous entry's finding that "a site never earned its rebuild": the
+earn-its-rebuild guard was correctly refusing a regression, not discovering that the geometry
+was hopeless. With the placement fixed, 90 of 144 layers re-section and the layers still
+collapsing halve, 90 -> 45.
+
+**A point-like inner target is the general hazard.** A bore is an extended curve and behaves;
+a point - a centroid, or a badly-placed site - does not, because the level sets closing onto it
+crowd without bound nearby. Every failure in this entry is a version of that.
+
+### Still open
+
+P5_crescent's coverage rose to 72.1% with 19.5% of its path at ~0.29 mm - the merge region,
+where the engine's volumetric cap thins beads whose rings sit closer than their width. That is
+legitimate but a large share, and the interaction of the three changes in this entry (medial
+target, deepest-point sites, earn-its-rebuild) has not been separated. PlateR_interp is
+republished at 8.09 g / 41 min and still prints one continuous run per layer, but its crescent
+should be read with that caveat.
