@@ -2730,3 +2730,80 @@ read as a broken necklace rather than a continuous tube. P5 carries the medial-t
 
 Falsified by P1's wall still reading as a continuous tube - which would mean bonded FRACTION is not
 what the hand is reading and the target is the gap width itself - or by P5 parting at its medial.
+
+## The foam hypothesis, restated - and where the implementation actually diverges (2026-08-29)
+
+Round 7 "partially fixed it": the sharper drive helped the tube's mid-wall and did not close it.
+The hypothesis was then restated in full, and it is worth setting the implementation beside it
+point by point, because the divergences turn out to be exactly the bug family this campaign has
+spent a fortnight on.
+
+### The hypothesis
+
+1. Isolate regions with **up to a single bore** via Voronoi subsectioning.
+2. For a region, **interpolate** between the inner edge of the outer wall and either the centroid
+   or the inner wall of a bore.
+3. Along that interpolation place an appropriate number of rings closing the space.
+4. Perturb each ring perpendicular with a sinusoid whose amplitude at a spot is **half the distance
+   to the closest spot on the adjacent ring in that direction**, so a maximum welds to the adjacent
+   ring's minimum - which means **the phase flips each ring**.
+5. Advance the overall phase with Z so the welds slowly spin.
+6. If the rings coalesce colinear, **reduce extrusion width adaptively** to fit them; if that fails,
+   **Voronoi-section the cell and retry**.
+
+### Point by point against what is built
+
+| # | status |
+|---|---|
+| 1 | **Not built on main.** Regions come from `march_bands`, which splits a section into chains where a band pinches. Voronoi subsectioning lives on the parked `continuous-shell-multibore-and-infill` branch. |
+| 2 | **Not built, and this is the root.** Rings come from repeated `offset_ex`, not interpolation. |
+| 3 | Built - the count search - but it counts **slots**, which is only a distance if 2 holds. |
+| 4 | Built, and per-POINT since the nearest-point fix. Two deliberate departures, both measured below: a closure allowance, and a drift on top of the phase flip. |
+| 5 | Built: `dphase`, 0.3 pi per layer. |
+| 6 | **Not built.** A chain too thin to sparsify prints solid and now says so; there is no adaptive-width retry and no Voronoi re-section. |
+
+### The evidence that point 2 is the root
+
+Consecutive **undecimated** offsets, distance in slots. Interpolation gives exactly 1.00 everywhere
+by construction; offsetting need not:
+
+| object | median | p90 | p99 | max | worst pair |
+|---|---|---|---|---|---|
+| P5_crescent | 1.00 | 1.04 | 4.01 | **6.61** | innermost pair, at the tips |
+| P3_ecc | 1.00 | 3.98 | 11.22 | **11.58** | the medial, where the band pinches |
+
+**The median is exactly 1.00 and the maximum is 11.6.** Every "a slot is not a distance" bug this
+campaign has chased is that table: the medial pocket (11.58 slots at the eccentric's medial, which
+took three rounds), the tip voids (6.61 at the crescent's innermost pair), the gap cap that counts
+slots, the millimetre cap that was built to patch it. **Interpolating between the two boundaries
+would make the whole family unrepresentable.**
+
+### Point 4: the implementation is ahead of the specification, and the two departures earn their keep
+
+**The closure allowance** (extremes stop 0.8 of a spacing short instead of meeting). Swept:
+
+| closure | weakest interface | widest untied void | path |
+|---|---|---|---|
+| **0.8 (shipped)** | **29%** | **2.251 mm** | 427.7 |
+| 0.5 | 30% | 2.429 | 434.3 |
+| 0.2 | 30% | 2.607 | 441.1 |
+| 0.0 (as specified) | 30% | **2.726** | 445.7 |
+
+Meeting exactly buys **one point** of bonded fraction and widens the untied void by 21% for 4% more
+path. The reason it buys so little: with a saturating drive the bonded FRACTION is set by how much
+of the ring sits at its extreme, not by how close the extremes get. Which is also why the drive is
+saturating rather than a pure sinusoid - a true sinusoid welds at points, the saturated one welds
+over arcs. That is an addition beyond the specification and it is where the coverage comes from
+(overshoot 4 -> 8 took the weakest interface 22% -> 29%).
+
+**The drift** on top of the phase flip. Strict anti-phase, as specified, raises the weakest
+interface 22% -> 27% at no material cost - and brings rings j and j+2 into phase so their welds
+line up into radial spokes: azimuths carrying no weld anywhere across the depth 23.0% -> 36.3%,
+tallest dead run 2 layers -> 5. That is the columnar failure the subsystem began with. Anti-phase
+is right for a PAIR and wrong for a stack.
+
+### What that leaves
+
+Points 4 and 5 are built and, on the evidence, built better than specified. Points 1, 2 and 6 are
+not built, and **point 2 is the one that would dissolve the bug family rather than patch it again**.
+It is also the largest change: ring generation is the base of everything downstream.
