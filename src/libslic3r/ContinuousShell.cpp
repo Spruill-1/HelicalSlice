@@ -2666,8 +2666,18 @@ std::vector<ContourChain> interpolated_chains(const ExPolygon &region, const Flo
     }
 
     const ExPolygon &interior = peel.back();
-    const double pitch_mm = double(spacing) * SCALING_FACTOR /
-                            ((woven.enabled && woven.density > 0.0) ? woven.density : 1.0);
+    const double sp_mm = double(spacing) * SCALING_FACTOR;
+
+    // How far apart two rings may sit and still weld. This is CS_MAX_GAP_SLOTS, which a peel
+    // test set and a peel test has twice re-set: 3 slots held, 4 slots parted the tube. What
+    // changes here is WHERE it is applied. As a cap on a decimator it could only refuse to drop
+    // a ring from a stack whose positions were already fixed by marching, so it fought the
+    // density knob and lost track of both - it held a 25% wall at 38% and reported 2.7 slots
+    // where it meant 3. Placing rings rather than removing them, the bound is simply honoured:
+    // ask for one more ring and every gap in the region is under it.
+    const double max_gap_mm = CS_MAX_GAP_SLOTS * sp_mm;
+    const double want_mm    = sp_mm / ((woven.enabled && woven.density > 0.0) ? woven.density : 1.0);
+    const double pitch_mm   = std::min(want_mm, max_gap_mm);
 
     // The raster only has to keep neighbouring level sets apart, so it is built once at half a
     // bead to learn the extent, and again finer only if the ring count it implies asks for it.
@@ -2678,7 +2688,7 @@ std::vector<ContourChain> interpolated_chains(const ExPolygon &region, const Flo
         add_note(degrade_note, "interpolated rings declined: " + why);
         return {};
     }
-    const size_t n = field.ring_count_for_pitch(pitch_mm);
+    const size_t n = field.ring_count_for_max_gap(pitch_mm);
     if (n > 0) {
         const double want = 0.5 * field.extent_percentile(0.05) / double(n + 1);
         if (want > 0.02 && want < grid_mm) {
@@ -2725,23 +2735,47 @@ std::vector<ContourChain> interpolated_chains(const ExPolygon &region, const Flo
         return {};
     }
 
+    // The weave is parametrised by arc length and does not care, but the Z wave downstream is
+    // still an angle about the section centroid, and `star_ok` is what stops it being applied
+    // to a section the centroid cannot see all of. Interpolated rings do not make a crescent
+    // star-shaped, so the same gate has to be evaluated here - leaving it at its default of
+    // true would put an angle-parametrised Z wave on exactly the sections it is wrong for.
+    {
+        const Vec2d centre = cc.loops.front().centroid().cast<double>();
+        for (const Polygon &ring : cc.loops)
+            if (!star_shaped_about(ring, centre)) { cc.star_ok = false; break; }
+    }
+
     if (woven.enabled && n > 0) {
         // The ring count is an integer, so the delivered pitch lands on a rung of a ladder and
         // only sometimes on the density that was asked for. That is a far smaller and far more
         // predictable error than the gap cap it replaces - which silently held a 25% wall at
         // 38% - but it is still a difference between what was asked and what was printed, and
         // it is said out loud on the same terms.
-        const double got_mm = field.extent_percentile(0.75) / double(n + 1);
-        if (got_mm > 1e-9 && std::abs(got_mm / pitch_mm - 1.0) > 0.10) {
-            char msg[224];
+        const double got_mm = field.extent_percentile(1.0) / double(n + 1);
+        if (got_mm > 1e-9 && std::abs(got_mm / want_mm - 1.0) > 0.10) {
+            char msg[288];
             std::snprintf(msg, sizeof(msg),
-                "continuous shell: infill density rounded - %zu interpolated rings put the lattice "
+                "continuous shell: infill density %s - %zu interpolated rings put the widest gap "
                 "at %.2f mm where %.2f mm was asked, so this wall fills at about %.0f%% rather "
                 "than the requested %.0f%%",
-                n, got_mm, pitch_mm, 100.0 * double(spacing) * SCALING_FACTOR / got_mm,
-                100.0 * woven.density);
+                want_mm > max_gap_mm + 1e-9
+                    ? "limited by the weld distance" : "rounded",
+                n, got_mm, want_mm, 100.0 * sp_mm / got_mm, 100.0 * woven.density);
             add_note(degrade_note, msg);
         }
+
+        // Where the region is narrow the same ring count is crowded into less wall, and below a
+        // printable bead the rings collapse into each other. That is the point at which the
+        // width has to come down and, failing that, the cell has to be subsectioned; until those
+        // rungs exist, the collapse is at least not silent.
+        const double tight_mm = field.extent_percentile(0.02) / double(n + 1);
+        const double floor_mm = std::max(0.30, 0.6 * 0.85 * flow.nozzle_diameter());
+        if (tight_mm < floor_mm)
+            add_note(degrade_note, "continuous shell: interpolated rings collapse where this wall "
+                                   "is narrowest - " + std::to_string(int(tight_mm * 1000)) +
+                                   " um between rings against a " + std::to_string(int(floor_mm * 1000)) +
+                                   " um floor; the width and re-section rungs are not built yet");
         cc.woven_infill = true;                  // tag [shell | infill | shell] downstream
         if (woven.weave > 0.0)
             apply_weave(cc, is_lattice, pinned, woven, spacing, layer_index);

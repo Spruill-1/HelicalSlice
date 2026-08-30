@@ -393,16 +393,18 @@ double CsRingField::extent_percentile(double pct) const
     return double(w[k]);
 }
 
-size_t CsRingField::ring_count_for_pitch(double pitch_mm, double extent_pct) const
+size_t CsRingField::ring_count_for_max_gap(double max_gap_mm) const
 {
-    if (! m_valid || pitch_mm <= 0.)
+    if (! m_valid || max_gap_mm <= 0.)
         return 0;
-    const double W = this->extent_percentile(extent_pct);
-    // n rings leave n+1 gaps across the extent; solve W/(n+1) = pitch.
-    const double raw = W / pitch_mm - 1.0;
-    if (raw < 0.5)
-        return 0;
-    return size_t(std::llround(raw));
+    // The WIDEST place in the region, not a percentile of it. A percentile leaves the widest
+    // quartile free to open past the bound, and the widest place is exactly where a lattice
+    // stops welding - the failure this bound exists to prevent.
+    const double W = this->extent_percentile(1.0);
+    const double need = W / max_gap_mm;          // gaps required to stay within the bound
+    if (need <= 1.0 + 1e-9)
+        return 0;                                // the skin already spans it
+    return size_t(std::ceil(need - 1e-9)) - 1;
 }
 
 bool CsRingField::level_set(double t, std::vector<CsRing> &out, std::string *fail) const

@@ -325,14 +325,15 @@ TEST_CASE("Ring field ring count follows the requested pitch", "[ContinuousShell
     std::string fail;
     REQUIRE(f.build(reg, 0.1, &fail));
 
-    // n rings leave n+1 gaps across the extent, so a 1 mm pitch across 6 mm wants 5.
-    CHECK(f.ring_count_for_pitch(1.0) == 5);
-    CHECK(f.ring_count_for_pitch(2.0) == 2);
-    CHECK(f.ring_count_for_pitch(6.0) == 0);      // no room for a buried ring is not a failure
+    // n rings leave n+1 gaps across the extent, so holding every gap under 1 mm across 6 mm
+    // of wall wants 5 rings.
+    CHECK(f.ring_count_for_max_gap(1.0) == 5);
+    CHECK(f.ring_count_for_max_gap(2.0) == 2);
+    CHECK(f.ring_count_for_max_gap(6.0) == 0);      // no room for a buried ring is not a failure
 
     // And the rings it then builds really do sit at that pitch.
     CsRingFamily fam;
-    REQUIRE(f.family(f.ring_count_for_pitch(1.0), fam, &fail));
+    REQUIRE(f.family(f.ring_count_for_max_gap(1.0), fam, &fail));
     const std::vector<double> g = gaps_to(fam.rings.front().poly, fam.rings[1].poly);
     CHECK_THAT(percentile(g, 0.5), WithinAbs(1.0, 0.05));
 }

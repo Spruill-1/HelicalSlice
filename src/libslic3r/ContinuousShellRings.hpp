@@ -70,9 +70,12 @@ public:
     // lets the thin places coalesce into the degradation ladder.
     double extent_percentile(double pct) const;
 
-    // Ring count for a bead pitch, i.e. spacing/density. 0 - no room for a buried ring -
-    // is a legitimate answer, not a failure.
-    size_t ring_count_for_pitch(double pitch_mm, double extent_pct = 0.75) const;
+    // Ring count such that NO gap anywhere exceeds max_gap_mm. n rings leave n+1 gaps across
+    // the extent and the gap is W(p)/(n+1), so the widest place in the region is what sets the
+    // count: anywhere thinner is crowded, which is the degradation ladder's business, not a
+    // reason to let the widest place open past what a weave can bridge. 0 - no room for a
+    // buried ring at all - is a legitimate answer, not a failure.
+    size_t ring_count_for_max_gap(double max_gap_mm) const;
 
     // One level can come back as several loops: past the saddle where two bores separate,
     // the level set of the field genuinely is one loop per bore.

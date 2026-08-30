@@ -3633,21 +3633,39 @@ TEST_CASE("Interpolated rings deliver the density the gap cap used to override",
     CHECK(len_on < len_off);
 }
 
-TEST_CASE("Interpolated rings answer the density knob monotonically", "[ContinuousShell]")
+TEST_CASE("Interpolated rings answer the density knob where the weld distance allows", "[ContinuousShell]")
 {
-    // The knob has to mean something. Under marching the gap cap flattens it: 25% and 33% both
-    // come out at 38% on this wall. Here more density must mean more material, every step.
+    // The knob has to mean something wherever it physically can. Under marching the gap cap
+    // flattened it everywhere - 25% and 33% both came out at 38% on this wall - because the cap
+    // could only refuse to drop a ring from a stack whose positions marching had already fixed.
+    //
+    // Placing rings instead, the same weld-distance bound is honoured exactly, and it only binds
+    // BELOW the density it corresponds to. Above that the knob is monotone; below it the answer
+    // is clamped, and saying so is the whole difference from a cap that quietly won.
     const Flow flow(0.5f, 0.25f, 0.5f);
     const Surfaces surf = cs_fence_tube(10.0, 4.0);
-    double prev = 0.0;
-    for (const int d : { 15, 25, 50, 75 }) {
-        PrintRegionConfig cfg = cs_interp_cfg(true, d);
-        std::string note;
-        const CsRun r = cs_interp_run(surf, flow, cfg, 0, &note);
-        const double len = std::accumulate(r.seg.begin(), r.seg.end(), 0.0);
-        INFO("density " << d << "% -> " << len << " mm (" << note << ")");
-        CHECK(len > prev);
-        prev = len;
+
+    SECTION("monotone above the weld distance") {
+        double prev = 0.0;
+        for (const int d : { 40, 60, 80 }) {
+            PrintRegionConfig cfg = cs_interp_cfg(true, d);
+            std::string note;
+            const CsRun r = cs_interp_run(surf, flow, cfg, 0, &note);
+            const double len = std::accumulate(r.seg.begin(), r.seg.end(), 0.0);
+            INFO("density " << d << "% -> " << len << " mm (" << note << ")");
+            CHECK(len > prev);
+            prev = len;
+        }
+    }
+
+    SECTION("clamped below it, and says so") {
+        for (const int d : { 15, 25 }) {
+            PrintRegionConfig cfg = cs_interp_cfg(true, d);
+            std::string note;
+            cs_interp_run(surf, flow, cfg, 0, &note);
+            INFO("density " << d << "% -> " << note);
+            CHECK(note.find("limited by the weld distance") != std::string::npos);
+        }
     }
 }
 
