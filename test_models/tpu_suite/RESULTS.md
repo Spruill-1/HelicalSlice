@@ -3698,3 +3698,33 @@ The cost is the same one the drive-shape sweep found: gentle lobes leave the lat
 CONNECTED (23-25 mm2 in one piece) where the harsh ones close it into cells (8.9). Whether a
 connected void matters is the peel question, and it is the one thing here that only plastic can
 answer.
+
+### The right angles are the ring-to-ring junctions
+
+Measured on the sharp joints themselves rather than inferred. Across each joint turning more
+than 45 degrees, the path's radius moves by:
+
+| | joints >45 deg | median radial move | more than half a ring gap |
+|---|---|---|---|
+| 2 lobes, sinusoid | 19 | 0.618 mm | 84% |
+| 3 lobes, sinusoid | 22 | 0.624 mm | 86% |
+| 6 lobes, square | 111 | 0.612 mm | 64% |
+
+A ring gap here is about 0.85 mm, so those are radial HOPS: the path stepping from one ring to
+the next. And the count tracks the RING count, not the lobe count - 19 with the weave switched
+off entirely, 20 at two lobes, 23 at three, against about 21 nested loops in the layer.
+
+So on the gentle settings essentially every right angle is a junction, and they are inherent to
+printing nested closed rings as ONE continuous path: the nozzle has to step inward once per
+ring, and each step is a near-right-angle radial hop. Turning the weave down cannot remove
+them; it only stops adding more (the square drive adds about 70 of its own).
+
+The fix already exists and has a name in this campaign: the interior SPIRAL, which replaces the
+closed interior rings with one continuous double-arm Fermat spiral so a layer has three
+junctions instead of one per ring. It is print-validated on the marched path and currently
+declines on the interpolated one.
+
+And the morph makes it nearly free. A morph ring is `p = (1-t)A(phi) + t*B(phi)`; a spiral is
+the same expression with t advancing continuously, `t(phi)`, gaining 1/(n+1) per revolution.
+The original Phase B plan needed per-angle bead tables and a wedge-closure argument to get this
+out of marched chains - in morph coordinates it is one line.
