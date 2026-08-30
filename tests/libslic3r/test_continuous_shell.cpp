@@ -3390,3 +3390,75 @@ TEST_CASE("Adaptive beading keeps the surface flank pinned across a bead-birth w
     INFO("worst outer-flank error " << worst << " mm at azimuth " << worst_az);
     REQUIRE(worst < 0.02);
 }
+
+// ---------------------------------------------------------------------------------------
+// The WOVEN signature fence, at a density that actually reaches the lattice.
+//
+// The density-0 fence above cannot guard the weave at all: `woven_infill_params` returns a
+// disabled WovenInfill for density 0, so `apply_woven_infill` returns before it does
+// anything. Every decimation, pin, phase and amplitude decision is therefore invisible to
+// it. This table is the same idea one layer in - a stable per-fixture signature at a real
+// sparse density, to be diffed across a change that is meant to leave the woven interior
+// alone.
+//
+//     libslic3r_tests.exe "[ContinuousShellWeaveSig]" > before.txt
+//     libslic3r_tests.exe "[ContinuousShellWeaveSig]" > after.txt
+//     diff before.txt after.txt
+//
+// Layers 0 and 3 are both present because the weave precesses with Z: a change that broke
+// the per-layer phase would leave layer 0 untouched.
+TEST_CASE("Continuous shell woven signature table", "[.][ContinuousShellWeaveSig]")
+{
+    const Flow flow(0.5f, 0.25f, 0.5f);
+
+    struct Row { const char *name; Surfaces surf; int density; int weave; int shift; size_t layer; };
+    std::vector<Row> rows{
+        { "annulus r10/bore4   d25 w100     L0", cs_fence_tube(10.0, 4.0),      25, 100, 50, 0 },
+        { "annulus r10/bore4   d25 w100     L3", cs_fence_tube(10.0, 4.0),      25, 100, 50, 3 },
+        { "annulus r10/bore4   d33 w100     L0", cs_fence_tube(10.0, 4.0),      33, 100, 50, 0 },
+        { "annulus r10/bore4   d25 w0       L0", cs_fence_tube(10.0, 4.0),      25,   0, 50, 0 },
+        { "annulus r10/bore4   d25 w200     L0", cs_fence_tube(10.0, 4.0),      25, 200, 50, 0 },
+        { "annulus r10/bore4   d25 w100 s0  L0", cs_fence_tube(10.0, 4.0),      25, 100,  0, 0 },
+        { "eccentric bore@+2   d25 w100     L0", cs_fence_tube(10.0, 4.0, 2.0), 25, 100, 50, 0 },
+        { "eccentric bore@+2   d25 w100     L3", cs_fence_tube(10.0, 4.0, 2.0), 25, 100, 50, 3 },
+        { "eccentric bore@+0.5 d25 w100     L0", cs_fence_tube(10.0, 4.0, 0.5), 25, 100, 50, 0 },
+        { "star tube lobe0.8   d25 w100     L0", cs_fence_tube(10.0, 4.0, 0.0, 0.8), 25, 100, 50, 0 },
+        { "solid disc r10      d25 w100     L0", cs_fence_disc(10.0),           25, 100, 50, 0 },
+        { "solid disc r10      d25 w100     L3", cs_fence_disc(10.0),           25, 100, 50, 3 },
+        { "taper wall 2.4mm    d25 w100     L0", cs_fence_tube(6.4, 4.0),       25, 100, 50, 0 },
+        { "sub-bead wall 0.3mm d25 w100     L0", cs_fence_tube(5.0, 4.7),       25, 100, 50, 0 },
+    };
+
+    std::printf("\n%-40s %8s %6s %8s %10s %7s %13s  %s\n", "fixture", "area_mm2", "paths",
+                "points", "length_mm", "cover", "width lo/hi", "signature");
+    size_t built_ok = 0;
+    for (Row &r : rows) {
+        PrintRegionConfig cfg;
+        cfg.continuous_shell_adaptive_beading.value        = true;
+        cfg.continuous_shell_infill_density.value          = r.density;
+        cfg.continuous_shell_infill_weave.value            = r.weave;
+        cfg.continuous_shell_infill_weave_shift.value      = r.shift;
+        ExtrusionEntityCollection e;
+        std::string reason, note;
+        const bool built = ContinuousShellPathBuilder::build_cross_section(
+            r.surf, flow, 0.25, &cfg, e, &reason, false, r.layer, false, {}, nullptr, &note);
+        double area = 0.0;
+        for (const Surface &sf : r.surf)
+            area += sf.expolygon.area() * SCALING_FACTOR * SCALING_FACTOR;
+        if (! built) {
+            std::printf("%-40s %8.2f %6s %8s %10s %7s  DECLINED: %s\n", r.name, area, "-", "-",
+                        "-", "-", reason.c_str());
+            continue;
+        }
+        ++built_ok;
+        const CsFence s = cs_fence_signature(e);
+        const double cover = s.volume_mm3 / (area * 0.25);
+        std::printf("%-40s %8.2f %6zu %8zu %10.3f %7.3f %6.3f/%.3f  %016llx\n", r.name, area,
+                    s.paths, s.points, s.length_mm, cover, double(s.w_min), double(s.w_max),
+                    static_cast<unsigned long long>(s.hash));
+        if (! note.empty())
+            std::printf("%-40s   -> %s\n", "", note.c_str());
+    }
+    std::printf("\n%zu of %zu fixtures built\n\n", built_ok, rows.size());
+    REQUIRE(built_ok > 0);
+}
