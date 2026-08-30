@@ -2953,3 +2953,77 @@ Outstanding, and now measured rather than assumed: 90 of 144 layers report their
 collapsing over 5.9% and 8.0% of the wall. The engine's volumetric cap already thins those
 beads, so only 0.2-0.5% of path length is emitted below a printable 0.34 mm - but that is the
 degradation ladder's work (adaptive width, then re-section) and it is not built.
+
+## The degradation ladder (hypothesis point 6), and what it found (2026-08-30)
+
+### Rung 1: adaptive bead width - built, and it works
+
+The ring count is fixed by the widest place in the region, so everywhere narrower gets the
+same rings in less wall and the gap between them closes. At nominal width the beads then
+overlap and the wall over-extrudes. The gap is what a bead may occupy, so that is what the
+bead is given: nominal where the lattice is open, the gap itself where the gap has closed
+below nominal, never below the printable floor.
+
+Width is a FUNCTION of position, not an array parallel to the rings - `spiralize_rings`
+resamples and reorders points, and the bead plan expresses width as `width_at(slot, angle)`
+for exactly the same reason. `CsRingField::extent_at(p)` answers it by bilinear lookup of the
+gridded field.
+
+**The bug worth remembering:** that lookup must interpolate over the cells that HAVE a value,
+not over the zeros outside the region. A ring running along the interior's own boundary -
+which the outermost and innermost lattice rings nearly do - has outside cells among its four
+corners, and averaging their zeros in halves the extent it reports. It put a uniform 6 mm
+wall at the bead-width floor along both its faces. With that fixed the width law is a no-op
+on a uniform wall, byte for byte, and acts only where the wall varies.
+
+### Rung 3: re-section - built, correct, and it never fires
+
+A site is a distance SOURCE, not a cut in the geometry. The field partitions by nearest
+source, so a site at the widest place pulls d_in in there, dropping the widest extent and the
+count with it, and the boundary it creates is an equidistant set exactly like a real bore's -
+u stays continuous across it and the level sets meet and continue. Cutting the cell instead
+puts an artificial face there for the rings to terminate against, and then needs the double
+wall and interface weave the parked branch carried.
+
+**It never earned its rebuild on this battery.** On P5_crescent one site bought a ring count
+of 9 instead of 11 while the wall still collapsed over 6% of itself; the trial was rejected on
+every layer of all three objects. The reason is geometric rather than a tuning failure: the
+collapse is concentrated where the wall tapers to NOTHING, and no ring count above zero fits
+there, so lowering the count globally never reaches it.
+
+What those places want is the solid/medial fill the marching path already falls back to -
+a rung this ladder does not have, and the honest next one to build. The mechanism stays
+because it is correct, self-limiting and cheap when it declines, and because a region whose
+widest place is a local bulge rather than a taper is exactly what it should help.
+
+### What it did deliver: multi-bore
+
+Because level sets may now branch, the chain assembly is branch-aware - a loop with one child
+continues its chain, a loop with several ends it and starts one per child, and the existing
+inter-chain connector routes between them. That is hypothesis point 1: multi-bore sections
+build instead of declining, tested end to end on a slab with two UNEQUAL bores. Unequal on
+purpose: a centroid-bisector partition, which is how the parked branch cut them, does not put
+the boundary on the equidistant set when the bores differ in size.
+
+### Measured, and a caution about the metric
+
+| object | path length | below 0.34 mm | below 0.20 mm | min bead |
+|---|---|---|---|---|
+| P1_sparse | 19600 | 0.95% | 0.27% | 0.107 |
+| P3_ecc | 24310 | 0.34% | 0.25% | 0.101 |
+| P5_crescent | 22695 | 0.26% | 0.23% | 0.079 |
+
+The sub-printable extrusion did NOT fall when rung 1 landed, and that is not rung 1 failing:
+those beads come from the scarf taper (floored at a quarter nozzle) and the engine's
+volumetric over-extrusion cap, not from ring crowding. Rung 1's beads never go below the
+0.425 mm floor. The "collapse fraction" the notes report is a fraction of AREA, and in a
+tapering region it over-states the fraction of extruded LENGTH that is actually affected -
+6% of the crescent's area is a quarter of one percent of its path.
+
+**A second vacuous check, caught the same way as the first.** The plate script counted
+`interpolated rings collapse` after the note was reworded to `... still collapse`, and read
+zero while 90 layers were reporting it. Both times the tell was a number that was suspiciously
+clean; both times the check could not have failed.
+
+PlateR_interp republished at 7.96 g / 40 min, one continuous run per layer on all three
+objects, 250 of a possible 250 Z heights per layer on P3_ecc.
