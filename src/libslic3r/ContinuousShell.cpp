@@ -1995,7 +1995,8 @@ coord_t vanish_depth(const ExPolygons &shape, coord_t hi)
 // loop), and whether it is pinned in place. Everything else it derives from the geometry.
 void apply_weave(ContourChain &cc, const std::vector<char> &kept_infill,
                  const std::vector<char> &kept_pocket, const WovenInfill &woven,
-                 coord_t spacing, size_t layer_index, double closure_in = 0.8)
+                 coord_t spacing, size_t layer_index, double closure_in = 0.8,
+                 bool smooth_phase = false)
 {
 // THE WEAVE, LOCAL TO EACH POINT.
 //
@@ -2213,6 +2214,52 @@ for (size_t j = 0; j < NR; ++j) {
         const std::vector<size_t> up = nearest_on(pts, before[j - 1].points);
         for (size_t i = 0; i < pts.size(); ++i)
             basephase[j][i] = basephase[j - 1][up[i]];
+
+        // THE INHERITED PHASE IS NOT A RAMP, and left alone it stops being a sinusoid.
+        //
+        // The marched path carries the same defect and keeps it: its geometry is what two peel
+        // tests validated, and it is the path being retired. Only the interpolated path asks
+        // for the correction.
+        //
+        // Nearest-point projection onto the ring outside is neither arc-length-preserving nor
+        // monotone: measured on an eccentric annulus, ring 0 is a clean ramp with a constant
+        // step, and after ONE hop only 60% of steps still go forward. By ring 2 the median step
+        // is exactly zero - a staircase, because runs of points project onto the same place -
+        // and about half of all steps run backwards. Feed that to sin() and the inner rings come
+        // out scribbled rather than woven, which is exactly how they look.
+        //
+        // The correspondence itself is fine on average; it is its jitter that is not. So the
+        // values are unwrapped, forced monotone - a phase does not run backwards - and smoothed
+        // over 2% of the ring. That leaves every ring a clean ramp again while moving the phase
+        // by about 0.1 radians at the ninth ring, a tenth of a lobe. Replacing the
+        // correspondence instead, by giving each ring its own arc-length ramp, was tried and
+        // measured: it drifts up to 0.79 of a LOBE by the same ring, which turns anti-phase into
+        // in-phase and loses the welds altogether.
+        if (!smooth_phase)
+            continue;
+        const double span = woven.lobes * 2.0 * M_PI;
+        std::vector<double> &f = basephase[j];
+        double acc = 0.0;                                  // unwrap: the ramp restarts at a seam
+        for (size_t i = 1; i < f.size(); ++i) {
+            if (f[i] + acc < f[i - 1] - 0.5 * span)
+                acc += span;
+            f[i] += acc;
+        }
+        for (size_t i = 1; i < f.size(); ++i)              // and never runs backwards
+            f[i] = std::max(f[i], f[i - 1]);
+        // Prefix sums, so the window is O(1) per point: a ring carries thousands of points and a
+        // 2% window, and the naive form is O(n*win) per ring on every layer.
+        const size_t win = std::max<size_t>(3, (f.size() / 50) | 1);
+        std::vector<double> pre(f.size() + 1, 0.0);
+        for (size_t i = 0; i < f.size(); ++i)
+            pre[i + 1] = pre[i] + f[i];
+        std::vector<double> sm(f.size());
+        for (size_t i = 0; i < f.size(); ++i) {
+            const size_t lo = (i >= win / 2) ? i - win / 2 : 0;
+            const size_t hi = std::min(f.size() - 1, i + win / 2);
+            sm[i] = (pre[hi + 1] - pre[lo]) / double(hi - lo + 1);
+        }
+        f.swap(sm);
     }
 }
 
@@ -3044,7 +3091,7 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
                 // none. Measured on the eccentric, moving to one bead halves the extrusion below
                 // 0.20 mm, 0.81% of path to 0.45%.
                 apply_weave(b.cc, b.lat, pinned, woven, spacing, layer_index,
-                            double(flow.scaled_width()) / double(spacing));
+                            double(flow.scaled_width()) / double(spacing), /*smooth_phase=*/true);
             }
         }
         out.push_back(std::move(b.cc));
