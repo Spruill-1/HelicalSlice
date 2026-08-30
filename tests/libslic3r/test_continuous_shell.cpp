@@ -3737,3 +3737,56 @@ TEST_CASE("Interpolated rings narrow the bead where the wall narrows", "[Continu
     CHECK(lo >= 0.85f * flow.nozzle_diameter() - 1e-4f);
     CHECK(hi <= flow.width() + 1e-4f);
 }
+
+TEST_CASE("Interpolated rings fill a two-bore section without cutting it", "[ContinuousShell]")
+{
+    // POINT 1 of the foam hypothesis, and the thing main has always refused: a section with more
+    // than one bore. Nothing is cut. `d_in` is the distance to the NEAREST bore, so the boundary
+    // between the two cells is the equidistant set of the bore boundaries - u is continuous
+    // across it and the level sets meet and continue rather than terminating against a wall.
+    //
+    // The bores are UNEQUAL on purpose: a partition by centroid bisector, which is how the
+    // parked multibore branch cut them, does not put the boundary on the equidistant set when
+    // the bores differ in size, and the rings would not line up across it.
+    const Flow flow(0.5f, 0.25f, 0.5f);
+    Polygon slab{ { scaled(-16.), scaled(-9.) }, { scaled(16.), scaled(-9.) },
+                  { scaled(16.), scaled(9.) },   { scaled(-16.), scaled(9.) } };
+    Polygon a, b;
+    for (int i = 0; i < 128; ++i) {
+        const double t = 2.0 * M_PI * i / 128.0;
+        a.points.emplace_back(scaled(-7.0 + 4.0 * std::cos(t)), scaled(4.0 * std::sin(t)));
+        b.points.emplace_back(scaled( 8.0 + 2.0 * std::cos(t)), scaled(2.0 * std::sin(t)));
+    }
+    ExPolygons reg = diff_ex(Polygons{ slab }, Polygons{ a, b });
+    REQUIRE(reg.size() == 1);
+    REQUIRE(reg.front().holes.size() == 2);
+    const Surfaces surf{ Surface(stInternal, reg.front()) };
+
+    PrintRegionConfig cfg = cs_interp_cfg(true, 25);
+    std::string note;
+    const CsRun run = cs_interp_run(surf, flow, cfg, 4, &note);
+    INFO(note);
+
+    // It builds, and it builds through the new path rather than falling back to marching.
+    CHECK(note.find("interpolated rings declined") == std::string::npos);
+    CHECK(run.pts.size() > 500);
+
+    // Nothing is laid inside either bore - the test that a partition actually respected them.
+    const Vec2d ca(-7.0, 0.0), cb(8.0, 0.0);
+    size_t inside = 0;
+    for (const Vec2d &p : run.pts)
+        if ((p - ca).norm() < 3.6 || (p - cb).norm() < 1.6)
+            ++inside;
+    CHECK(inside == 0);
+
+    // And material reaches both cells: a partition that annexed one bore's territory to the
+    // other would leave one end of the slab bare.
+    size_t left = 0, right = 0;
+    for (const Vec2d &p : run.pts) {
+        if (p.x() < -11.0) ++left;
+        if (p.x() >  12.0) ++right;
+    }
+    INFO("points beyond x=-11: " << left << ", beyond x=+12: " << right);
+    CHECK(left > 20);
+    CHECK(right > 20);
+}

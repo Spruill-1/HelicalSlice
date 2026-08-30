@@ -2665,11 +2665,6 @@ std::vector<ContourChain> interpolated_chains(const ExPolygon &region, const Flo
         return {};
     }
 
-    if (region.holes.size() > 1) {
-        add_note(degrade_note, "interpolated rings declined: multi-bore section (the ring family "
-                               "handles it, the chain assembly does not yet)");
-        return {};
-    }
     if (woven.solid_mask != nullptr && !woven.solid_mask->empty()) {
         add_note(degrade_note, "interpolated rings declined: part of this layer must stay solid");
         return {};
@@ -2704,25 +2699,137 @@ std::vector<ContourChain> interpolated_chains(const ExPolygon &region, const Flo
     const double want_mm    = sp_mm / woven.density;
     const double pitch_mm   = std::min(want_mm, max_gap_mm);
 
-    // The raster only has to keep neighbouring level sets apart, so it is built once at half a
-    // bead to learn the extent, and again finer only if the ring count it implies asks for it.
-    CsRingField field_owned;
-    CsRingField &field = field_owned;
+    const float  nominal_w = flow.width();
+    const float  w_floor   = float(std::max(0.30, 0.85 * flow.nozzle_diameter()));
+
+    // RUNG 3 OF THE LADDER: re-section.
+    //
+    // The ring count is set by the widest place, so a region whose extent varies a lot crowds its
+    // rings everywhere else, and below a printable bead width alone cannot save it. A virtual
+    // site placed AT the widest place pulls d_in in there, dropping the widest extent and the
+    // count with it, and tightening the spread that caused the crowding in the first place.
+    //
+    // The site is a distance SOURCE, not a cut in the geometry. The field partitions by nearest
+    // source, so the boundary it creates is an equidistant set exactly like a real bore's: u is
+    // continuous across it and the level sets meet and continue. Cutting the cell up instead -
+    // which is how the parked multibore branch did it - puts an artificial face there for the
+    // rings to terminate against, and then needs a double wall and an interface weave to bond
+    // across what it just split.
+    //
+    // Each site costs a full field rebuild, so the loop is short and says where it stopped.
+// Measured on the TPU battery, 2026-08-30: a site NEVER earned its rebuild. On P5_crescent it
+// bought a ring count of 9 instead of 11 while the wall still collapsed over 6% of itself, and
+// the trial was rejected on every layer of all three objects. The reason is geometric rather
+// than a tuning failure: the collapse is concentrated where the wall tapers to nothing, and no
+// ring count above zero fits there, so lowering the count globally does not reach it. What
+// those places want is the solid/medial fill the marching path already falls back to - a rung
+// this ladder does not have. The mechanism stays because it is correct, self-limiting and
+// cheap when it declines, and because a region whose widest place is a local bulge rather than
+// a taper is exactly the case it should help; but it is not carrying anything today.
+static const size_t CS_MAX_RESECTION_SITES = 2;
+    auto fld = std::make_shared<CsRingField>();
+    CsRingField &field = *fld;
     std::string why;
+    Points sites;
+    size_t n = 0;
+    double prev_share = 1.0;
     double grid_mm = 0.5 * double(spacing) * SCALING_FACTOR;
-    if (!field.build(interior, grid_mm, &why)) {
-        add_note(degrade_note, "interpolated rings declined: " + why);
-        return {};
-    }
-    const size_t n = field.ring_count_for_max_gap(pitch_mm);
-    if (n > 0) {
-        const double want = 0.5 * field.extent_percentile(0.05) / double(n + 1);
-        if (want > 0.02 && want < grid_mm) {
-            grid_mm = want;
-            if (!field.build(interior, grid_mm, &why)) {
+    for (;;) {
+        if (!field.build(interior, grid_mm, &why, sites)) {
+            add_note(degrade_note, "interpolated rings declined: " + why);
+            return {};
+        }
+        n = field.ring_count_for_max_gap(pitch_mm);
+        if (n > 0) {
+            // The raster only has to keep neighbouring level sets apart, so it starts at half a
+            // bead and is rebuilt finer only if the count it implies asks for it.
+            const double want = 0.5 * field.extent_percentile(0.05) / double(n + 1);
+            if (want > 0.02 && want < grid_mm) {
+                grid_mm = want;
+                if (!field.build(interior, grid_mm, &why, sites)) {
+                    add_note(degrade_note, "interpolated rings declined: " + why);
+                    return {};
+                }
+                n = field.ring_count_for_max_gap(pitch_mm);
+            }
+        }
+        const double share = (n == 0) ? 0.0
+                                      : field.fraction_narrower_than(double(w_floor) * double(n + 1));
+        if (share <= 0.02)
+            break;                                 // rung 1 carries this much without help
+        // A site has to EARN its rebuild. Spending the whole budget every time was the first
+        // version, and on a crescent it bought a ring count of 9 instead of 11 while the wall
+        // still collapsed over 6% of itself - the tips of a crescent are thin enough that no
+        // printable ring fits there at any count, so past the first site or two the sites stop
+        // paying and only cost a field rebuild each. Stop when one does not help.
+        if (!sites.empty() && share > 0.9 * prev_share) {
+            sites.pop_back();
+            if (!field.build(interior, grid_mm, &why, sites)) {
                 add_note(degrade_note, "interpolated rings declined: " + why);
                 return {};
             }
+            n = field.ring_count_for_max_gap(pitch_mm);
+            break;
+        }
+        if (sites.size() >= CS_MAX_RESECTION_SITES)
+            break;
+        prev_share = share;
+        sites.push_back(field.widest_point());
+    }
+    if (!sites.empty()) {
+        char msg[200];
+        std::snprintf(msg, sizeof(msg),
+            "continuous shell: interpolated rings re-sectioned this wall with %zu virtual site%s "
+            "to fit %zu rings through its narrow parts",
+            sites.size(), sites.size() == 1 ? "" : "s", n);
+        add_note(degrade_note, msg);
+    }
+
+    // RUNG 1 OF THE LADDER: adaptive bead width. The gap between rings is what a bead may
+    // occupy, so that is what the bead is given - nominal where the lattice is open, the gap
+    // itself where the gap has closed below nominal, never below the printable floor. Width is a
+    // FUNCTION of the point, not an array parallel to the rings, because the ring assembly
+    // resamples and reorders points; the bead plan expresses width the same way and for the same
+    // reason.
+    std::shared_ptr<CsWidthFn> width_fn;
+    if (n > 0) {
+        const double denom = double(n + 1);
+        width_fn = std::make_shared<CsWidthFn>([fld, denom, nominal_w, w_floor](const Point &p) {
+            const double W = fld->extent_at(p.cast<double>());
+            if (W <= 0.)
+                return nominal_w;                  // off the field: the surface skin, at nominal
+            return float(std::clamp(W / denom, double(w_floor), double(nominal_w)));
+        });
+    }
+
+    // What was asked for against what the wall got. Integer ring counts land on a rung of a
+    // ladder, and the weld distance is a floor under how coarse that ladder can be; both are
+    // differences between the request and the print, and both are said out loud.
+    if (n > 0) {
+        const double got_mm = field.extent_percentile(1.0) / double(n + 1);
+        if (got_mm > 1e-9 && std::abs(got_mm / want_mm - 1.0) > 0.10) {
+            char msg[288];
+            std::snprintf(msg, sizeof(msg),
+                "continuous shell: infill density %s - %zu interpolated rings put the widest gap "
+                "at %.2f mm where %.2f mm was asked, so this wall fills at about %.0f%% rather "
+                "than the requested %.0f%%",
+                want_mm > max_gap_mm + 1e-9 ? "limited by the weld distance" : "rounded",
+                n, got_mm, want_mm, 100.0 * sp_mm / got_mm, 100.0 * woven.density);
+            add_note(degrade_note, msg);
+        }
+        // What rung 1 and rung 3 together could not fit. Reported as the FRACTION of the wall
+        // affected: some corner nearly always collapses, and whether to act depends on how much
+        // of the wall goes with it.
+        const double share = field.fraction_narrower_than(double(w_floor) * double(n + 1));
+        if (share > 0.005) {
+            char msg[240];
+            std::snprintf(msg, sizeof(msg),
+                "continuous shell: interpolated rings still collapse over %.1f%% of this wall "
+                "with %zu re-sectioning site%s - it is narrower there than %zu rings at the "
+                "%.2f mm printable floor, and tapers to nothing there rather than merely "
+                "narrowing, so no ring count fits it",
+                100.0 * share, sites.size(), sites.size() == 1 ? "" : "s", n, double(w_floor));
+            add_note(degrade_note, msg);
         }
     }
 
@@ -2731,120 +2838,125 @@ std::vector<ContourChain> interpolated_chains(const ExPolygon &region, const Flo
         add_note(degrade_note, "interpolated rings declined: " + why);
         return {};
     }
-    // One level per bore is fine for the generator but not for a linear nested stack, so a
-    // family that split has to wait for the cell assembly.
-    for (size_t i = 1; i < fam.rings.size(); ++i)
-        if (fam.rings[i].t <= fam.rings[i - 1].t + 1e-12) {
-            add_note(degrade_note, "interpolated rings declined: a level set split into several "
-                                   "loops - this section needs cell assembly");
-            return {};
-        }
 
-    ContourChain cc;
-    cc.has_bore = !region.holes.empty();
-    std::vector<char> is_lattice, pinned;
-    auto push = [&](Polygon &&pl, bool lattice) {
-        cc.loops.push_back(std::move(pl));
-        is_lattice.push_back(lattice ? 1 : 0);
-        pinned.push_back(0);
-    };
-    for (size_t k = 0; k < sl; ++k)
-        push(Polygon(peel[k].contour), false);
-    for (CsRing &r : fam.rings)
-        push(std::move(r.poly), true);
-    if (cc.has_bore)
-        for (size_t k = sl; k-- > 0; )
-            push(Polygon(peel[k].holes.front()), false);
-
-    if (cc.loops.size() < 2) {
+    // Group by level. Past a saddle - where two bores or two re-section sites separate - one
+    // level is genuinely several loops, and that is correct topology for the field rather than
+    // something to refuse.
+    std::vector<std::vector<CsRing *>> levels;
+    for (CsRing &r : fam.rings) {
+        if (levels.empty() || std::abs(r.t - levels.back().front()->t) > 1e-12)
+            levels.emplace_back();
+        levels.back().push_back(&r);
+    }
+    if (levels.empty()) {
         add_note(degrade_note, "interpolated rings declined: nothing left to print after the skin");
         return {};
     }
 
-    // The weave is parametrised by arc length and does not care, but the Z wave downstream is
-    // still an angle about the section centroid, and `star_ok` is what stops it being applied
-    // to a section the centroid cannot see all of. Interpolated rings do not make a crescent
-    // star-shaped, so the same gate has to be evaluated here - leaving it at its default of
-    // true would put an angle-parametrised Z wave on exactly the sections it is wrong for.
-    {
-        const Vec2d centre = cc.loops.front().centroid().cast<double>();
-        for (const Polygon &ring : cc.loops)
-            if (!star_shaped_about(ring, centre)) { cc.star_ok = false; break; }
+    // A ContourChain is a linear nested stack, so the family has to be cut into chains wherever
+    // it branches: walking outward, a loop with one child continues its chain, and a loop with
+    // several ends it and starts one per child. The inter-chain connector routes between them -
+    // the same machinery band marching has always relied on, which is why the emitted layer is
+    // still a single continuous run.
+    struct Build { ContourChain cc; std::vector<char> lat; const CsRing *last = nullptr; };
+    std::vector<Build> done, active;
+    for (size_t k = 0; k < levels.front().size(); ++k) {
+        Build b;
+        if (k == 0)                                   // the skin belongs to the trunk
+            for (size_t j = 0; j < sl; ++j) {
+                b.cc.loops.push_back(peel[j].contour);
+                b.lat.push_back(0);
+            }
+        else
+            b.cc.outer_pinch = true;
+        b.cc.loops.push_back(levels.front()[k]->poly);
+        b.lat.push_back(1);
+        b.last = levels.front()[k];
+        active.push_back(std::move(b));
     }
-
-    if (woven.enabled && n > 0) {
-        // The ring count is an integer, so the delivered pitch lands on a rung of a ladder and
-        // only sometimes on the density that was asked for. That is a far smaller and far more
-        // predictable error than the gap cap it replaces - which silently held a 25% wall at
-        // 38% - but it is still a difference between what was asked and what was printed, and
-        // it is said out loud on the same terms.
-        const double got_mm = field.extent_percentile(1.0) / double(n + 1);
-        if (got_mm > 1e-9 && std::abs(got_mm / want_mm - 1.0) > 0.10) {
-            char msg[288];
-            std::snprintf(msg, sizeof(msg),
-                "continuous shell: infill density %s - %zu interpolated rings put the widest gap "
-                "at %.2f mm where %.2f mm was asked, so this wall fills at about %.0f%% rather "
-                "than the requested %.0f%%",
-                want_mm > max_gap_mm + 1e-9
-                    ? "limited by the weld distance" : "rounded",
-                n, got_mm, want_mm, 100.0 * sp_mm / got_mm, 100.0 * woven.density);
-            add_note(degrade_note, msg);
+    for (size_t j = 1; j < levels.size(); ++j) {
+        std::vector<std::vector<CsRing *>> kids(active.size());
+        for (CsRing *r : levels[j]) {
+            for (size_t a = 0; a < active.size(); ++a)
+                if (active[a].last->poly.contains(r->poly.points.front())) {
+                    kids[a].push_back(r);
+                    break;
+                }
         }
-
-        // RUNG 1 OF THE LADDER: adaptive bead width.
-        //
-        // The ring count is fixed by the widest place in the region, so everywhere narrower gets
-        // the same rings in less wall and the gap between them closes. At nominal width the beads
-        // then overlap and the wall over-extrudes. The gap is what a bead may occupy, so that is
-        // what the bead is given: nominal where the lattice is open, the gap itself where the
-        // gap has closed below nominal, and never below the printable floor.
-        //
-        // Width is a FUNCTION of the point, not an array parallel to the rings, because the ring
-        // assembly resamples and reorders points - the same reason the bead plan expresses width
-        // as width_at(slot, angle).
-        {
-            auto fld = std::make_shared<CsRingField>(std::move(field_owned));
-            const double denom   = double(n + 1);
-            const float  nominal = flow.width();
-            const float  wfloor  = float(std::max(0.30, 0.85 * flow.nozzle_diameter()));
-            cc.width_fn = std::make_shared<CsWidthFn>([fld, denom, nominal, wfloor](const Point &p) {
-                const double W = fld->extent_at(p.cast<double>());
-                if (W <= 0.)
-                    return nominal;              // off the field: the surface skin, which is nominal
-                const double g = W / denom;
-                return float(std::clamp(g, double(wfloor), double(nominal)));
-            });
+        std::vector<Build> next;
+        for (size_t a = 0; a < active.size(); ++a) {
+            if (kids[a].size() == 1) {
+                active[a].cc.loops.push_back(kids[a].front()->poly);
+                active[a].lat.push_back(1);
+                active[a].last = kids[a].front();
+                next.push_back(std::move(active[a]));
+            } else {
+                done.push_back(std::move(active[a]));
+                for (CsRing *r : kids[a]) {       // none: the chain simply ends here
+                    Build b;
+                    b.cc.outer_pinch = true;
+                    b.cc.loops.push_back(r->poly);
+                    b.lat.push_back(1);
+                    b.last = r;
+                    next.push_back(std::move(b));
+                }
+            }
         }
+        active = std::move(next);
+    }
+    for (Build &b : active)
+        done.push_back(std::move(b));
 
-        // Where the region is narrow the same ring count is crowded into less wall, and below a
-        // printable bead the rings collapse into each other. That is where the width has to come
-        // down and, failing that, the cell has to be subsectioned; until those rungs exist the
-        // collapse is at least not silent.
-        //
-        // What is reported is the FRACTION of the wall affected, not whether the narrowest corner
-        // collapses. Some corner nearly always does - reporting that fired on two thirds of a
-        // plate whose sub-printable extrusion was a fifth of one percent, which is a warning that
-        // tells you nothing about whether to act.
-        const double floor_mm = std::max(0.30, 0.85 * flow.nozzle_diameter());
-        const double share    = field.fraction_narrower_than(floor_mm * double(n + 1));
-        if (share > 0.005) {
-            char msg[240];
-            std::snprintf(msg, sizeof(msg),
-                "continuous shell: interpolated rings collapse over %.1f%% of this wall - it is "
-                "narrower there than %zu rings at the %.2f mm printable floor; the width and "
-                "re-section rungs are not built yet",
-                100.0 * share, n, floor_mm);
-            add_note(degrade_note, msg);
+    // Each chain that ends on a bore gets that bore's skin, innermost-in-the-material first so
+    // the stack stays monotone across the wall. Which bore is the one its innermost ring is
+    // labelled with - that label IS the cell.
+    for (Build &b : done) {
+        if (b.last == nullptr || region.holes.empty())
+            continue;
+        std::vector<size_t> tally(region.holes.size(), 0);
+        for (const int lab : b.last->bore)
+            if (lab >= 0 && size_t(lab) < tally.size())
+                ++tally[size_t(lab)];
+        const size_t h = size_t(std::max_element(tally.begin(), tally.end()) - tally.begin());
+        if (tally[h] * 2 < b.last->bore.size())
+            continue;                              // not decisively any bore's: a site's cell
+        for (size_t k = sl; k-- > 0; ) {
+            b.cc.loops.push_back(peel[k].holes[h]);
+            b.lat.push_back(0);
         }
-        cc.woven_infill = true;                  // tag [shell | infill | shell] downstream
-        if (woven.weave > 0.0)
-            apply_weave(cc, is_lattice, pinned, woven, spacing, layer_index);
-    } else if (woven.enabled) {
-        add_note(degrade_note, "continuous shell: wall too thin to sparsify - printed solid");
+        b.cc.has_bore = true;
     }
 
     std::vector<ContourChain> out;
-    out.push_back(std::move(cc));
+    for (Build &b : done) {
+        if (b.cc.loops.size() < 2)
+            continue;                              // a lone ring is not a stack
+
+        // The weave is parametrised by arc length and does not care, but the Z wave downstream
+        // is still an angle about the section centroid, and `star_ok` is what stops it being
+        // applied to a section the centroid cannot see all of. Interpolated rings do not make a
+        // crescent star-shaped, so the same gate has to be evaluated here - leaving it at its
+        // default of true would put an angle-parametrised Z wave on the sections it is wrong for.
+        const Vec2d centre = b.cc.loops.front().centroid().cast<double>();
+        for (const Polygon &ring : b.cc.loops)
+            if (!star_shaped_about(ring, centre)) { b.cc.star_ok = false; break; }
+
+        b.cc.width_fn = width_fn;
+        if (n > 0) {
+            b.cc.woven_infill = true;              // tag [shell | infill | shell] downstream
+            if (woven.weave > 0.0) {
+                const std::vector<char> pinned(b.cc.loops.size(), 0);
+                apply_weave(b.cc, b.lat, pinned, woven, spacing, layer_index);
+            }
+        }
+        out.push_back(std::move(b.cc));
+    }
+    if (out.empty()) {
+        add_note(degrade_note, "interpolated rings declined: nothing left to print after the skin");
+        return {};
+    }
+    if (n == 0)
+        add_note(degrade_note, "continuous shell: wall too thin to sparsify - printed solid");
     return out;
 }
 

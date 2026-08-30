@@ -60,7 +60,14 @@ public:
     // `interior` is the region left after the surface skin has been peeled: its contour is
     // the outer boundary of the infill zone and its holes are the bores. Fails loudly
     // rather than returning something degenerate.
-    bool build(const ExPolygon &interior, double grid_pitch_mm, std::string *fail);
+    // `sites` are VIRTUAL bores: extra sources for d_in, used to re-section a region whose ring
+    // count will not fit everywhere. Adding one where the region is widest pulls d_in in there,
+    // so the widest extent drops and the count with it - and because the field partitions by
+    // NEAREST source, the new cut is an equidistant set exactly like a real bore's, so u stays
+    // continuous across it and the level sets still meet and continue. Cutting the geometry
+    // instead would put an artificial face there for the rings to terminate against.
+    bool build(const ExPolygon &interior, double grid_pitch_mm, std::string *fail,
+               const Points &sites = {});
 
     bool   valid() const { return m_valid; }
     size_t n_bores() const { return m_n_bores; }
@@ -69,6 +76,10 @@ public:
     // what picks the ring count: biasing high closes voids where the region is wide and
     // lets the thin places coalesce into the degradation ladder.
     double extent_percentile(double pct) const;
+
+    // Where the region is widest - the place a re-sectioning site should go, because that is the
+    // extent the ring count is set by.
+    Point widest_point() const { return m_widest; }
 
     // Ring count such that NO gap anywhere exceeds max_gap_mm. n rings leave n+1 gaps across
     // the extent and the gap is W(p)/(n+1), so the widest place in the region is what sets the
@@ -124,7 +135,9 @@ private:
     ExPolygon           m_region;
     size_t              m_n_bores = 0;
     std::vector<size_t> m_bore_of_line;    // line index in the bore distancer -> bore index
-    Vec2d               m_centroid{0., 0.};// inner target when there is no bore, scaled
+    Vec2d               m_centroid{0., 0.};// inner target when there is no bore or site, scaled
+    Points              m_sites;           // virtual bores, scaled
+    Point               m_widest{0, 0};    // argmax of the local extent
 
     struct Impl;                            // holds the distance trees
     std::shared_ptr<Impl> m_impl;

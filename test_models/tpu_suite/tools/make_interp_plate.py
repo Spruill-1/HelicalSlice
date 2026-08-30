@@ -158,13 +158,15 @@ def main():
     capped    = len(re.findall(r"lattice gap cap", log))
     weld      = len(re.findall(r"limited by the weld distance", log))
     rounded   = len(re.findall(r"infill density rounded", log))
-    collapse  = len(re.findall(r"interpolated rings collapse", log))
+    resect    = len(re.findall(r"re-sectioned this wall with", log))
+    collapse  = len(re.findall(r"interpolated rings still collapse", log))
     print(f"\n  layers reporting anything:           {layers}")
     print(f"  layers that fell back to marching:   {fell_back}   (solid layers only)")
     print(f"  layers still reporting the gap cap:  {capped}   (must be 0)")
     print(f"  layers clamped by the weld distance: {weld}")
     print(f"  layers with the ring count rounded:  {rounded}")
-    print(f"  layers whose rings collapse:         {collapse}   (the ladder's work, not built)")
+    print(f"  layers re-sectioned:                 {resect}")
+    print(f"  layers still collapsing after that:  {collapse}")
     # A solid layer declining is CORRECT: a ring count fixed by the widest place is a lattice
     # rule, and solid fill needs the count to follow the local thickness - which Arachne's
     # per-angle beading already does properly. Any OTHER decline means this plate is not
