@@ -95,6 +95,8 @@ set(lisbslic3r_sources
     Clipper2Utils.cpp
     ContinuousShell.cpp
     ContinuousShell.hpp
+    ContinuousShellRings.cpp
+    ContinuousShellRings.hpp
     Clipper2Utils.hpp
     ClipperZUtils.hpp
     Color.cpp
