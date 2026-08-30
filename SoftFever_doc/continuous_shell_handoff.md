@@ -3172,3 +3172,49 @@ terminating, which is what `wall_transition_length` already exists for and what 
 rho ramp already does per angular bin. No cell boundary, no artificial face, and the
 termination is a controlled merge rather than a chord. It is the more conservative of the two
 and has not been tried.
+
+## Both answers built, and they fix different objects (2026-08-30)
+
+`tools/sweep_interp.py` A/Bs them over the three plate objects. Sub-floor % is per object as
+P1_sparse / P5_crescent / P3_ecc, and is the actionable column: how much of the print comes out
+below a printable 0.34 mm bead, whatever the notes claim.
+
+| setting | widest gap | sub-floor % | total mm3 |
+|---|---|---|---|
+| pct=1.0 (ships) | 1.18 | 0.9 / **19.5** / **15.0** | 6473 |
+| pct=0.90 | 1.33 | 0.9 / **0.2** / 15.0 | 6320 |
+| pct=0.75 | 1.18 | 0.9 / **0.4** / 15.0 | 6119 |
+| pct=0.50 | 1.99 | 0.9 / 4.4 / 10.8 | 5691 |
+| cells=2 | 1.18 | 0.9 / 19.5 / 25.2 | 6763 |
+| cells=4 | 1.18 | 0.9 / 19.5 / 14.1 | 6772 |
+| cells=6 | 1.18 | 0.9 / 19.5 / **11.6** | 6491 |
+
+**The percentile fixes the crescent; the cells fix the eccentric.** They are not competing
+answers to one problem, they are answers to two.
+
+The crescent's count was simply one ring too high, because it answered to an extreme of the
+extent rather than to a typical one. Dropping to the 75th percentile takes 19.5% of its path
+below a printable bead down to 0.4%, and - the part that matters - does it with NO increase in
+the widest gap, so nothing is spent against the weld distance.
+
+The eccentric's thickness genuinely varies, so no single count serves it and only subsectioning
+helps: 15.0% to 11.6% at six cells. Note that two cells make it WORSE (25.2%) - a cell count
+that does not actually narrow each cell's extent range just adds interfaces for nothing.
+
+**Continuity survives subsectioning.** runs/layer is 1 for every object in every row, cells
+included; the inter-chain connector stitches the cells exactly as it always stitched marched
+chains.
+
+**Neither is on by default**, because each spends something a plate has not yet been asked
+about: the percentile trades against the weld distance (which two peel tests have set), and the
+cells buy an interface at every cut (the parked branch's open question).
+
+### What the Arachne transition would actually take
+
+The full version - a ring that tapers out mid-region instead of terminating - needs rings that
+are ARCS. `ContourChain` holds closed loops only, and the medial-axis fallback explicitly
+refuses open centrelines because "force-closing an OPEN centreline would fabricate a chord from
+its end straight back to its start - through air". So a genuine transition needs arc support
+through the chain model and `spiralize_rings`, which is a larger change than was implied when
+it was offered as the conservative option. The percentile knob is the part of that idea which is
+expressible today, and on the crescent it happens to be the whole of what was needed.
