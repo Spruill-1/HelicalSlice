@@ -2382,7 +2382,39 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
                     // has none to spare.
                 }
 
-                const double overshoot   = 4.0;
+                // The saturating drive, SHARPENED from 4 to 8 on 2026-08-29.
+                //
+                // The complaint that sent me here: a tube's mid-wall reads as "a roughly 1 mm
+                // thick void forming a tube of its own, crossed only where the helical seam is".
+                // Measured, that is exactly right - the weakest mid-wall interface was BONDED over
+                // 22% of its length (centres within 0.8 of a bead width; the welds that do happen
+                // are real, it is their number that is short), leaving a cylindrical gap of about
+                // 1 mm open over three quarters of the circumference.
+                //
+                // Two knobs decide how much of an interface bonds, and both were tuned against
+                // instruments this campaign has since withdrawn - a weld map whose threshold sat
+                // exactly where the data lands, and a ring matcher that kept 45% of its rays.
+                // Re-swept against the bonded fraction and the weld map together:
+                //
+                //   overshoot   weakest interface   azimuths with NO weld   tallest dead run
+                //       4               22%                  23.0%              2 layers
+                //       6               27%                  18.0%              2
+                //       8               29%                  13.2%              2
+                //      12               32%                  19.0%              3
+                //      20               32%                  20.0%              2
+                //
+                // 8 is a genuine optimum rather than a dial: past it the interface keeps improving
+                // and the dead azimuths get worse again, because the transitions stop covering the
+                // gaps between one ring's extremes. A sharper drive spends more of each ring at
+                // full excursion, which is where the anti-phase contact happens.
+                //
+                // The DRIFT stays at 2.0. Zeroing it looks free - the weakest interface goes 22%
+                // to 27% at no material cost - and is not: rings j and j+2 come into phase, their
+                // welds line up into radial spokes, and the azimuths carrying no weld anywhere
+                // across the depth go 23.0% to 36.3% with the tallest dead run 2 layers to 5. That
+                // is the columnar failure this subsystem started with. The drift buys per-azimuth
+                // coverage with per-interface bond, and it is the right trade.
+                const double overshoot   = 8.0;
                 const double drift_slots = 2.0;
                 size_t n_infill = 0;
                 for (const char c : kept_infill) n_infill += (c != 0) ? 1 : 0;
