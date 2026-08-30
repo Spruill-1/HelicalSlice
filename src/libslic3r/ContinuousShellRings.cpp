@@ -143,6 +143,7 @@ bool CsRingField::build(const ExPolygon &interior, double grid_pitch_mm, std::st
     m_impl->raster.rows = m_rows;
     m_impl->raster.cols = m_cols;
     m_impl->raster.v.assign(m_rows * m_cols, 0.f);
+    m_wgrid.assign(m_rows * m_cols, 0.f);
 
     // The extent statistics decide the ring count, so they are taken EXACTLY - the gridded
     // SDF is good enough to place a level set that gets corrected afterwards, but it reads a
@@ -206,6 +207,7 @@ bool CsRingField::build(const ExPolygon &interior, double grid_pitch_mm, std::st
             for (size_t c = 0; c < m_cols; ++c) {
                 const Vec2d p(m_origin.x() + double(c) * pitch_s, y);
                 double u = 0.;
+                float  ext = 0.f;
                 const bool inside = inside_spans(xs_all, p.x());
                 if (inside) {
                     const Point ps(coord_t(std::llround(p.x())), coord_t(std::llround(p.y())));
@@ -214,6 +216,7 @@ bool CsRingField::build(const ExPolygon &interior, double grid_pitch_mm, std::st
                         ? std::abs(double(m_impl->sdf_bores.signed_distance_bilinear(ps)))
                         : (p - m_centroid).norm();
                     const double W = d_out + d_in;
+                    ext = float(W * SCALING_FACTOR);
                     u = (W > 1e-9) ? std::clamp(d_out / W, 0., 1.) : 1.;
                 } else {
                     // Outside the region. Inside the contour means inside a bore, where the
@@ -221,7 +224,8 @@ bool CsRingField::build(const ExPolygon &interior, double grid_pitch_mm, std::st
                     u = (m_n_bores > 0 && inside_spans(xs_out, p.x())) ? 1. : 0.;
                 }
                 m_impl->raster.v[r * m_cols + c] = float(u);
-                if (inside && (r % stride) == 0 && (c % stride) == 0) {
+                m_wgrid[r * m_cols + c]          = ext;
+                if (ext > 0.f && (r % stride) == 0 && (c % stride) == 0) {
                     double eu = 0., eext = 0.;
                     int    ebore = -1;
                     this->sample_inside(p, eu, eext, ebore);
@@ -391,6 +395,32 @@ double CsRingField::extent_percentile(double pct) const
                               size_t(std::llround(std::clamp(pct, 0., 1.) * double(w.size() - 1))));
     std::nth_element(w.begin(), w.begin() + k, w.end());
     return double(w[k]);
+}
+
+double CsRingField::extent_at(const Vec2d &p) const
+{
+    if (! m_valid || m_wgrid.empty())
+        return 0.;
+    const double fc = (p.x() - m_origin.x()) / m_pitch;
+    const double fr = (p.y() - m_origin.y()) / m_pitch;
+    const long   c0 = long(std::floor(fc)), r0 = long(std::floor(fr));
+    if (c0 < 0 || r0 < 0 || size_t(c0) + 1 >= m_cols || size_t(r0) + 1 >= m_rows)
+        return 0.;
+    // Interpolate over the cells that HAVE a value, not over the zeros outside the region. A
+    // ring that runs along the interior's own boundary - which the outermost and innermost
+    // lattice rings nearly do - has outside cells among its four corners, and averaging their
+    // zeros in halves the extent it reports. That put a uniform 6 mm wall at the bead-width
+    // floor along both its faces.
+    const double tx = fc - double(c0), ty = fr - double(r0);
+    const double wt[4] = { (1. - tx) * (1. - ty), tx * (1. - ty), (1. - tx) * ty, tx * ty };
+    const long   rr[4] = { r0, r0, r0 + 1, r0 + 1 };
+    const long   cc[4] = { c0, c0 + 1, c0, c0 + 1 };
+    double acc = 0., wsum = 0.;
+    for (int k = 0; k < 4; ++k) {
+        const double v = double(m_wgrid[size_t(rr[k]) * m_cols + size_t(cc[k])]);
+        if (v > 0.) { acc += wt[k] * v; wsum += wt[k]; }
+    }
+    return wsum > 1e-9 ? acc / wsum : 0.;
 }
 
 double CsRingField::fraction_narrower_than(double w_mm) const

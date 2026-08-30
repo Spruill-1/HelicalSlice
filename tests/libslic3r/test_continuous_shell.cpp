@@ -3686,3 +3686,54 @@ TEST_CASE("Interpolated rings are byte-identical to marching when off", "[Contin
         CHECK(a.pts == cs_signature(surf, flow, off2).pts);
     }
 }
+
+TEST_CASE("Interpolated rings narrow the bead where the wall narrows", "[ContinuousShell]")
+{
+    // RUNG 1 of the degradation ladder. The ring count is fixed by the widest place in the
+    // region, so everywhere narrower gets the same rings in less wall and the gap between them
+    // closes. At nominal width the beads would then overlap and the wall over-extrude; the gap
+    // is what a bead may occupy, so that is what the bead is given.
+    //
+    // A crescent is the fixture because its wall genuinely runs from 8.5 mm at the back down to
+    // nothing at the tips - a range no single bead width fits. The bite has to poke out THROUGH
+    // the disc edge, or the result is an annulus with a hole rather than a concave crescent.
+    const Flow flow(0.5f, 0.25f, 0.5f);
+    Polygon disc, bite;
+    for (int i = 0; i < 192; ++i) {
+        const double a = 2.0 * M_PI * i / 192.0;
+        disc.points.emplace_back(scaled(10.0 * std::cos(a)), scaled(10.0 * std::sin(a)));
+        bite.points.emplace_back(scaled(6.5 + 5.0 * std::cos(a)), scaled(5.0 * std::sin(a)));
+    }
+    ExPolygons cre = diff_ex(Polygons{ disc }, Polygons{ bite });
+    REQUIRE(cre.size() == 1);
+    REQUIRE(cre.front().holes.empty());
+    const Surfaces surf{ Surface(stInternal, cre.front()) };
+
+    auto widths_of = [&](bool interpolated) {
+        PrintRegionConfig cfg = cs_interp_cfg(interpolated, 25);
+        ExtrusionEntityCollection e;
+        std::string reason, note;
+        const bool built = ContinuousShellPathBuilder::build_cross_section(
+            surf, flow, 0.25, &cfg, e, &reason, false, 4, false, {}, nullptr, &note);
+        INFO(reason);
+        REQUIRE(built);
+        std::vector<ExtrusionPath *> paths;
+        for (ExtrusionEntity *ent : e.entities)
+            ContinuousShellPathBuilder::collect_paths(ent, paths);
+        std::vector<float> w;
+        for (const ExtrusionPath *p : paths)
+            w.push_back(p->width);
+        return w;
+    };
+
+    const std::vector<float> on = widths_of(true);
+    REQUIRE_FALSE(on.empty());
+    const float lo = *std::min_element(on.begin(), on.end());
+    const float hi = *std::max_element(on.begin(), on.end());
+    INFO("interpolated bead widths " << lo << " .. " << hi << " over " << on.size() << " paths");
+
+    // The bead comes down where the wall does, and never below what the nozzle can lay.
+    CHECK(lo < 0.95f * flow.width());
+    CHECK(lo >= 0.85f * flow.nozzle_diameter() - 1e-4f);
+    CHECK(hi <= flow.width() + 1e-4f);
+}

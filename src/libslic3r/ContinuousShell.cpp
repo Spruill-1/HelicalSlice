@@ -1,6 +1,7 @@
 #include "ContinuousShell.hpp"
 #include "ContinuousShellRings.hpp"
 #include <cstdio>
+#include <functional>
 #include <cstdlib>
 
 #include "Arachne/BeadingStrategy/BeadingStrategyFactory.hpp"
@@ -25,6 +26,12 @@ namespace {
 //   continuous_shell_infill_density  0 => solid (disabled); else target interior density
 //   continuous_shell_infill_weave    0 => plain concentric; 100 => full radial+Z weave
 //   wall_loops                       => solid shell ring count
+// Bead width as a FUNCTION of position, for ring stacks that have no ChainBeadPlan. The plan
+// expresses width as width_at(slot, angle) for the same reason: `spiralize_rings` resamples and
+// reorders points, so an array parallel to the rings would desynchronize, while a function of
+// the point is evaluated at whatever point is finally emitted.
+using CsWidthFn = std::function<float(const Point &)>;
+
 struct WovenInfill {
     bool   enabled     = false;
     size_t shell_loops = 1;
@@ -857,6 +864,7 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
                          float nominal_width = 0.f,
                          coord_t scarf_len = 0, float scarf_floor = 0.f,
                          const ChainBeadPlan *plan = nullptr, coord_t layer_h_scaled = 0,
+                         const CsWidthFn *width_fn = nullptr,
                          // Which plan SLOT each ring came from. Identity while nothing has been
                          // decimated; after sparse infill drops rings it is the only thing that
                          // still ties a surviving ring to its own per-angle widths.
@@ -1035,6 +1043,8 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
             const Vec2d d = p.cast<double>() - plan->centre;
             return plan->width_at(slot, std::atan2(d.y(), d.x()));
         }
+        if (width_fn != nullptr && *width_fn)
+            return (*width_fn)(p);
         return width_of(idx);
     };
 
@@ -1601,6 +1611,8 @@ struct ContourChain {
     // per-point widths come from the plan (ring_widths stays empty); the C-lite medial
     // deficit correction is skipped - the plan covers the full wall by construction.
     std::shared_ptr<ChainBeadPlan> plan;
+    // Set instead of `plan` when the widths come from a measured field rather than a bead plan.
+    std::shared_ptr<CsWidthFn> width_fn;
     // The plan SLOT each loop came from, parallel to `loops`. Non-empty exactly when `plan`
     // is set. Position in `loops` used to BE the slot index, which is why sparse infill and
     // adaptive beading could not coexist: decimation drops rings, and every surviving ring
@@ -2694,7 +2706,8 @@ std::vector<ContourChain> interpolated_chains(const ExPolygon &region, const Flo
 
     // The raster only has to keep neighbouring level sets apart, so it is built once at half a
     // bead to learn the extent, and again finer only if the ring count it implies asks for it.
-    CsRingField field;
+    CsRingField field_owned;
+    CsRingField &field = field_owned;
     std::string why;
     double grid_mm = 0.5 * double(spacing) * SCALING_FACTOR;
     if (!field.build(interior, grid_mm, &why)) {
@@ -2776,6 +2789,31 @@ std::vector<ContourChain> interpolated_chains(const ExPolygon &region, const Flo
                     ? "limited by the weld distance" : "rounded",
                 n, got_mm, want_mm, 100.0 * sp_mm / got_mm, 100.0 * woven.density);
             add_note(degrade_note, msg);
+        }
+
+        // RUNG 1 OF THE LADDER: adaptive bead width.
+        //
+        // The ring count is fixed by the widest place in the region, so everywhere narrower gets
+        // the same rings in less wall and the gap between them closes. At nominal width the beads
+        // then overlap and the wall over-extrudes. The gap is what a bead may occupy, so that is
+        // what the bead is given: nominal where the lattice is open, the gap itself where the
+        // gap has closed below nominal, and never below the printable floor.
+        //
+        // Width is a FUNCTION of the point, not an array parallel to the rings, because the ring
+        // assembly resamples and reorders points - the same reason the bead plan expresses width
+        // as width_at(slot, angle).
+        {
+            auto fld = std::make_shared<CsRingField>(std::move(field_owned));
+            const double denom   = double(n + 1);
+            const float  nominal = flow.width();
+            const float  wfloor  = float(std::max(0.30, 0.85 * flow.nozzle_diameter()));
+            cc.width_fn = std::make_shared<CsWidthFn>([fld, denom, nominal, wfloor](const Point &p) {
+                const double W = fld->extent_at(p.cast<double>());
+                if (W <= 0.)
+                    return nominal;              // off the field: the surface skin, which is nominal
+                const double g = W / denom;
+                return float(std::clamp(g, double(wfloor), double(nominal)));
+            });
         }
 
         // Where the region is narrow the same ring count is crowded into less wall, and below a
@@ -3426,6 +3464,7 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
                                        connector_spread, chain.woven_infill ? woven.shell_loops : 0,
                                        &merged.front(), &chain.ring_widths, &widths, flow.width(),
                                        scarf_len, scarf_floor, chain.plan.get(), cs_layer_h_scaled,
+                                       chain.width_fn.get(),
                                        chain.ring_slot.empty() ? nullptr : &chain.ring_slot);
         if (sub.points.size() >= 2 && sub.points.size() == flags.size() && sub.points.size() == zoff.size()
             && sub.points.size() == widths.size())

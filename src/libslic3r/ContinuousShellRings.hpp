@@ -77,6 +77,13 @@ public:
     // buried ring at all - is a legitimate answer, not a failure.
     size_t ring_count_for_max_gap(double max_gap_mm) const;
 
+    // The local extent W(p) in mm, by bilinear lookup of the gridded field - O(1), and good to
+    // a few percent, which is far finer than the 0.05 mm buckets a bead width is quantised to.
+    // This is what an adaptive bead width is a function of, and it must be a FUNCTION of the
+    // point rather than an array parallel to the rings: the ring assembly resamples and reorders
+    // points, and an index-parallel width array cannot survive that.
+    double extent_at(const Vec2d &p) const;
+
     // Fraction of the region whose local extent is below `w_mm`. What decides whether a ring
     // count needs the degradation ladder is not whether the narrowest corner collapses - some
     // corner nearly always does - but how much of the wall it takes with it.
@@ -112,7 +119,8 @@ private:
     double              m_pitch = 0.;      // scaled
     Vec2d               m_origin{0., 0.};  // scaled, position of raster cell (0, 0)
     size_t              m_rows = 0, m_cols = 0;
-    std::vector<float>  m_extent;          // W at each raster cell, mm; 0 outside the region
+    std::vector<float>  m_extent;          // exact W on a subsample, mm - what the percentiles use
+    std::vector<float>  m_wgrid;           // gridded W over the whole raster, mm - what extent_at reads
     ExPolygon           m_region;
     size_t              m_n_bores = 0;
     std::vector<size_t> m_bore_of_line;    // line index in the bore distancer -> bore index
