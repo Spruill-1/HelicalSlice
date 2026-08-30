@@ -2774,7 +2774,7 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
         if (sites.size() >= CS_MAX_RESECTION_SITES)
             break;
         prev_share = share;
-        sites.push_back(field.widest_point());
+        sites.push_back(field.deepest_point());
     }
     if (!sites.empty()) {
         char msg[200];

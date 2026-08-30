@@ -35,6 +35,7 @@ struct CsRingField::Impl
     LinesDist all;    // contour + holes: region membership, by even-odd ray cast
     LinesDist out;    // contour only:    d_out and its nearest point
     LinesDist bores;  // every hole:      d_in and its nearest point
+    LinesDist medial;  // bore-less regions: the medial axis, which is what d_in closes onto
     CsURaster raster;
 
     // Gridded distance for the RASTER only. An exact tree query costs about 2 us, and the
@@ -115,9 +116,36 @@ bool CsRingField::build(const ExPolygon &interior, double grid_pitch_mm, std::st
     m_impl->out   = LinesDist(std::move(contour_lines));
     m_impl->bores = LinesDist(std::move(bore_lines));
 
-    // With no bore the inner target is the region's centroid, per the interpolation the
-    // rings are meant to express: the family closes onto a point instead of onto a wall.
+    // With no bore the family has to close onto something, and the hypothesis said the centroid.
+    // The centroid is right only when the region is round about it: for a disc, d_out + d_centroid
+    // is exactly the radius everywhere, so the extent is constant and the rings come out evenly.
+    // For anything elongated or curved it is not the thickness at all but "distance from the wall
+    // plus distance to a far-away point", and that inflates the extent enormously - on a crescent
+    // it measured 2.70..14.71 mm, a 5.4-fold spread on a wall whose half-thickness never exceeds
+    // 5.5 mm, and the ring count that came out of it was 12 where 4 is called for.
+    //
+    // The MEDIAL AXIS is what the centroid was standing in for. Closing onto it makes
+    // d_out + d_medial the local half-thickness everywhere - the quantity that actually decides
+    // how many rings fit - and it degenerates to the centroid for a disc, where the medial axis
+    // IS the centre. Sites cannot substitute: no point placement bounds the extent's maximum
+    // without collapsing its minimum, because the extent at a site is just d_out there.
     if (m_n_bores == 0 && m_sites.empty()) {
+        // max_width filters the axis by the LOCAL WIDTH it stands for, so it has to admit the
+        // whole region: bounded at a couple of millimetres - the value the sub-bead fallback
+        // uses, for its own quite different purpose - it rejects every part of a wall thicker
+        // than that and hands back nothing, which silently reverts to the centroid.
+        const BoundingBox mb = get_extents(interior);
+        const double max_w = 2.0 * double(std::max(mb.size().x(), mb.size().y()));
+        Polylines med = interior.medial_axis(0.05 * scale_(1.), max_w);
+        Lines ml;
+        for (const Polyline &pl : med)
+            for (const Line &l : pl.lines())
+                if (l.length() > 0)
+                    ml.push_back(l);
+        if (ml.size() >= 2)
+            m_impl->medial = LinesDist(std::move(ml));
+    }
+    if (m_n_bores == 0 && m_sites.empty() && m_impl->medial.get_lines().empty()) {
         const Point c = interior.contour.centroid();
         m_centroid = c.cast<double>();
         // A centroid outside its own contour (a horseshoe) would put the whole family on the
@@ -154,7 +182,7 @@ bool CsRingField::build(const ExPolygon &interior, double grid_pitch_mm, std::st
     const size_t stride = std::max<size_t>(1, size_t(std::llround(
         std::sqrt(double(m_rows * m_cols) / 4000.0))));
     std::vector<std::vector<float>> ext_rows(m_rows);
-    std::vector<std::pair<float, Point>> widest_rows(m_rows, { 0.f, Point(0, 0) });
+    std::vector<std::pair<float, Point>> deepest_rows(m_rows, { 0.f, Point(0, 0) });
 
     // Membership by SCANLINE, not by a ray cast per cell. The even-odd test that
     // `LinesDistancer::outside` performs walks the tree twice per point, and at a raster cell
@@ -215,10 +243,14 @@ bool CsRingField::build(const ExPolygon &interior, double grid_pitch_mm, std::st
                 if (inside) {
                     const Point ps(coord_t(std::llround(p.x())), coord_t(std::llround(p.y())));
                     const double d_out = std::abs(double(m_impl->sdf_out.signed_distance_bilinear(ps)));
+                    if (float(d_out) > deepest_rows[r].first)
+                        deepest_rows[r] = { float(d_out), ps };
                     double d_in = m_n_bores > 0
                         ? std::abs(double(m_impl->sdf_bores.signed_distance_bilinear(ps)))
-                        : (m_sites.empty() ? (p - m_centroid).norm()
-                                           : std::numeric_limits<double>::max());
+                        : (!m_impl->medial.get_lines().empty()
+                               ? m_impl->medial.distance_from_lines<false>(ps)
+                               : (m_sites.empty() ? (p - m_centroid).norm()
+                                                  : std::numeric_limits<double>::max()));
                     for (const Point &st : m_sites)
                         d_in = std::min(d_in, (p - st.cast<double>()).norm());
                     const double W = d_out + d_in;
@@ -236,10 +268,6 @@ bool CsRingField::build(const ExPolygon &interior, double grid_pitch_mm, std::st
                     int    ebore = -1;
                     this->sample_inside(p, eu, eext, ebore);
                     ext_rows[r].push_back(float(eext));
-                    if (float(eext) > widest_rows[r].first)
-                        widest_rows[r] = { float(eext),
-                                           Point(coord_t(std::llround(p.x())),
-                                                 coord_t(std::llround(p.y()))) };
                 }
             }
         }
@@ -248,9 +276,9 @@ bool CsRingField::build(const ExPolygon &interior, double grid_pitch_mm, std::st
     m_extent.clear();
     for (const std::vector<float> &row : ext_rows)
         m_extent.insert(m_extent.end(), row.begin(), row.end());
-    float widest = 0.f;
-    for (const auto &w : widest_rows)
-        if (w.first > widest) { widest = w.first; m_widest = w.second; }
+    float deepest = 0.f;
+    for (const auto &w : deepest_rows)
+        if (w.first > deepest) { deepest = w.first; m_deepest = w.second; }
 
     m_valid = true;
     return true;
@@ -288,6 +316,8 @@ void CsRingField::sample_inside(const Vec2d &p, double &u, double &extent, int &
         d_in = d;
         if (li < m_bore_of_line.size())
             bore = int(m_bore_of_line[li]);
+    } else if (!m_impl->medial.get_lines().empty()) {
+        d_in = m_impl->medial.distance_from_lines<false>(ps);
     } else if (m_sites.empty()) {
         d_in = (p - m_centroid).norm();
     } else {
@@ -323,6 +353,10 @@ bool CsRingField::refine(Vec2d &p, double t, double &extent, int &bore) const
             // membership test would refuse to answer and hand back "no bore".
             if (li < m_bore_of_line.size())
                 bore = int(m_bore_of_line[li]);
+        } else if (!m_impl->medial.get_lines().empty()) {
+            const auto [d, li, pi] = m_impl->medial.distance_from_lines_extra<false>(ps);
+            (void) li;
+            d_in = d; pin = pi;
         } else if (m_sites.empty()) {
             d_in = (p - m_centroid).norm();
         } else {
@@ -380,6 +414,11 @@ bool CsRingField::bisect(Vec2d &p, double t, double &extent, int &bore) const
     (void) d_out; (void) io;
     Vec2d pin = m_centroid;
     double best = m_sites.empty() ? std::numeric_limits<double>::max() : (p - m_centroid).norm();
+    if (!m_impl->medial.get_lines().empty()) {
+        const auto [d, li, pi] = m_impl->medial.distance_from_lines_extra<false>(ps);
+        (void) li;
+        pin = pi; best = d;
+    }
     if (m_n_bores > 0) {
         const auto [d, li, pi] = m_impl->bores.distance_from_lines_extra<false>(ps);
         (void) li;

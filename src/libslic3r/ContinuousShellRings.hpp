@@ -77,9 +77,14 @@ public:
     // lets the thin places coalesce into the degradation ladder.
     double extent_percentile(double pct) const;
 
-    // Where the region is widest - the place a re-sectioning site should go, because that is the
-    // extent the ring count is set by.
-    Point widest_point() const { return m_widest; }
+    // Where the region is DEEPEST - furthest from its outer wall. That is where a re-sectioning
+    // site belongs. Placing one at the widest EXTENT instead is actively harmful and was measured
+    // so: the extent at a site is just d_out there, so a site dropped at the argmax of
+    // d_out + d_in lands somewhere d_out is small, the extent collapses to nearly nothing around
+    // it, and the spread the site was meant to tighten explodes - 3.3x to 231x on an eccentric
+    // annulus, taking the collapsed fraction from 9.3% to 13.2% with ONE site. At the deepest
+    // point the extent is locally at its largest, so no such singularity is created.
+    Point deepest_point() const { return m_deepest; }
 
     // Ring count such that NO gap anywhere exceeds max_gap_mm. n rings leave n+1 gaps across
     // the extent and the gap is W(p)/(n+1), so the widest place in the region is what sets the
@@ -137,7 +142,7 @@ private:
     std::vector<size_t> m_bore_of_line;    // line index in the bore distancer -> bore index
     Vec2d               m_centroid{0., 0.};// inner target when there is no bore or site, scaled
     Points              m_sites;           // virtual bores, scaled
-    Point               m_widest{0, 0};    // argmax of the local extent
+    Point               m_deepest{0, 0};  // argmax of d_out: furthest from the outer wall
 
     struct Impl;                            // holds the distance trees
     std::shared_ptr<Impl> m_impl;
