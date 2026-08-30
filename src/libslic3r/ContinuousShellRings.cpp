@@ -280,8 +280,104 @@ bool CsRingField::build(const ExPolygon &interior, double grid_pitch_mm, std::st
     for (const auto &w : deepest_rows)
         if (w.first > deepest) { deepest = w.first; m_deepest = w.second; }
 
+    this->build_phi();
+
     m_valid = true;
     return true;
+}
+
+// The azimuth field, carried inward from the outer boundary along the gradient flow of u.
+//
+// Held as cos/sin rather than as an angle so the seam - where the arc length wraps from 1 back
+// to 0 - averages correctly instead of tearing. Cells are visited in order of increasing u, so
+// every cell is filled from the cells it came from and one pass suffices.
+void CsRingField::build_phi()
+{
+    m_phi_c.assign(m_rows * m_cols, 0.f);
+    m_phi_s.assign(m_rows * m_cols, 0.f);
+    std::vector<char> known(m_rows * m_cols, 0);
+
+    // Cumulative arc length along the outer boundary, so a nearest point on it can be turned
+    // into a position around it.
+    const Lines &cl = m_impl->out.get_lines();
+    if (cl.empty())
+        return;
+    std::vector<double> arc(cl.size() + 1, 0.0);
+    for (size_t i = 0; i < cl.size(); ++i)
+        arc[i + 1] = arc[i] + cl[i].length();
+    const double total = arc.back();
+    if (total < 1e-9)
+        return;
+
+    const double seed_band = 2.0 * m_pitch;
+    std::vector<std::pair<float, size_t>> order;
+    order.reserve(m_rows * m_cols / 2);
+    for (size_t r = 0; r < m_rows; ++r)
+        for (size_t c = 0; c < m_cols; ++c) {
+            const size_t k = r * m_cols + c;
+            if (m_wgrid[k] <= 0.f)
+                continue;                          // outside the region
+            const Vec2d p(m_origin.x() + double(c) * m_pitch, m_origin.y() + double(r) * m_pitch);
+            const Point ps(coord_t(std::llround(p.x())), coord_t(std::llround(p.y())));
+            const auto [d, li, np] = m_impl->out.distance_from_lines_extra<false>(ps);
+            if (d < seed_band && li < cl.size()) {
+                const double a = (arc[li] + (np - cl[li].a.cast<double>()).norm()) / total;
+                m_phi_c[k] = float(std::cos(2.0 * M_PI * a));
+                m_phi_s[k] = float(std::sin(2.0 * M_PI * a));
+                known[k] = 1;
+            }
+            order.emplace_back(m_impl->raster.v[k], k);
+        }
+    std::sort(order.begin(), order.end(),
+              [](const auto &a, const auto &b) { return a.first < b.first; });
+
+    static const int DR[8] = { -1, 1, 0, 0, -1, -1, 1, 1 };
+    static const int DC[8] = { 0, 0, -1, 1, -1, 1, -1, 1 };
+    for (const auto &it : order) {
+        const size_t k = it.second;
+        if (known[k])
+            continue;
+        const long r = long(k / m_cols), c = long(k % m_cols);
+        double sc = 0.0, ss = 0.0;
+        int n = 0;
+        for (int d = 0; d < 8; ++d) {
+            const long rr = r + DR[d], cc = c + DC[d];
+            if (rr < 0 || cc < 0 || size_t(rr) >= m_rows || size_t(cc) >= m_cols)
+                continue;
+            const size_t g = size_t(rr) * m_cols + size_t(cc);
+            if (known[g] && m_impl->raster.v[g] < it.first) {
+                sc += double(m_phi_c[g]); ss += double(m_phi_s[g]); ++n;
+            }
+        }
+        if (n) {
+            const double h = std::hypot(sc, ss);
+            if (h > 1e-9) { m_phi_c[k] = float(sc / h); m_phi_s[k] = float(ss / h); known[k] = 1; }
+        }
+    }
+}
+
+double CsRingField::phi_at(const Vec2d &p) const
+{
+    if (! m_valid || m_phi_c.empty())
+        return 0.;
+    const double fc = (p.x() - m_origin.x()) / m_pitch;
+    const double fr = (p.y() - m_origin.y()) / m_pitch;
+    const long   c0 = long(std::floor(fc)), r0 = long(std::floor(fr));
+    if (c0 < 0 || r0 < 0 || size_t(c0) + 1 >= m_cols || size_t(r0) + 1 >= m_rows)
+        return 0.;
+    const double tx = fc - double(c0), ty = fr - double(r0);
+    const double wt[4] = { (1. - tx) * (1. - ty), tx * (1. - ty), (1. - tx) * ty, tx * ty };
+    const long   rr[4] = { r0, r0, r0 + 1, r0 + 1 };
+    const long   cc[4] = { c0, c0 + 1, c0, c0 + 1 };
+    double sc = 0., ss = 0.;
+    for (int k = 0; k < 4; ++k) {
+        const size_t g = size_t(rr[k]) * m_cols + size_t(cc[k]);
+        if (m_wgrid[g] > 0.f) { sc += wt[k] * double(m_phi_c[g]); ss += wt[k] * double(m_phi_s[g]); }
+    }
+    if (std::hypot(sc, ss) < 1e-9)
+        return 0.;
+    double a = std::atan2(ss, sc) / (2.0 * M_PI);
+    return a < 0. ? a + 1.0 : a;
 }
 
 void CsRingField::sample(const Vec2d &p, double &u, double &extent, int &bore) const

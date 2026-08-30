@@ -32,6 +32,9 @@ namespace {
 // the point is evaluated at whatever point is finally emitted.
 using CsWidthFn = std::function<float(const Point &)>;
 
+// The azimuth of a point, in [0, 1) around the region. See CsRingField::phi_at.
+using CsPhaseFn = std::function<double(const Point &)>;
+
 struct WovenInfill {
     bool   enabled     = false;
     size_t shell_loops = 1;
@@ -1613,6 +1616,7 @@ struct ContourChain {
     std::shared_ptr<ChainBeadPlan> plan;
     // Set instead of `plan` when the widths come from a measured field rather than a bead plan.
     std::shared_ptr<CsWidthFn> width_fn;
+    std::shared_ptr<CsPhaseFn> phase_fn;
     // The plan SLOT each loop came from, parallel to `loops`. Non-empty exactly when `plan`
     // is set. Position in `loops` used to BE the slot index, which is why sparse infill and
     // adaptive beading could not coexist: decimation drops rings, and every surviving ring
@@ -1996,7 +2000,7 @@ coord_t vanish_depth(const ExPolygons &shape, coord_t hi)
 void apply_weave(ContourChain &cc, const std::vector<char> &kept_infill,
                  const std::vector<char> &kept_pocket, const WovenInfill &woven,
                  coord_t spacing, size_t layer_index, double closure_in = 0.8,
-                 bool smooth_phase = false)
+                 bool smooth_phase = false, const CsPhaseFn *phase_fn = nullptr)
 {
 // THE WEAVE, LOCAL TO EACH POINT.
 //
@@ -2195,10 +2199,62 @@ const Polygons before = cc.loops;
 // rather than around each ring independently. On a circle the inherited phase is
 // the same angular position, so this reduces exactly to what annuli already do -
 // which is why their validated behaviour is unchanged.
+// LOBE COUNTS IN OCTAVES, off the azimuth field.
+//
+// Each ring's phase is 2*pi*k*phi, with phi the transported azimuth - the same coordinate on
+// every ring, so two rings at the same phi are the two points that touch. The base count
+// belongs to the INNERMOST ring, which is the shortest; going outward the rings get longer, so
+// the count doubles whenever the lobe would otherwise stretch past twice its base length.
+//
+// It has to be a DOUBLING and not a smaller step. With both rings on the same phi, the number
+// of the inner ring's hills that land under an outer valley is exactly gcd(k_in, k_out):
+//
+//     inner 6, outer 7  -> 2 of 6      inner 6, outer 12 -> 6 of 6
+//     inner 6, outer 8  -> 2 of 6      inner 6, outer 18 -> 6 of 6
+//     inner 6, outer 9  -> 3 of 6      inner 8, outer 16 -> 8 of 8
+//
+// so only an integer MULTIPLE keeps every hill welded, and 2 is the smallest one. Incrementing
+// the count ring by ring would lose five sixths of the welds.
+//
+// Offsets follow from wanting an inner hill under an outer valley: same count puts the outer
+// ring half a lobe over (b = a + pi), and a doubling puts it at b = 2a + pi/2.
+std::vector<double> ring_k(NR, 0.0), ring_off(NR, 0.0);
+if (phase_fn != nullptr && *phase_fn) {
+    std::vector<size_t> lat;
+    for (size_t j = 0; j < NR; ++j)
+        if (kept_infill[j]) lat.push_back(j);
+    if (! lat.empty()) {
+        auto perim = [&](size_t j) {
+            const Points &P = cc.loops[j].points;
+            double L = 0.0;
+            for (size_t i = 0; i < P.size(); ++i)
+                L += (P[(i + 1) % P.size()] - P[i]).cast<double>().norm();
+            return L;
+        };
+        double k = std::max(2.0, woven.lobes), off = 0.0;
+        const double lam = perim(lat.back()) / k;      // the innermost ring sets the wavelength
+        for (size_t n = lat.size(); n-- > 0; ) {
+            const size_t j = lat[n];
+            while (lam > 1e-9 && perim(j) / k > 2.0 * lam) {
+                off = 2.0 * off + 0.5 * M_PI;
+                k *= 2.0;
+            }
+            ring_k[j] = k;
+            ring_off[j] = off;
+            if (n > 0) off += M_PI;                    // anti-phase to the ring outside
+        }
+    }
+}
+
 std::vector<std::vector<double>> basephase(NR);
 for (size_t j = 0; j < NR; ++j) {
     const Points &pts = before[j].points;
     basephase[j].assign(pts.size(), 0.0);
+    if (ring_k[j] > 0.0) {
+        for (size_t i = 0; i < pts.size(); ++i)
+            basephase[j][i] = 2.0 * M_PI * ring_k[j] * (*phase_fn)(pts[i]) + ring_off[j];
+        continue;
+    }
     if (pts.empty()) continue;
     if (j == 0) {
         double run = 0.0;
@@ -2271,7 +2327,15 @@ for (size_t j = 0; j < NR; ++j) {
 size_t infill_ring = 0;
 for (size_t j = 0; j < NR; ++j) {
     if (!kept_infill[j] || pinned[j]) continue;
-    const double ring_phase = layer_phase + double(infill_ring) * (M_PI + drift);
+    // With the octave schedule the per-ring offset is already in basephase - it has to be,
+    // because it depends on whether the count doubled at that ring - so all that is left to add
+    // is the layer's own precession. The drift term is deliberately NOT applied there: it exists
+    // to stop rings j and j+2 lining their welds into radial spokes, and lining the welds up is
+    // exactly what the octave schedule is for. Whether the spokes come back is a question for a
+    // plate, and the Z precession already turns any spoke into a helix.
+    const double ring_phase = (ring_k[j] > 0.0)
+                            ? layer_phase
+                            : layer_phase + double(infill_ring) * (M_PI + drift);
     ++infill_ring;
     const Points &me = before[j].points;
     if (me.size() < 8) continue;
@@ -2921,6 +2985,15 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
     // resamples and reorders points; the bead plan expresses width the same way and for the same
     // reason.
     std::shared_ptr<CsWidthFn> width_fn;
+
+    // The azimuth field, shared by every ring of this region so that two rings at the same phi
+    // are the two points that touch. It replaces the phase construction whole, so it is the
+    // interpolated path's alone - the marched path keeps the one two peel tests validated.
+    std::shared_ptr<CsPhaseFn> phase_fn;
+    if (n > 0 && !(std::getenv("CS_OCTAVE") && std::atoi(std::getenv("CS_OCTAVE")) == 0))
+        phase_fn = std::make_shared<CsPhaseFn>(
+            [fld](const Point &p) { return fld->phi_at(p.cast<double>()); });
+
     if (n > 0) {
         const double denom = double(n + 1);
         width_fn = std::make_shared<CsWidthFn>([fld, denom, nominal_w, w_floor](const Point &p) {
@@ -3080,6 +3153,7 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
             if (!star_shaped_about(ring, centre)) { b.cc.star_ok = false; break; }
 
         b.cc.width_fn = width_fn;
+        b.cc.phase_fn = phase_fn;
         if (n > 0) {
             b.cc.woven_infill = true;              // tag [shell | infill | shell] downstream
             if (woven.weave > 0.0) {
@@ -3091,7 +3165,8 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
                 // none. Measured on the eccentric, moving to one bead halves the extrusion below
                 // 0.20 mm, 0.81% of path to 0.45%.
                 apply_weave(b.cc, b.lat, pinned, woven, spacing, layer_index,
-                            double(flow.scaled_width()) / double(spacing), /*smooth_phase=*/true);
+                            double(flow.scaled_width()) / double(spacing), /*smooth_phase=*/true,
+                            b.cc.phase_fn.get());
             }
         }
         out.push_back(std::move(b.cc));

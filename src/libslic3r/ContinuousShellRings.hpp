@@ -104,6 +104,20 @@ public:
     // points, and an index-parallel width array cannot survive that.
     double extent_at(const Vec2d &p) const;
 
+    // The AZIMUTH field: the coordinate that runs around the region while u runs across it.
+    // Seeded on the outer boundary with its own normalised arc length and carried inward along
+    // the gradient flow of u - which is the direction the nearest-point correspondence runs, so
+    // two rings at the same phi are the two points that actually touch.
+    //
+    // This exists because the alternatives were measured and both fail. Inheriting phase from
+    // the ring outside by nearest point gives a staircase with half its steps running backwards
+    // by the second ring. Giving each ring its own arc-length ramp is perfectly smooth and
+    // drifts up to 0.79 of a lobe by the ninth, which turns anti-phase into in-phase. The
+    // transported field holds correspondence to about 0.01 of a lobe at the median.
+    //
+    // Returns a fraction in [0, 1). Zero-length regions and points off the field return 0.
+    double phi_at(const Vec2d &p) const;
+
     // Fraction of the region whose local extent is below `w_mm`. What decides whether a ring
     // count needs the degradation ladder is not whether the narrowest corner collapses - some
     // corner nearly always does - but how much of the wall it takes with it.
@@ -135,12 +149,15 @@ private:
     // above all, where the nearest bore swaps and u is continuous but not smooth.
     bool bisect(Vec2d &p, double t, double &extent, int &bore) const;
 
+    void build_phi();
+
     bool                m_valid = false;
     double              m_pitch = 0.;      // scaled
     Vec2d               m_origin{0., 0.};  // scaled, position of raster cell (0, 0)
     size_t              m_rows = 0, m_cols = 0;
     std::vector<float>  m_extent;          // exact W on a subsample, mm - what the percentiles use
     std::vector<float>  m_wgrid;           // gridded W over the whole raster, mm - what extent_at reads
+    std::vector<float>  m_phi_c, m_phi_s;  // the azimuth field as cos/sin, so its seam averages
     ExPolygon           m_region;
     size_t              m_n_bores = 0;
     std::vector<size_t> m_bore_of_line;    // line index in the bore distancer -> bore index
