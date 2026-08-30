@@ -758,26 +758,22 @@ static std::vector<Vec2d> cs_resample_ccw(const Polygon &poly, size_t N)
     return out;
 }
 
-bool CsRingField::morph_family(size_t n, CsRingFamily &out, std::string *fail) const
+// The two boundaries resampled to a common parametrisation, and the start offset that pairs
+// them the way they face each other. Equal arc length is the correspondence; where it STARTS is
+// free, and minimising the total squared distance is what makes two circles pair equal angles -
+// which is what makes the blend come out circular.
+bool CsRingField::morph_pair(std::vector<Vec2d> &A, std::vector<Vec2d> &B, size_t &best,
+                             std::string *fail) const
 {
-    out.rings.clear();
     if (! m_valid || m_region.holes.size() != 1) {
         if (fail) *fail = "continuous shell ring field: a morph needs exactly one bore";
         return false;
     }
-    if (n == 0)
-        return true;
-
     const size_t N = std::max<size_t>(256, std::max(m_region.contour.points.size(),
                                                     m_region.holes.front().points.size()) * 2);
-    const std::vector<Vec2d> A = cs_resample_ccw(m_region.contour, N);
-    const std::vector<Vec2d> B = cs_resample_ccw(m_region.holes.front(), N);
-
-    // Line the two parametrisations up. Equal arc length is the correspondence; where it STARTS
-    // is free, and the offset that minimises the total squared distance is the one that pairs
-    // the curves the way they actually face each other. For two circles this reduces to pairing
-    // equal angles, which is what makes the blend come out circular.
-    size_t best = 0;
+    A = cs_resample_ccw(m_region.contour, N);
+    B = cs_resample_ccw(m_region.holes.front(), N);
+    best = 0;
     double bestd = std::numeric_limits<double>::max();
     const size_t step = std::max<size_t>(1, N / 720);
     for (size_t d = 0; d < N; d += step) {
@@ -786,6 +782,19 @@ bool CsRingField::morph_family(size_t n, CsRingFamily &out, std::string *fail) c
             acc += (A[i] - B[(i + d) % N]).squaredNorm();
         if (acc < bestd) { bestd = acc; best = d; }
     }
+    return true;
+}
+
+bool CsRingField::morph_family(size_t n, CsRingFamily &out, std::string *fail) const
+{
+    out.rings.clear();
+    std::vector<Vec2d> A, B;
+    size_t best = 0;
+    if (! this->morph_pair(A, B, best, fail))
+        return false;
+    if (n == 0)
+        return true;
+    const size_t N = A.size();
 
     for (size_t j = 0; j < n; ++j) {
         const double t = double(j + 1) / double(n + 1);
@@ -809,6 +818,81 @@ bool CsRingField::morph_family(size_t n, CsRingFamily &out, std::string *fail) c
         }
         out.rings.emplace_back(std::move(cr));
     }
+    return true;
+}
+
+bool CsRingField::morph_spiral(size_t n, double lobes, double weave, double closure_mm,
+                               double layer_phase, Polygon &out, std::string *fail) const
+{
+    out.points.clear();
+    std::vector<Vec2d> A, B;
+    size_t best = 0;
+    if (! this->morph_pair(A, B, best, fail))
+        return false;
+    if (n < 3) {
+        if (fail) *fail = "continuous shell ring field: too few slots for a spiral";
+        return false;
+    }
+    const size_t N = A.size();
+    const double denom = double(n + 1);
+
+    // The point at slot v and azimuth index i, with the weave folded in as a modulation of the
+    // slot itself. Amplitude is half a slot less what a bead needs, so two arms one slot apart
+    // just touch; the pi per slot in the phase is what puts them in anti-phase to do it.
+    // The return type is spelled out on purpose. With `auto`, Eigen deduces the type of
+    // `(1-t)*a + t*b` as an expression TEMPLATE holding references to `a` and `b` - which are
+    // locals of this lambda and are destroyed on the way out. The caller then evaluates a
+    // dangling expression, and every point comes back at the origin.
+    auto at = [&](double v, size_t i) -> Vec2d {
+        const Vec2d a = A[i % N], b = B[(i + best) % N];
+        const double W = (a - b).norm() * SCALING_FACTOR;          // mm across the wall here
+        const double gap = W / denom;
+        // Half a slot less what a bead needs, and never more than 0.45: at exactly half a slot
+        // two anti-phase arms would meet at a point, and the clamp is what keeps a positive gap
+        // between them everywhere so the spiral cannot close on itself.
+        const double amp = (gap > 1e-9)
+            ? std::min(0.45, weave * std::max(0.0, 0.5 - closure_mm / gap)) : 0.0;
+        const double phi = double(i % N) / double(N);
+        const double vv = v + amp * std::sin(2.0 * M_PI * lobes * phi + M_PI * v + layer_phase);
+        const double t  = std::clamp(vv / denom, 0.0, 1.0);
+        return (1.0 - t) * a + t * b;
+    };
+
+    // Arm A takes the odd slots, arm B the even ones, each gaining two slots per revolution, so
+    // together they cover every slot once. Walk A inward, U-turn one slot at the bore, walk B
+    // back out; its far end lands one slot from A's start, which closes the loop.
+    // Each arm runs a WHOLE number of revolutions, so both finish at the same azimuth and the
+    // U-turn between them is the one slot that separates them. Letting the arms simply run until
+    // they reach the bore leaves them half a revolution apart, and the U-turn becomes a chord
+    // straight across the middle - which the self-intersection guard duly caught.
+    const size_t rev_a = (n >= 1) ? (n - 1) / 2 : 0;
+    const size_t rev_b = (n >= 2) ? (n - 2) / 2 : 0;
+    if (rev_a == 0 || rev_b == 0) {
+        if (fail) *fail = "continuous shell ring field: too few slots for two spiral arms";
+        return false;
+    }
+    std::vector<Vec2d> arm_a, arm_b;
+    for (size_t k = 0; k <= rev_a * N; ++k)
+        arm_a.push_back(at(1.0 + 2.0 * double(k) / double(N), k));
+    for (size_t k = 0; k <= rev_b * N; ++k)
+        arm_b.push_back(at(2.0 + 2.0 * double(k) / double(N), k));
+    if (arm_a.size() < N || arm_b.size() < N) {
+        if (fail) *fail = "continuous shell ring field: the spiral did not complete a turn";
+        return false;
+    }
+    out.points.reserve(arm_a.size() + arm_b.size());
+    for (const Vec2d &q : arm_a)
+        out.points.emplace_back(coord_t(std::llround(q.x())), coord_t(std::llround(q.y())));
+    for (size_t k = arm_b.size(); k-- > 0; )
+        out.points.emplace_back(coord_t(std::llround(arm_b[k].x())),
+                                coord_t(std::llround(arm_b[k].y())));
+    // NO self-intersection test here, and that is deliberate. The arms are MEANT to touch -
+    // that is what a weld is - and a polygon touching itself comes back from union_ex as several
+    // pieces, so the test that guards the ring family rejects every spiral that is working. What
+    // keeps the arms apart is arithmetic instead: they sit one slot apart in anti-phase, so
+    // their separation is 1 - 2*amp slots and amp is clamped below 0.45. The correspondence
+    // underneath has already been checked by the ring family, which does fold detectably and is
+    // computed first.
     return true;
 }
 

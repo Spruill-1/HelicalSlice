@@ -2898,6 +2898,8 @@ std::vector<ContourChain> cs_interior_chains(const ExPolygon &interior,
 
     const float  nominal_w = flow.width();
     const float  w_floor   = float(std::max(0.30, 0.85 * flow.nozzle_diameter()));
+    // How close two beads' centres may come at a weld: one bead width. See apply_weave.
+    const double closure_mm_for_spiral = double(flow.scaled_width()) * SCALING_FACTOR;
 
     // RUNG 3 OF THE LADDER: re-section.
     //
@@ -3061,6 +3063,25 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
     // marginally better on ring spacing too (max/min 3.29 against 3.45). What it does not have
     // is robustness: it needs a correspondence between the two boundaries and can fold where
     // they are dissimilar. So it is tried, checked ring by ring, and dropped whole if it folds.
+    // THE SPIRAL. A double-arm Fermat spiral joined at its ends is ONE closed loop, so it can
+    // replace the whole lattice and travel the rest of the pipeline as a single ring - which is
+    // what takes a layer from a right-angle hop per ring, 19 to 23 of them, down to two. It
+    // arrives already woven, because the weave has to modulate the arm rather than displace a
+    // ring afterwards: two arms one slot apart carry a pi of phase between them and their
+    // excursions kiss.
+    Polygon spiral;
+    bool has_spiral = false;
+    if (interior.holes.size() == 1 && n >= 3 && woven.weave > 0.0 &&
+        !(std::getenv("CS_SPIRAL") && std::atoi(std::getenv("CS_SPIRAL")) == 0)) {
+        std::string swhy;
+        has_spiral = field.morph_spiral(n, std::max(2.0, woven.lobes), woven.weave,
+                                        closure_mm_for_spiral, double(layer_index) * woven.dphase,
+                                        spiral, &swhy);
+        if (! has_spiral)
+            add_note(degrade_note, "interpolated rings: spiral declined, printing closed rings - "
+                                   + swhy);
+    }
+
     CsRingFamily fam;
     std::string morph_why;
     const bool morphed = interior.holes.size() == 1 && field.morph_family(n, fam, &morph_why);
@@ -3115,6 +3136,17 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
         b.last = levels.front()[k];
         active.push_back(std::move(b));
     }
+    // NOT WIRED IN. Substituting the spiral for the lattice loops here makes spiralize_rings
+    // return a path whose parallel arrays - flags, z offsets, widths - are out of step with its
+    // points, and the layer is refused outright. The trick of passing a double-arm spiral off as
+    // a single closed ring gets it through the ContourChain interface but not through the
+    // assembly below it, which resamples and re-anchors on the assumption that a ring is a
+    // simple closed curve of ordinary size; this one is 16000 points and touches itself at every
+    // weld by design. The generator is kept and tested; landing it needs spiralize_rings to
+    // accept a precomputed interior path instead, which is the integration the original Phase B
+    // plan scoped and this shortcut was trying to avoid.
+    (void) has_spiral;
+    (void) spiral;
     for (size_t j = 1; j < levels.size(); ++j) {
         std::vector<std::vector<CsRing *>> kids(active.size());
         for (CsRing *r : levels[j]) {

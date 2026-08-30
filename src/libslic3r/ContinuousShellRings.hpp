@@ -143,6 +143,26 @@ public:
     // Single-bore regions only - a bore-less one has no second curve to morph to.
     bool morph_family(size_t n, CsRingFamily &out, std::string *fail) const;
 
+    // The same family as ONE double-arm Fermat spiral, already woven.
+    //
+    // A layer of nested closed rings needs the nozzle to step inward once per ring, and every
+    // one of those steps is a near-right-angle radial hop: measured, 19 to 23 of them per layer
+    // against about 21 loops, and they are what is left in the picture once the weave is gentle.
+    // A spiral has two - the U-turn at the bore and the join back to its own start - because it
+    // never stops going round.
+    //
+    // In morph coordinates this is almost free. A ring is (1-t)A + tB at fixed t; the spiral is
+    // the same expression with t advancing continuously, gaining one slot per half revolution on
+    // each arm. The weave is then a modulation of t rather than a displacement along a normal:
+    // amplitude is half a slot less the bead allowance, and the phase carries a pi per slot, so
+    // the arm and its neighbour one slot away are anti-phase and their excursions kiss.
+    //
+    // `weave` scales the amplitude, `lobes` sets its frequency, `closure_mm` is how close two
+    // beads' centres may come. Returns one CLOSED polygon: a double-arm spiral joined at its
+    // ends is a single loop, which is what lets it travel the rest of the pipeline as a ring.
+    bool morph_spiral(size_t n, double lobes, double weave, double closure_mm,
+                      double layer_phase, Polygon &out, std::string *fail) const;
+
     // Exposed for tests and for the callers that need the field itself: the value of u, the
     // local extent W, and the nearest-bore index at an arbitrary point (scaled coords).
     // `u` is 0 outside the region and 1 inside a bore, so the field is continuous across
@@ -165,6 +185,9 @@ private:
     bool bisect(Vec2d &p, double t, double &extent, int &bore) const;
 
     void build_phi();
+
+    bool morph_pair(std::vector<Vec2d> &A, std::vector<Vec2d> &B, size_t &best,
+                    std::string *fail) const;
 
     bool                m_valid = false;
     double              m_pitch = 0.;      // scaled

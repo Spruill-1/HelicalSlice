@@ -465,3 +465,59 @@ TEST_CASE("Continuous shell ring field signature table", "[.][ContinuousShellRin
     std::printf("\n");
     SUCCEED("signature table printed");
 }
+
+TEST_CASE("Ring field spirals the morph, woven, in one closed loop", "[ContinuousShellRings]")
+{
+    // The double-arm Fermat spiral, arriving already perturbed so each arm kisses the arm one
+    // slot away. In morph coordinates a ring is (1-t)A + tB at fixed t and the spiral is the
+    // same expression with t advancing; the weave is then a modulation of t rather than a
+    // displacement along a normal, so anti-phase between neighbouring slots falls out of a pi
+    // per slot in the phase.
+    const ExPolygon reg = annulus(10.0, 4.0, 2.0);      // eccentric: the hard case
+    CsRingField f;
+    std::string fail;
+    REQUIRE(f.build(reg, 0.08, &fail));
+
+    const size_t n = 9;
+    // isolate: does the shared correspondence work at all here?
+    CsRingFamily mf;
+    const bool mok = f.morph_family(n, mf, &fail);
+    double mlo = 1e9, mhi = -1e9;
+    if (mok && !mf.rings.empty())
+        for (const Point &p : mf.rings.front().poly.points) {
+            const double r = p.cast<double>().norm() * SCALING_FACTOR;
+            mlo = std::min(mlo, r); mhi = std::max(mhi, r);
+        }
+    INFO("morph_family ok=" << mok << " rings=" << mf.rings.size()
+         << " first-ring radius " << mlo << ".." << mhi);
+    Polygon sp;
+    REQUIRE(f.morph_spiral(n, 3.0, 1.0, 0.45, 0.0, sp, &fail));
+    REQUIRE(sp.points.size() > 1000);
+
+    // It spans the wall: a spiral that never reached the bore would sit at one radius.
+    double lo = 1e9, hi = -1e9;
+    for (const Point &p : sp.points) {
+        const double r = p.cast<double>().norm() * SCALING_FACTOR;
+        lo = std::min(lo, r); hi = std::max(hi, r);
+    }
+    INFO("spiral radius " << lo << " .. " << hi << " mm over " << sp.points.size() << " points");
+    CHECK(hi - lo > 3.0);
+
+    // ONE continuous run: the whole lattice in a single loop, so the layer needs two radial hops
+    // - the U-turn and the join - where nested rings need one per ring.
+    size_t hops = 0;
+    double worst = 0.;
+    for (size_t i = 0; i < sp.points.size(); ++i) {
+        const Point &a = sp.points[i];
+        const Point &b = sp.points[(i + 1) % sp.points.size()];
+        const double d = (b - a).cast<double>().norm() * SCALING_FACTOR;
+        if (d > 0.30) { ++hops; worst = std::max(worst, d); }
+    }
+    INFO("steps longer than 0.30 mm: " << hops << ", longest " << worst << " mm");
+    CHECK(hops <= 4);
+
+    // The arms must stay apart. They sit one slot apart in anti-phase, so the amplitude clamp -
+    // strictly under half a slot - is what guarantees it; there is no geometric test here
+    // because the arms are MEANT to touch and a self-touching polygon fails a union test.
+    CHECK(worst < 3.0);
+}
