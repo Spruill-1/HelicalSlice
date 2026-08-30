@@ -2875,3 +2875,81 @@ no gap wider than a bead.
 Cost is at budget for the sections under test and 8x over on a 100 mm annulus, where the
 cell cap binds. The raster is a topology carrier, so the lever is a coarser pitch where the
 wall is thick; stage 2 knows the gap it wants and can ask for it.
+
+## Interpolated rings, stage 2: wired in, and the first plate (2026-08-30)
+
+`continuous_shell_interpolated_rings`, default off. Peels the surface skin, hands the
+interior between the innermost skin rings to the level-set generator, and takes the ring
+count from the density. Both signature fences stay byte-identical with the option off; the
+suite is 63 cases / 33967 assertions.
+
+### The ring count rule, restated by the bench
+
+The count is now `n = ceil(W_max / pitch) - 1` over the WIDEST extent of the region, with
+`pitch` the density's pitch clamped to the distance two rings can still weld across. A
+percentile leaves the widest quartile free to open past that bound, and the widest place is
+exactly where a lattice stops welding.
+
+The bound is CS_MAX_GAP_SLOTS = 3 slots, which a peel test set and a peel test has twice
+re-set. What changed is WHERE it is applied. As a cap on a decimator it could only refuse to
+drop a ring from a stack whose positions marching had already fixed, so it fought the density
+knob and lost track of both: it held a 25% wall at 38% while reporting 2.7 slots where it
+meant 3. Placing rings rather than removing them, the bound is simply honoured - ask for one
+more ring and every gap in the region is under it. On the tube: 3 rings, widest gap 1.15 mm
+against 1.19 mm, filling at 39%. The knob is monotone above the density the bound corresponds
+to and clamped below it, saying which.
+
+### Three things that were wrong, and what found them
+
+**Ordering.** The new path has to run ahead of the ADAPTIVE PLAN, not just ahead of the
+marcher. Sitting after the plan made it a silent no-op on exactly the sections the plan
+already handles - every annulus row came back byte-identical to marching and only the
+sections the plan declined took the new path at all.
+
+**Solid layers.** A ring count fixed by the widest place is a lattice rule. Solid fill needs
+the count to follow local thickness, and Arachne's per-angle beading already does that.
+Forced-solid layers arrive with `woven.enabled` true and no density - that is how the brick
+stagger reaches a solid cap - so gating on `enabled` missed them, and they put 35 rings
+across a crescent's widest place and crushed 92% of that layer under them. The gate is the
+density.
+
+**A check that could not fail.** The plate script counted degrade notes in the slicer's
+stdout. The CLI writes nothing to the console and logs to a rotating NNNNN.log in its working
+directory, so the counters read zero on every run - indistinguishable from "the gap cap never
+fired", and actually "nothing was listening".
+
+### A claim of mine that the G-code corrected
+
+The fixture table's path counts (190 for the star tube, 4 for the eccentric, 1 interpolated)
+are ExtrusionPath LEAVES, not G-code runs. Measured on the emitted G-code, marched and
+interpolated both print **one unbroken run per layer with no travels** - the connector
+stitching already saw to that. Interpolation changes where the rings are, not whether the
+extrusion is continuous.
+
+`tools/continuity.py` measures this and the plate gates on it, since ring generation sits
+upstream of the Z ramp and the stitching and can therefore only ever break the premise:
+
+| | runs/layer | travels | Z heights per layer | mm/layer |
+|---|---|---|---|---|
+| P1_sparse marched | 1 | 1 | 380 | 439.9 |
+| P1_sparse interpolated | 1 | 1 | 366 | 387.8 |
+| P3_ecc marched | 1 | 1 | 244 of 250 | 563.2 |
+| P3_ecc interpolated | 1 | 1 | **250 of 250** | 491.9 |
+| P5_crescent marched | 1 | 1 | 247 of 250 | 428.3 |
+| P5_crescent interpolated | 1 | 1 | 246 of 250 | 458.6 |
+
+Reading the Z column: G-code emits three decimals, so a 0.25 mm layer can show at most 250
+distinct heights. Counting "segments whose Z changed" reports about 10% and means nothing -
+most segments repeat the previous Z because the true step is below a micron.
+
+### What the plate is not
+
+PlateR_interp is 8.21 g against round 7's comparable weight, at a requested 25% that prints
+at 39%. It is NOT a density change dressed up as a geometry change: it lays about the same
+material in about the same places, and what differs is that every gap in the wall is now the
+same fraction of it.
+
+Outstanding, and now measured rather than assumed: 90 of 144 layers report their rings
+collapsing over 5.9% and 8.0% of the wall. The engine's volumetric cap already thins those
+beads, so only 0.2-0.5% of path length is emitted below a printable 0.34 mm - but that is the
+degradation ladder's work (adaptive width, then re-section) and it is not built.
