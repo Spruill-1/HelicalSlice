@@ -3634,3 +3634,67 @@ its end straight back to its start - through air". So a genuine transition needs
 through the chain model and `spiralize_rings`, which is a larger change than was implied when
 it was offered as the conservative option. The percentile knob is the part of that idea which is
 expressible today, and on the crescent it happens to be the whole of what was needed.
+
+## The morph, and what the weave should be set to (2026-08-30)
+
+### The bump was the medial axis, and it was the field's fault
+
+At the centre of a circular wall the distance to the wall is R in EVERY direction, so the
+nearest boundary POINT is not unique - that is the medial axis - and `d_out` has a local
+MAXIMUM there. Level sets are smooth except at critical points, so whichever ring passes
+through it is singular. Putting `p = rho*u` near the centre, rho cancels out of `u = u(centre)`
+and leaves `cos(alpha) = S/R - 1 = 0.15`: the level set can reach the centre along only two
+directions, +/-81.37 degrees from the bore axis, turning 17.26 degrees between them. Measured:
+**17.332**. A concentric annulus never shows it only because its medial axis sits inside the
+bore, which is why the tube always looked clean and the eccentric never did.
+
+Three further counts against the level sets on the same geometry: between two circles they give
+Cartesian ovals, off by up to 0.357 mm on a 7.5 mm wall; and they are marginally WORSE on ring
+spacing (max/min 3.45 against 3.29), which is the property they were chosen for.
+
+### Rings are now a morph
+
+The straight blend of the two boundary points at equal normalised arc length, with the start
+offset chosen to minimise total squared distance - which for two circles pairs equal angles and
+returns circles at every t. P3_ecc layer 23, weave off:
+
+| | junctions | ring turn p99 / max | curvature p99 |
+|---|---|---|---|
+| level sets | 22 | 5.02 / **19.60** | 25.52 deg/mm |
+| morph | 21 | 4.39 / **4.82** | 22.06 deg/mm |
+
+The 19.6-degree maximum IS the bump and it is gone. Segment length is 0.198 mm in both, so
+that is like for like.
+
+It is not the general answer and is not treated as one: it needs a correspondence and folds
+where the boundaries are dissimilar. Every ring gets a self-intersection check, the family is
+refused whole if any folds, and the region falls back to the level sets saying so. Single-bore
+regions only.
+
+### And the weave wants a much gentler setting than it ships with
+
+With the rings finally right, the remaining harshness is the weave, and it is a TUNING
+question - reachable through `continuous_shell_infill_weave`, no code needed. Curvature goes as
+amplitude over wavelength squared, so lobe count is the lever. P3_ecc layer 23, on morph rings:
+
+| lobes | drive | sharp joints | curvature p99 | min radius | weld % | void mm2 |
+|---|---|---|---|---|---|---|
+| 6 | square (ships) | **214** | 147.6 | 0.39 mm | 22.6% | 8.85 |
+| 4 | square | 141 | 151.4 | 0.38 | 22.8% | 8.98 |
+| 6 | sinusoid | 62 | 97.9 | 0.59 | 20.0% | 14.31 |
+| 4 | sinusoid | 44 | 85.9 | 0.67 | 20.5% | 14.41 |
+| **3** | **sinusoid** | **35** | **71.5** | **0.80** | **21.0%** | 23.46 |
+| 2 | sinusoid | **23** | 62.1 | **0.92** | 20.6% | 24.56 |
+
+The bare rings have 21-22 sharp joints, all of them ring-to-ring junctions. So at two lobes on
+a pure sinusoid the weave adds **essentially none** - 23 against 21 - and the minimum radius of
+curvature goes from 0.39 mm, about one bead, to 0.92 mm. That is the gentle undulation the
+design asked for, and it costs two points of weld.
+
+Three lobes is the better buy: 35 joints, 0.80 mm radius, and the BEST weld fraction of any
+sinusoid row at 21.0% - fewer lobes weld slightly better here, not worse.
+
+The cost is the same one the drive-shape sweep found: gentle lobes leave the lattice void
+CONNECTED (23-25 mm2 in one piece) where the harsh ones close it into cells (8.9). Whether a
+connected void matters is the peel question, and it is the one thing here that only plastic can
+answer.
