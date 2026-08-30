@@ -9,6 +9,34 @@ ROUND 2 (2026-08-27) fixed the crescent and broke the eccentric. The crescent st
 its concave side went from 5.7% of that interface welded to 38.1%, against 41.5% convex - and the
 lobed object came out as the foam is meant to look. The eccentric came apart into three pieces.
 
+ROUND 7 (2026-08-29) - sharpen the weave's drive. Round 6's cap at 4 slots PEELED the tube and
+is reverted. The description of what parted it is the whole brief for this one: "a roughly 1 mm
+thick void in the centre of the ring, crossed only where the helical seam is - the void more or
+less forms a tube of its own".
+
+Measured, that is exactly right. The weakest mid-wall interface is BONDED over 22% of its length -
+checked at five thresholds from touching to fused, so the welds that happen are real bonds and it
+is their NUMBER that is short. With a 1.19 mm gap and 0.45 mm beads that leaves ~0.75 mm of open
+cylinder over three quarters of the circumference; at the cap-4 spacing it was 1.14 mm, which is
+the millimetre in the report.
+
+Both knobs that decide how much of an interface bonds were tuned against instruments this campaign
+has since withdrawn. Re-swept:
+
+    overshoot   weakest interface   azimuths with NO weld   tallest dead run
+        4  (shipped)    22%                  23.0%              2 layers
+        6               27%                  18.0%              2
+        8               29%                  13.2%              2
+       12               32%                  19.0%              3
+
+8 is an optimum rather than a dial - past it the interface improves while the dead azimuths get
+worse. Across the battery the weakest interface goes 22 -> 29, 22 -> 29, 22 -> 27, 22 -> 30, with
+the widest untied void unchanged or better everywhere, for +0.6 to +1.5% path.
+
+The DRIFT stays at 2.0. Zeroing it also raises the interface (22 -> 27%) for free, and lines rings
+j and j+2 into radial spokes: azimuths with no weld anywhere across the depth 23.0 -> 36.3%,
+tallest dead run 2 -> 5 layers. That is the columnar failure this subsystem began with.
+
 ROUND 6 (2026-08-29) - raise the gap cap to 4 slots on a plain wall. Round 5's medial change was
 real and small: "slightly better but mostly the same". So the question became where the material
 actually is, and on the crescent 92 of its 158 mm2 is SHELL - two wall loops plus the pinned
@@ -184,9 +212,9 @@ def main():
         write_stl(p, tris)
         objs.append((p, dens))
 
-    # P1_sparse: the plain annulus the gap cap was originally set on, and the object most at risk
-    # if 4 slots is too far. P3_ecc is NOT reprinted - the guard leaves it within 0.3% of the part
-    # in hand - and P4/P6/P7 move the same way P1 does, so P1 speaks for them.
+    # P1_sparse: the tube, and the object the whole round is about - its mid-wall void is what
+    # was described as forming "a tube of its own". P4/P6/P7 move the same way, so it speaks for
+    # them; P3_ecc is not reprinted, its weakest interface barely moves (9 -> 10%).
     add("P1_sparse", tube(circle(10.0), circle(2.5), H))
     cre = crescent(12.0, 9.0, 8.0)
     if not star_ok(cre, (-6.0, 0.0)):
@@ -263,19 +291,20 @@ def main():
     t2 = re.search(r"prediction[^\d]*(\d+)", meta)
     print(f"\n{OUTNAME}: {w.group(1) if w else '?'} g, "
           f"{int(t2.group(1)) // 60 if t2 else '?'} min")
-    print("\nBOTH are peel tests, and this plate can only be read by peeling. The cap it loosens")
-    print("was set by a peel test in the first place and nothing at the desk can overrule that.")
-    print("  P1: the plain sparse annulus, the geometry the cap was set on. It is the one at risk.")
-    print("      Peel it hard. If the lattice parts down the middle, 4 slots is too far and the")
-    print("      answer is that the density setting simply cannot be delivered on a wall this")
-    print("      thin - which is worth knowing plainly rather than working around.")
-    print("  P5: 9% lighter and its interior 36% -> 28% dense, against the part in hand from this")
-    print("      morning in the same filament. It should feel noticeably less solid and peel no")
-    print("      more easily. Cut it too: the cells should be bigger, not the solids smaller.")
-    print("\nWhat would falsify this: either object peeling where its predecessor did not. The")
-    print("desk measure says no void got wider - worst void 1.33 -> 1.32 mm2 on P5 - but the desk")
-    print("measure is of ONE object's twelve layers, and peel resistance has already been shown")
-    print("once in this campaign not to follow the tie metric.")
+    print("\nP1 is the object this round is about, and the test is the tube of void in its wall.")
+    print("  P1: back at the gap cap of 3, which is the spacing that held before, so the void ring")
+    print("      is ~0.75 mm rather than the ~1.1 mm that parted. What changed is how much of that")
+    print("      ring is BRIDGED: 22% of its length bonded before, 29% now, and the azimuths with")
+    print("      no weld at all across the depth 23% -> 13%. Cut it and look at the mid-wall gap:")
+    print("      it should read as a broken necklace rather than a continuous tube. Peel it too.")
+    print("  P5: the risk. Four of its five interfaces improve, but its innermost - ring to medial")
+    print("      terminus - goes 17% -> 6%, because its two rings differ in length by a factor of")
+    print("      two and a squarer wave matches them worse. It is at the medial, in the least")
+    print("      loaded part, and it must not become a place the crescent comes apart.")
+    print("\nWhat would falsify this: P1's mid-wall still reading as a continuous tube, which would")
+    print("mean bonded FRACTION is not what the eye and the hand are reading and the target is the")
+    print("gap width itself; or P5 parting at its medial, which would mean 6% is below whatever")
+    print("that interface needs and the sharper drive cannot be had on a chain with a terminus.")
 
 
 if __name__ == "__main__":
