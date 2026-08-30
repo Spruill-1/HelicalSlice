@@ -3545,3 +3545,46 @@ sharp ends are where this bites - was closer than the correction I offered: the 
 where the crescent collapses. What was wrong was the reason, and the claim that a section needs
 a sharp feature at all: the mechanism is extent spread, and a smoothly eccentric wall crosses
 the same line once its skin is peeled, with no sharp feature anywhere.
+
+### Is the crescent's centroid outside it? No - and the fix works anyway (2026-08-30)
+
+Measured on `crescent(12, 9, 8)`, the plate's object:
+
+    section area centroid   (-3.66, 0.00)   INSIDE the material
+    peeled interior centroid (-3.99, 0.00)  INSIDE the interior
+
+So the centroid being outside is not what ails the crescent, and "subsection until every cell
+centroid is inside its cell" cannot be the stopping rule - every cell's centroid is already
+inside its own cell at every subdivision tried, 1/1 through 8/8.
+
+**But subsectioning does fix it, when each cell gets its OWN ring count.** On the peeled
+interior, with the extent measured to the medial axis (0.09..4.92 mm, a 52-fold range):
+
+| cells | n per cell | collapsed area |
+|---|---|---|
+| 1 (what ships) | [4] | 6.7% |
+| 2 | [4, 3] | 5.5% |
+| 3 | [4, 3, 3] | 4.3% |
+| 4 | [4, 2, 3, 3] | 3.3% |
+| 6 | [4, 2, 2, 3, 3, 4] | 2.4% |
+| 8 | [4, 2, 1, 3, 3, 4, 4, 4] | 1.7% |
+
+Monotone, and it is not the centroid that makes it work - it is that **n is currently GLOBAL
+for the whole region**. Each cell spans a narrower range of extents, so a count chosen for that
+cell fits it. That is what hypothesis point 6 said all along, and the site-based re-section
+built here does NOT do it: sites were added as extra d_in SOURCES, which lowers the widest
+extent but still leaves one count for everything.
+
+**The catch, and why this is not a free win.** Per-cell counts mean adjacent cells put their
+rings at different levels, so the rings do not line up across a cell boundary and have to weld
+across it instead of continuing through it. That is precisely the artificial-face problem the
+equidistant-set formulation was chosen to avoid, and the parked multibore branch's open
+question - "the merge is not done until a peel across a cut line has been printed". It trades a
+measured 6.7% collapse for an unmeasured interface.
+
+The alternative that keeps one count and still fits the thin places is an Arachne-style
+TRANSITION: let a single ring merge into its neighbour over a transition length rather than
+terminating, which is what `wall_transition_length` already exists for and what the bead plan's
+rho ramp already does per angular bin. No cell boundary, no artificial face, and the
+termination is a controlled merge rather than a chord. It is the more conservative of the two
+and has not been tried.
