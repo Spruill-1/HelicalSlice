@@ -3069,10 +3069,17 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
     // arrives already woven, because the weave has to modulate the arm rather than displace a
     // ring afterwards: two arms one slot apart carry a pi of phase between them and their
     // excursions kiss.
+    // OPT-IN, because it under-fills. Two arms each advancing two slots per revolution reach n
+    // slots in n-2 revolutions, and the shortfall is at the two BOUNDARIES: arm A leaves the
+    // outermost slot after half a turn and arm B only reaches it at the end, so the slot nearest
+    // each surface is covered for part of the circumference rather than all of it. Measured, the
+    // layer lays 17% less path than the same count of closed rings and its worst void cell goes
+    // from 23 mm2 to 72. This is the wedge the original Phase B plan spent a section on and
+    // solved by re-beading the two turns nearest each surface; that is not built here.
     Polygon spiral;
     bool has_spiral = false;
     if (interior.holes.size() == 1 && n >= 3 && woven.weave > 0.0 &&
-        !(std::getenv("CS_SPIRAL") && std::atoi(std::getenv("CS_SPIRAL")) == 0)) {
+        (std::getenv("CS_SPIRAL") && std::atoi(std::getenv("CS_SPIRAL")) != 0)) {
         std::string swhy;
         has_spiral = field.morph_spiral(n, std::max(2.0, woven.lobes), woven.weave,
                                         closure_mm_for_spiral, double(layer_index) * woven.dphase,
@@ -3136,17 +3143,16 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
         b.last = levels.front()[k];
         active.push_back(std::move(b));
     }
-    // NOT WIRED IN. Substituting the spiral for the lattice loops here makes spiralize_rings
-    // return a path whose parallel arrays - flags, z offsets, widths - are out of step with its
-    // points, and the layer is refused outright. The trick of passing a double-arm spiral off as
-    // a single closed ring gets it through the ContourChain interface but not through the
-    // assembly below it, which resamples and re-anchors on the assumption that a ring is a
-    // simple closed curve of ordinary size; this one is 16000 points and touches itself at every
-    // weld by design. The generator is kept and tested; landing it needs spiralize_rings to
-    // accept a precomputed interior path instead, which is the integration the original Phase B
-    // plan scoped and this shortcut was trying to avoid.
-    (void) has_spiral;
-    (void) spiral;
+    if (has_spiral && active.size() == 1) {
+        // One loop replaces the whole lattice. It is already woven, so it is tagged as a surface
+        // ring for the weave's purposes - there is nothing left for apply_weave to displace.
+        Build &b = active.front();
+        b.cc.loops.resize(b.cc.loops.size() - 1);
+        b.lat.resize(b.lat.size() - 1);
+        b.cc.loops.push_back(spiral);
+        b.lat.push_back(0);
+        levels.resize(1);
+    }
     for (size_t j = 1; j < levels.size(); ++j) {
         std::vector<std::vector<CsRing *>> kids(active.size());
         for (CsRing *r : levels[j]) {
@@ -3970,6 +3976,11 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
                                        scarf_len, scarf_floor, chain.plan.get(), cs_layer_h_scaled,
                                        chain.width_fn.get(),
                                        chain.ring_slot.empty() ? nullptr : &chain.ring_slot);
+        if (std::getenv("CS_SUBDBG") && !(sub.points.size() >= 2 && sub.points.size() == flags.size()
+            && sub.points.size() == zoff.size() && sub.points.size() == widths.size()))
+            std::fprintf(stderr, "CS_SUBDBG pts=%zu flags=%zu zoff=%zu widths=%zu loops=%zu\n",
+                         sub.points.size(), flags.size(), zoff.size(), widths.size(),
+                         chain.loops.size());
         if (sub.points.size() >= 2 && sub.points.size() == flags.size() && sub.points.size() == zoff.size()
             && sub.points.size() == widths.size())
             // A chain carries the Z-wave only when its interior was actually thinned AND its
