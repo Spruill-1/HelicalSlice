@@ -3510,3 +3510,38 @@ legitimate but a large share, and the interaction of the three changes in this e
 target, deepest-point sites, earn-its-rebuild) has not been separated. PlateR_interp is
 republished at 8.09 g / 41 min and still prints one continuous run per layer, but its crescent
 should be read with that caveat.
+
+### Correction to the table above (same day)
+
+The sweeps in this entry used a bead floor of 0.425 mm - the value for a 0.5 mm nozzle, which
+is what the unit-test fixtures use - against a 0.3963 mm spacing, which is this plate's 0.4 mm
+nozzle. Mixing the two over-states the collapsed fraction. With the plate's own floor of
+0.34 mm the threshold spread is **1.189 / 0.34 = 3.5x**, not 2.8x, and on the WHOLE section:
+
+| section | W range (mm) | spread | n | min gap | area collapsed |
+|---|---|---|---|---|---|
+| concentric annulus | 7.50..7.56 | 1.0x | 6 | 1.072 | 0.0% |
+| eccentric bore@+4 | 3.52..11.53 | 3.3x | 9 | 0.352 | **0.0%** |
+| crescent, centroid target | 2.70..14.71 | 5.4x | 12 | 0.208 | 5.7% |
+| crescent, medial-axis target | 0.14..5.52 | 38.3x | 4 | 0.029 | 5.7% |
+
+So the eccentric annulus does NOT collapse on the whole section - its narrowest gap, 0.352 mm,
+clears the 0.34 mm floor. The claim above that it collapses at 9.3% was the wrong floor.
+
+The mechanism stated above is unaffected: the gap is W(p)/(n+1) with n set by W_max, so the
+spread is what decides it. What is corrected is which of these sections crosses the line.
+
+**And these numbers are not the slicer's.** They are measured on the whole section; the slicer
+builds its field on the PEELED interior, with two wall loops removed from every face. Peeling
+takes a fixed band off both sides, so it raises the spread - on the eccentric, roughly 3.3x to
+5.7x - which is why the slicer's own notes report both objects collapsing (5.7% and 8.0%) where
+this table shows only the crescent. The per-layer notes are the authoritative numbers; this
+table illustrates the mechanism, not the shipped result.
+
+One consequence worth naming: with the medial-axis target the crescent's extent IS its local
+half-thickness, and the region below floor x (n+1) is the band where that half-thickness falls
+under about 2.4 mm. That band is the rim near both tips. So the original instinct - that the
+sharp ends are where this bites - was closer than the correction I offered: the tips are indeed
+where the crescent collapses. What was wrong was the reason, and the claim that a section needs
+a sharp feature at all: the mechanism is extent spread, and a smoothly eccentric wall crosses
+the same line once its skin is peeled, with no sharp feature anywhere.
