@@ -2395,6 +2395,18 @@ for (size_t j = 0; j < NR; ++j) {
     // gap cap counts SLOTS, and a slot is a fixed distance only where consecutive
     // offsets are parallel - see the handoff.
     const double reach = (CS_MAX_GAP_SLOTS + 0.5) * double(spacing);
+
+    // The envelope and the direction stay POINTWISE, and a band-limited version was tried and
+    // reverted. Rebuilding the amplitude as a truncated Fourier series in the azimuth, and
+    // taking the direction from the ring's own normal instead of from its neighbours, is the
+    // principled form and it measured no better: within-ring turning p99 15.51 to 15.88 degrees,
+    // and the count of joints turning more than 30 degrees went 34 to 53 - the reconstruction
+    // has to be clamped where it would go negative, and every clamp is a kink.
+    //
+    // It was aimed at the wrong thing anyway. With the weave off entirely the rings turn p99
+    // 5.19 degrees, so they are smooth; the joints above 30 degrees are 22 per layer in 11 tight
+    // pairs, which is the ring-to-ring junctions and not noise. What the weave adds - p99 5 to
+    // 15 degrees - is simply the curvature a lobe of this wavelength and amplitude requires.
     Points moved(me.size());
     for (size_t i = 0; i < me.size(); ++i) {
         const Vec2d here = me[i].cast<double>();

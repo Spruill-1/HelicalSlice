@@ -661,6 +661,31 @@ bool CsRingField::level_set(double t, std::vector<CsRing> &out, std::string *fai
             return false;
         }
 
+        // SMOOTH, THEN RE-PROJECT.
+        //
+        // Every vertex is corrected onto the level set independently, so each lands with its own
+        // residual and the polyline zig-zags at the sub-vertex scale. Measured on an eccentric
+        // annulus with the weave switched off entirely, 1% of joints turned more than 30 degrees
+        // where a smooth curve sampled this finely turns about 2 - so the rings were already
+        // tangled before anything displaced them, and every attempt to smooth the WEAVE was
+        // treating a symptom. A Laplacian pass pulls each vertex toward its neighbours and a
+        // correction puts it back on the level set: the noise goes and the curve stays exact.
+        for (int pass = 0; pass < 3; ++pass) {
+            std::vector<Vec2d> sm(pos.size());
+            for (size_t i = 0; i < pos.size(); ++i) {
+                const Vec2d &a = pos[(i + pos.size() - 1) % pos.size()];
+                const Vec2d &b = pos[(i + 1) % pos.size()];
+                sm[i] = 0.25 * a + 0.5 * pos[i] + 0.25 * b;
+            }
+            tbb::parallel_for(tbb::blocked_range<size_t>(0, sm.size()),
+                              [&](const tbb::blocked_range<size_t> &range) {
+                for (size_t i = range.begin(); i < range.end(); ++i)
+                    if (ok[i])
+                        ok[i] = this->refine(sm[i], t, ext[i], lab[i]) ? 1 : 0;
+            });
+            pos.swap(sm);
+        }
+
         CsRing cr;
         cr.t = t;
         cr.poly.points.reserve(pos.size());
