@@ -77,6 +77,11 @@ public:
     // buried ring at all - is a legitimate answer, not a failure.
     size_t ring_count_for_max_gap(double max_gap_mm) const;
 
+    // Fraction of the region whose local extent is below `w_mm`. What decides whether a ring
+    // count needs the degradation ladder is not whether the narrowest corner collapses - some
+    // corner nearly always does - but how much of the wall it takes with it.
+    double fraction_narrower_than(double w_mm) const;
+
     // One level can come back as several loops: past the saddle where two bores separate,
     // the level set of the field genuinely is one loop per bore.
     bool level_set(double t, std::vector<CsRing> &out, std::string *fail) const;

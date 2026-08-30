@@ -393,6 +393,16 @@ double CsRingField::extent_percentile(double pct) const
     return double(w[k]);
 }
 
+double CsRingField::fraction_narrower_than(double w_mm) const
+{
+    if (! m_valid || m_extent.empty())
+        return 0.;
+    size_t below = 0, seen = 0;
+    for (const float e : m_extent)
+        if (e > 0.f) { ++seen; below += (double(e) < w_mm) ? 1 : 0; }
+    return seen ? double(below) / double(seen) : 0.;
+}
+
 size_t CsRingField::ring_count_for_max_gap(double max_gap_mm) const
 {
     if (! m_valid || max_gap_mm <= 0.)
@@ -509,8 +519,18 @@ bool CsRingField::family(size_t n, CsRingFamily &out, std::string *fail) const
     for (size_t j = 0; j < n; ++j) {
         const double t = double(j + 1) / double(n + 1);
         std::vector<CsRing> level;
-        if (! this->level_set(t, level, fail))
+        if (! this->level_set(t, level, fail)) {
+            // With no bore the field closes onto a POINT, so the innermost level sets shrink
+            // until there is nothing left to trace. That is the family ending, not a failure -
+            // u rises monotonically toward the centroid, so once a level is empty every level
+            // inside it is too. With a bore the level sets wrap it and never vanish, so there
+            // an empty level really is one.
+            if (m_n_bores == 0 && ! out.rings.empty()) {
+                if (fail) fail->clear();
+                return true;
+            }
             return false;
+        }
         for (CsRing &r : level)
             out.rings.emplace_back(std::move(r));
     }

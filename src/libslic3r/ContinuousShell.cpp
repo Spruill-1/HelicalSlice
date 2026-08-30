@@ -2640,6 +2640,19 @@ std::vector<ContourChain> interpolated_chains(const ExPolygon &region, const Flo
 {
     const size_t sl = std::max<size_t>(1, woven.shell_loops);
 
+    // SPARSE interiors only. A fixed ring count is exactly right for a lattice - every gap the
+    // same fraction of the wall - and exactly wrong for solid fill, where the count has to follow
+    // the local thickness and Arachne's per-angle beading already does that properly. Taking
+    // solid layers here put 35 rings across a crescent's widest place and crushed 92% of the rest
+    // of that layer under them.
+    // The test is the DENSITY, not `enabled`: a forced-solid layer arrives here enabled, with
+    // stride 1 and no density, because that is how the brick stagger reaches a solid cap.
+    if (!woven.enabled || woven.density <= 0.0) {
+        add_note(degrade_note, "interpolated rings declined: this layer is solid, and a ring count "
+                               "fixed by the widest place is a lattice rule, not a solid-fill one");
+        return {};
+    }
+
     if (region.holes.size() > 1) {
         add_note(degrade_note, "interpolated rings declined: multi-bore section (the ring family "
                                "handles it, the chain assembly does not yet)");
@@ -2676,7 +2689,7 @@ std::vector<ContourChain> interpolated_chains(const ExPolygon &region, const Flo
     // where it meant 3. Placing rings rather than removing them, the bound is simply honoured:
     // ask for one more ring and every gap in the region is under it.
     const double max_gap_mm = CS_MAX_GAP_SLOTS * sp_mm;
-    const double want_mm    = sp_mm / ((woven.enabled && woven.density > 0.0) ? woven.density : 1.0);
+    const double want_mm    = sp_mm / woven.density;
     const double pitch_mm   = std::min(want_mm, max_gap_mm);
 
     // The raster only has to keep neighbouring level sets apart, so it is built once at half a
@@ -2766,16 +2779,25 @@ std::vector<ContourChain> interpolated_chains(const ExPolygon &region, const Flo
         }
 
         // Where the region is narrow the same ring count is crowded into less wall, and below a
-        // printable bead the rings collapse into each other. That is the point at which the
-        // width has to come down and, failing that, the cell has to be subsectioned; until those
-        // rungs exist, the collapse is at least not silent.
-        const double tight_mm = field.extent_percentile(0.02) / double(n + 1);
-        const double floor_mm = std::max(0.30, 0.6 * 0.85 * flow.nozzle_diameter());
-        if (tight_mm < floor_mm)
-            add_note(degrade_note, "continuous shell: interpolated rings collapse where this wall "
-                                   "is narrowest - " + std::to_string(int(tight_mm * 1000)) +
-                                   " um between rings against a " + std::to_string(int(floor_mm * 1000)) +
-                                   " um floor; the width and re-section rungs are not built yet");
+        // printable bead the rings collapse into each other. That is where the width has to come
+        // down and, failing that, the cell has to be subsectioned; until those rungs exist the
+        // collapse is at least not silent.
+        //
+        // What is reported is the FRACTION of the wall affected, not whether the narrowest corner
+        // collapses. Some corner nearly always does - reporting that fired on two thirds of a
+        // plate whose sub-printable extrusion was a fifth of one percent, which is a warning that
+        // tells you nothing about whether to act.
+        const double floor_mm = std::max(0.30, 0.85 * flow.nozzle_diameter());
+        const double share    = field.fraction_narrower_than(floor_mm * double(n + 1));
+        if (share > 0.005) {
+            char msg[240];
+            std::snprintf(msg, sizeof(msg),
+                "continuous shell: interpolated rings collapse over %.1f%% of this wall - it is "
+                "narrower there than %zu rings at the %.2f mm printable floor; the width and "
+                "re-section rungs are not built yet",
+                100.0 * share, n, floor_mm);
+            add_note(degrade_note, msg);
+        }
         cc.woven_infill = true;                  // tag [shell | infill | shell] downstream
         if (woven.weave > 0.0)
             apply_weave(cc, is_lattice, pinned, woven, spacing, layer_index);
