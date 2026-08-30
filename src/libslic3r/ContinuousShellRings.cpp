@@ -1,6 +1,7 @@
 #include "ContinuousShellRings.hpp"
 
 #include "AABBTreeLines.hpp"
+#include "ClipperUtils.hpp"
 #include "EdgeGrid.hpp"
 #include "MarchingSquares.hpp"
 
@@ -723,6 +724,90 @@ bool CsRingField::level_set(double t, std::vector<CsRing> &out, std::string *fai
     if (out.empty()) {
         if (fail) *fail = "continuous shell ring field: a level set came back empty";
         return false;
+    }
+    return true;
+}
+
+// Even arc-length resample of a closed loop, in a consistent rotational direction.
+static std::vector<Vec2d> cs_resample_ccw(const Polygon &poly, size_t N)
+{
+    Polygon p = poly;
+    if (! p.is_counter_clockwise())
+        p.reverse();
+    const size_t m = p.points.size();
+    std::vector<double> cum(m + 1, 0.0);
+    for (size_t i = 0; i < m; ++i)
+        cum[i + 1] = cum[i] + (p.points[(i + 1) % m] - p.points[i]).cast<double>().norm();
+    const double tot = cum[m];
+    std::vector<Vec2d> out(N);
+    if (tot < 1e-9) {
+        std::fill(out.begin(), out.end(), p.points.empty() ? Vec2d(0., 0.)
+                                                           : p.points.front().cast<double>());
+        return out;
+    }
+    size_t k = 0;
+    for (size_t i = 0; i < N; ++i) {
+        const double s = tot * double(i) / double(N);
+        while (k + 1 < m && cum[k + 1] < s) ++k;
+        const double seg = std::max(1e-12, cum[k + 1] - cum[k]);
+        const double f   = std::clamp((s - cum[k]) / seg, 0.0, 1.0);
+        const Vec2d a = p.points[k].cast<double>();
+        const Vec2d b = p.points[(k + 1) % m].cast<double>();
+        out[i] = a + f * (b - a);
+    }
+    return out;
+}
+
+bool CsRingField::morph_family(size_t n, CsRingFamily &out, std::string *fail) const
+{
+    out.rings.clear();
+    if (! m_valid || m_region.holes.size() != 1) {
+        if (fail) *fail = "continuous shell ring field: a morph needs exactly one bore";
+        return false;
+    }
+    if (n == 0)
+        return true;
+
+    const size_t N = std::max<size_t>(256, std::max(m_region.contour.points.size(),
+                                                    m_region.holes.front().points.size()) * 2);
+    const std::vector<Vec2d> A = cs_resample_ccw(m_region.contour, N);
+    const std::vector<Vec2d> B = cs_resample_ccw(m_region.holes.front(), N);
+
+    // Line the two parametrisations up. Equal arc length is the correspondence; where it STARTS
+    // is free, and the offset that minimises the total squared distance is the one that pairs
+    // the curves the way they actually face each other. For two circles this reduces to pairing
+    // equal angles, which is what makes the blend come out circular.
+    size_t best = 0;
+    double bestd = std::numeric_limits<double>::max();
+    const size_t step = std::max<size_t>(1, N / 720);
+    for (size_t d = 0; d < N; d += step) {
+        double acc = 0.0;
+        for (size_t i = 0; i < N; i += std::max<size_t>(1, N / 128))
+            acc += (A[i] - B[(i + d) % N]).squaredNorm();
+        if (acc < bestd) { bestd = acc; best = d; }
+    }
+
+    for (size_t j = 0; j < n; ++j) {
+        const double t = double(j + 1) / double(n + 1);
+        CsRing cr;
+        cr.t = t;
+        cr.poly.points.reserve(N);
+        cr.extent.reserve(N);
+        cr.bore.assign(N, 0);
+        for (size_t i = 0; i < N; ++i) {
+            const Vec2d q = (1.0 - t) * A[i] + t * B[(i + best) % N];
+            cr.poly.points.emplace_back(coord_t(std::llround(q.x())), coord_t(std::llround(q.y())));
+            cr.extent.push_back(float(this->extent_at(q)));
+        }
+        // A morph folds where the two boundaries are dissimilar. Refusing the whole family is
+        // the point: the caller then uses the level sets, which never fold.
+        if (union_ex(Polygons{ cr.poly }).size() != 1) {
+            if (fail)
+                *fail = "continuous shell ring field: the morph folds at t=" + std::to_string(t);
+            out.rings.clear();
+            return false;
+        }
+        out.rings.emplace_back(std::move(cr));
     }
     return true;
 }

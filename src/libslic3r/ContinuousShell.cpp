@@ -3048,10 +3048,29 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
         }
     }
 
+    // MORPH FIRST, level sets as the fallback.
+    //
+    // The level sets are robust but they are not the interpolation: between two circles they
+    // return Cartesian ovals rather than circles, off by up to 0.357 mm on a 7.5 mm wall, and
+    // wherever a ring crosses the outer boundary's medial axis it acquires a genuine corner -
+    // 17.3 degrees measured, against 0.08 elsewhere on the same ring - because d_out has a local
+    // maximum there and a level set through a critical point is singular. A concentric annulus
+    // never shows it only because its medial axis sits inside the bore.
+    //
+    // The morph has no critical points, returns circles where circles are right, and measures
+    // marginally better on ring spacing too (max/min 3.29 against 3.45). What it does not have
+    // is robustness: it needs a correspondence between the two boundaries and can fold where
+    // they are dissimilar. So it is tried, checked ring by ring, and dropped whole if it folds.
     CsRingFamily fam;
-    if (!field.family(n, fam, &why)) {
-        add_note(degrade_note, "interpolated rings declined: " + why);
-        return {};
+    std::string morph_why;
+    const bool morphed = interior.holes.size() == 1 && field.morph_family(n, fam, &morph_why);
+    if (! morphed) {
+        if (interior.holes.size() == 1 && n > 0)
+            add_note(degrade_note, "interpolated rings fell back to level sets: " + morph_why);
+        if (!field.family(n, fam, &why)) {
+            add_note(degrade_note, "interpolated rings declined: " + why);
+            return {};
+        }
     }
 
     // Group by level. Past a saddle - where two bores or two re-section sites separate - one

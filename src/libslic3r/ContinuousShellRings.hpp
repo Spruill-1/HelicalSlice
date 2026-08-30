@@ -128,6 +128,21 @@ public:
     bool level_set(double t, std::vector<CsRing> &out, std::string *fail) const;
     bool family(size_t n, CsRingFamily &out, std::string *fail) const;
 
+    // Rings by MORPH: the point at fraction t is the straight blend of the two boundary points
+    // at equal normalised arc length. Between two circles this returns circles, which the level
+    // sets do not - they return Cartesian ovals, off by up to 0.357 mm on a 7.5 mm wall, and
+    // they put a genuine 17-degree corner in whichever ring crosses the outer boundary's medial
+    // axis, because d_out has a local maximum there and level sets are singular at critical
+    // points. A morph has no critical points and no such corner.
+    //
+    // Needs a correspondence, which is why it is not the general answer: where the two
+    // boundaries are dissimilar the blend can fold. Every ring is checked and the whole family
+    // is refused if any of them does, so the caller falls back to the level sets rather than
+    // printing a folded ring.
+    //
+    // Single-bore regions only - a bore-less one has no second curve to morph to.
+    bool morph_family(size_t n, CsRingFamily &out, std::string *fail) const;
+
     // Exposed for tests and for the callers that need the field itself: the value of u, the
     // local extent W, and the nearest-bore index at an arbitrary point (scaled coords).
     // `u` is 0 outside the region and 1 inside a bore, so the field is continuous across
