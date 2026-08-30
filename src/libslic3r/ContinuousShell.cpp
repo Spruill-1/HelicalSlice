@@ -2160,7 +2160,10 @@ for (size_t j = 0; j < NR; ++j) {
 const char  *_cl = std::getenv("CS_CLOSURE");
 const double closure = _cl ? std::atof(_cl) : closure_in;
 
-const double overshoot   = 8.0;
+// Sweepable: `e = clamp(overshoot * sin(phase), -1, 1)`, so 1.0 is a PURE SINUSOID that never
+// clamps and 8 is very nearly a square wave. The value is the shape of the weave, not its size.
+const char  *_ov = std::getenv("CS_OVERSHOOT");
+const double overshoot   = _ov ? std::max(1.0, std::atof(_ov)) : 8.0;
 const double drift_slots = 2.0;
 size_t n_infill = 0;
 for (const char c : kept_infill) n_infill += (c != 0) ? 1 : 0;

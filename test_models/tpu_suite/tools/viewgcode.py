@@ -1,6 +1,10 @@
 """Render a Z-range of a sliced plate as an inspectable toolpath viewer.
 
-    viewgcode.py <file.gcode.3mf> [--z LO HI | --layers A B] [--object NAME]... [--out FILE]
+    viewgcode.py <file.gcode.3mf>... [--z LO HI | --layers A B] [--object NAME]... [--out FILE]
+
+Pass more than one file to compare them side by side on a shared colour scale and a shared
+view: pan and zoom move both, so a difference in the weave is a difference in the picture
+rather than a difference in two pictures.
 
 The campaign reads bead width through printf tables, which is fine for a total and useless for
 "where". This emits a self-contained HTML page - no network, no libraries - drawing the actual
@@ -253,7 +257,9 @@ function ramp(w){
 }
 function mix(a,b,t){ return `rgb(${Math.round(a[0]+(b[0]-a[0])*t)},${Math.round(a[1]+(b[1]-a[1])*t)},${Math.round(a[2]+(b[2]-a[2])*t)})`; }
 
-const layers = [...new Set(D.runs.map(r=>r.l))].sort((a,b)=>a-b);
+const SETS = D.sets;
+const ALLRUNS = SETS.flatMap(s=>s.runs);
+const layers = [...new Set(ALLRUNS.map(r=>r.l))].sort((a,b)=>a-b);
 const objOn = new Map(D.objects.map(o=>[o,true]));
 let loI = 0, hiI = Math.max(0, layers.length-1);
 let view = {s:1, x:0, y:0}, drag = null;
@@ -277,7 +283,7 @@ for (const o of D.objects){
 // never stops extruding has no travels inside an object at all. Say the count rather than
 // offering a toggle that does nothing.
 {
-  const n = D.travels.length;
+  const n = SETS.reduce((a,s)=>a+s.travels.length,0);
   el('trlbl').textContent = n ? `Travel moves (${n})` : 'Travel moves — none, layer is unbroken';
   if (!n){ el('tr').disabled = true; el('trrow').style.color = 'var(--ink-3)';
            el('trrow').style.cursor = 'default'; }
@@ -296,7 +302,7 @@ function visible(r){
 }
 function bounds(){
   let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;
-  for (const r of D.runs){ if(!objOn.get(r.o)) continue;
+  for (const r of SETS[0].runs){ if(!objOn.get(r.o)) continue;
     for (let i=0;i<r.p.length;i+=2){ x0=Math.min(x0,r.p[i]); x1=Math.max(x1,r.p[i]);
                                      y0=Math.min(y0,r.p[i+1]); y1=Math.max(y1,r.p[i+1]); } }
   if (x0>x1) return {x0:0,y0:0,x1:1,y1:1};
@@ -304,12 +310,17 @@ function bounds(){
 }
 function fit(){
   const b = bounds(), w = cv.width/devicePixelRatio, h = cv.height/devicePixelRatio;
-  const s = 0.9 * Math.min(w/Math.max(b.x1-b.x0,1e-6), h/Math.max(b.y1-b.y0,1e-6));
-  view.s = s;
-  view.x = w/2 - s*(b.x0+b.x1)/2;
+  const n = SETS.length;
+  const s = 0.88 * Math.min(w/Math.max((b.x1-b.x0)*(n*1.12), 1e-6), h/Math.max(b.y1-b.y0,1e-6));
+  view.s = s; bx = (b.x0+b.x1)/2; PW = (b.x1-b.x0)*s*1.12;
+  view.x = w/2 - PW*(n-1)/2;
   view.y = h/2 + s*(b.y0+b.y1)/2;
 }
-const T = (x,y) => [view.x + x*view.s, view.y - y*view.s];
+// Every set is drawn on the SAME transform, offset by one panel width, so the two pictures are
+// directly comparable rather than each fitted to itself. `bx` and `PW` are cached per draw:
+// deriving the panel width from bounds() inside the transform made it O(points x points).
+let bx = 0, PW = 0;
+const T = (x,y,k) => [view.x + (x - bx)*view.s + k*PW, view.y - y*view.s];
 
 function resize(){
   const r = cv.getBoundingClientRect(), d = devicePixelRatio||1;
@@ -318,50 +329,59 @@ function resize(){
 }
 function draw(){
   const w = cv.width/devicePixelRatio, h = cv.height/devicePixelRatio;
+  { const b = bounds(); PW = (b.x1-b.x0)*view.s*1.12; }
   ctx.clearRect(0,0,w,h);
   ctx.fillStyle = getComputedStyle(document.body).backgroundColor;
   ctx.fillRect(0,0,w,h);
   const onlySub = el('only').checked, fade = el('fade').checked;
 
-  if (el('tr').checked){
-    ctx.strokeStyle = 'rgba(107,126,140,.5)'; ctx.lineWidth = 1; ctx.setLineDash([3,3]);
-    ctx.beginPath();
-    for (const t of D.travels){
-      if (!objOn.get(t.o)) continue;
-      const i = layers.indexOf(t.l); if (i<loI||i>hiI) continue;
-      const a = T(t.p[0],t.p[1]), b = T(t.p[2],t.p[3]);
-      ctx.moveTo(a[0],a[1]); ctx.lineTo(b[0],b[1]);
-    }
-    ctx.stroke(); ctx.setLineDash([]);
-  }
-
   ctx.lineCap = 'round'; ctx.lineJoin = 'round';
   let len=0, sub=0, vol=0, wmin=9, wmax=0;
-  for (const r of D.runs){
-    if (!visible(r)) continue;
-    const li = layers.indexOf(r.l);
-    const age = hiI>loI ? (li-loI)/(hiI-loI) : 1;
-    const alpha = fade ? 0.25 + 0.75*age : 1;
-    for (let i=0;i+3<r.p.length;i+=2){
-      const wd = r.w[i/2+1] ?? r.w[r.w.length-1];
-      const a = T(r.p[i],r.p[i+1]), b = T(r.p[i+2],r.p[i+3]);
-      const d = Math.hypot(r.p[i+2]-r.p[i], r.p[i+3]-r.p[i+1]);
-      len += d; vol += d*wd*D.layer_height; if (wd<FLOOR) sub += d;
-      wmin = Math.min(wmin,wd); wmax = Math.max(wmax,wd);
-      if (onlySub && wd >= FLOOR) continue;
-      ctx.globalAlpha = alpha;
-      ctx.strokeStyle = ramp(wd);
-      ctx.lineWidth = Math.max(0.7, wd*view.s);
-      ctx.beginPath(); ctx.moveTo(a[0],a[1]); ctx.lineTo(b[0],b[1]); ctx.stroke();
+  SETS.forEach((S,k)=>{
+    if (el('tr').checked){
+      ctx.strokeStyle = 'rgba(107,126,140,.5)'; ctx.lineWidth = 1; ctx.setLineDash([3,3]);
+      ctx.beginPath();
+      for (const t of S.travels){
+        if (!objOn.get(t.o)) continue;
+        const i = layers.indexOf(t.l); if (i<loI||i>hiI) continue;
+        const a = T(t.p[0],t.p[1],k), b = T(t.p[2],t.p[3],k);
+        ctx.moveTo(a[0],a[1]); ctx.lineTo(b[0],b[1]);
+      }
+      ctx.stroke(); ctx.setLineDash([]);
     }
-  }
+    for (const r of S.runs){
+      if (!visible(r)) continue;
+      const li = layers.indexOf(r.l);
+      const age = hiI>loI ? (li-loI)/(hiI-loI) : 1;
+      const alpha = fade ? 0.25 + 0.75*age : 1;
+      for (let i=0;i+3<r.p.length;i+=2){
+        const wd = r.w[i/2+1] ?? r.w[r.w.length-1];
+        const a = T(r.p[i],r.p[i+1],k), b = T(r.p[i+2],r.p[i+3],k);
+        const d = Math.hypot(r.p[i+2]-r.p[i], r.p[i+3]-r.p[i+1]);
+        if (k===0){ len += d; vol += d*wd*D.layer_height; if (wd<FLOOR) sub += d;
+                    wmin = Math.min(wmin,wd); wmax = Math.max(wmax,wd); }
+        if (onlySub && wd >= FLOOR) continue;
+        ctx.globalAlpha = alpha;
+        ctx.strokeStyle = ramp(wd);
+        ctx.lineWidth = Math.max(0.7, wd*view.s);
+        ctx.beginPath(); ctx.moveTo(a[0],a[1]); ctx.lineTo(b[0],b[1]); ctx.stroke();
+      }
+    }
+    if (SETS.length>1){
+      const b = bounds(), p0 = T(b.x0, b.y0, k);
+      ctx.globalAlpha = 1; ctx.fillStyle = '#9DAFBC';
+      ctx.font = '600 13px "IBM Plex Mono", monospace'; ctx.textAlign = 'left';
+      ctx.fillText(S.label, p0[0], p0[1] + 22);
+    }
+  });
   ctx.globalAlpha = 1;
   const pct = len>0 ? 100*sub/len : 0;
   el('stats').innerHTML =
     stat('layers', (hiI-loI+1)) + stat('path', len.toFixed(0)+' mm') +
     stat('volume', vol.toFixed(0)+' mm³') +
     stat('width', wmax>0 ? wmin.toFixed(3)+'–'+wmax.toFixed(3) : '–') +
-    stat('below floor', pct.toFixed(2)+'%', pct > 1);
+    stat('below floor', pct.toFixed(2)+'%', pct > 1) +
+    (SETS.length>1 ? stat('shown', SETS.length+' sets') : '');
 }
 function stat(k,v,alarm){
   return `<div class="stat${alarm?' alarm':''}"><div class="k">${k}</div><div class="v">${v}</div></div>`;
@@ -381,13 +401,18 @@ cv.addEventListener('pointermove', e=>{
   const r = cv.getBoundingClientRect(), mx = e.clientX-r.left, my = e.clientY-r.top;
   const wx = (mx-view.x)/view.s, wy = (view.y-my)/view.s;
   let best=null, bd=Infinity;
-  for (const run of D.runs){
-    if (!visible(run)) continue;
-    for (let i=0;i+1<run.p.length;i+=2){
-      const d = (run.p[i]-wx)**2 + (run.p[i+1]-wy)**2;
-      if (d<bd){ bd=d; best={run, k:i/2}; }
+  // Screen x = view.x + (X - bx)*s + k*PW, so the world point under the cursor in panel k is
+  // wx - k*PW/s + bx.
+  SETS.forEach((S,k)=>{
+    const cx = wx - k*PW/view.s + bx;
+    for (const run of S.runs){
+      if (!visible(run)) continue;
+      for (let i=0;i+1<run.p.length;i+=2){
+        const d = (run.p[i]-cx)**2 + (run.p[i+1]-wy)**2;
+        if (d<bd){ bd=d; best={run, k:i/2, set:S}; }
+      }
     }
-  }
+  });
   const tol = (12/view.s)**2;
   if (best && bd<tol){
     probe.style.display='block';
@@ -410,27 +435,35 @@ boot();
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("file")
+    ap.add_argument("file", nargs="+")
     ap.add_argument("--z", nargs=2, type=float, metavar=("LO", "HI"))
     ap.add_argument("--layers", nargs=2, type=int, metavar=("A", "B"))
     ap.add_argument("--object", action="append")
     ap.add_argument("--out")
     a = ap.parse_args()
 
-    data = parse(a.file, a.object)
-    data = select(data, a.z[0] if a.z else None, a.z[1] if a.z else None,
-                  a.layers[0] if a.layers else None, a.layers[1] if a.layers else None)
-    if not data["runs"]:
-        sys.exit("no extrusion in that range - widen --z or check --object")
-    data["title"] = os.path.basename(a.file)
+    sets = []
+    base = None
+    for f in a.file:
+        d = parse(f, a.object)
+        d = select(d, a.z[0] if a.z else None, a.z[1] if a.z else None,
+                   a.layers[0] if a.layers else None, a.layers[1] if a.layers else None)
+        if not d["runs"]:
+            sys.exit(f"no extrusion in that range for {f} - widen --z or check --object")
+        base = base or d
+        sets.append({"label": os.path.basename(f).replace(".gcode.3mf", ""),
+                     "runs": d["runs"], "travels": d["travels"]})
+    data = {k: base[k] for k in ("layer_height", "nozzle", "nominal", "floor", "objects")}
+    data["sets"] = sets
+    data["title"] = " vs ".join(s["label"] for s in sets) if len(sets) > 1                     else os.path.basename(a.file[0])
 
-    out = a.out or os.path.splitext(os.path.splitext(a.file)[0])[0] + ".view.html"
+    out = a.out or os.path.splitext(os.path.splitext(a.file[0])[0])[0] + ".view.html"
     html = HTML.replace("__DATA__", json.dumps(data, separators=(",", ":")))
     with open(out, "w", encoding="utf-8") as f:
         f.write(html)
-    ls = sorted({r["l"] for r in data["runs"]})
-    print(f"{out}  ({len(data['runs'])} runs, layers {ls[0]}-{ls[-1]}, "
-          f"{os.path.getsize(out)/1e6:.1f} MB)")
+    ls = sorted({r["l"] for st in sets for r in st["runs"]})
+    print(f"{out}  ({len(sets)} set(s), {sum(len(st['runs']) for st in sets)} runs, "
+          f"layers {ls[0]}-{ls[-1]}, {os.path.getsize(out)/1e6:.1f} MB)")
 
 
 if __name__ == "__main__":
