@@ -1,4 +1,5 @@
 #include "ContinuousShell.hpp"
+#include "ContinuousShellRings.hpp"
 #include <cstdio>
 #include <cstdlib>
 
@@ -28,6 +29,11 @@ struct WovenInfill {
     bool   enabled     = false;
     size_t shell_loops = 1;
     size_t stride      = 1;         // keep every Nth interior loop (1 = solid)
+    // The density as asked for. `stride` is round(1/density) clamped to at least 2, which is all
+    // a decimator over a marched stack can use, but it quantises the knob hard - every density
+    // above 50% lands on stride 2 and prints identically. Ring placement that decimates nothing
+    // can honour the fraction itself.
+    double density     = 0.0;
     double lobes       = 6.0;       // angular lobe count of the weave
     double weave       = 0.0;       // 0 = plain concentric, 1 = full weave (scales amp/zamp)
     double dphase      = 0.9;       // per-layer phase advance (rad)
@@ -55,6 +61,7 @@ WovenInfill woven_infill_params(const PrintRegionConfig *config)
     if (density <= 0.0 || density >= 1.0)
         return w;                  // 0% or >=100% => keep the interior fully solid
     w.enabled     = true;
+    w.density     = density;
     w.stride      = std::max<size_t>(2, size_t(std::llround(1.0 / std::clamp(density, 0.05, 0.99))));
     w.shell_loops = std::max<size_t>(1, size_t(config->wall_loops.value));
     // Weave FREQUENCY knob: it sets the lobe count (spatial frequency) of the weave, NOT its amplitude.
@@ -2612,11 +2619,147 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
 }
 
 
+// Rings interpolated between the wall and the bore, instead of marched inward from the wall.
+//
+// The surface skin is PEELED first and never subsectioned: `peel[k]` is the whole section
+// inset by half a bead plus k spacings, so `peel[k].contour` is one closed uncut loop and
+// `peel[k].holes[h]` likewise. That is the surface-finish invariant - whatever the interior
+// does, the outermost loop of the layer is a single ring - and it is checked, not assumed.
+//
+// The interior between the innermost skin rings is then handed to the level-set generator.
+// Because the boundaries of the field ARE those innermost skin rings, the family's n rings
+// divide the wall into n+1 equal fractions and the first gap off the skin is the same as
+// every other. The sparse density picks n directly: there is no stack to decimate, so no
+// stride, no gap cap, and nothing that can leave a pocket.
+//
+// Returns empty to decline, and says why. Declining falls through to band marching.
+std::vector<ContourChain> interpolated_chains(const ExPolygon &region, const Flow &flow,
+                                              size_t layer_index, const WovenInfill &woven,
+                                              coord_t spacing, coord_t width,
+                                              std::string *degrade_note)
+{
+    const size_t sl = std::max<size_t>(1, woven.shell_loops);
+
+    if (region.holes.size() > 1) {
+        add_note(degrade_note, "interpolated rings declined: multi-bore section (the ring family "
+                               "handles it, the chain assembly does not yet)");
+        return {};
+    }
+    if (woven.solid_mask != nullptr && !woven.solid_mask->empty()) {
+        add_note(degrade_note, "interpolated rings declined: part of this layer must stay solid");
+        return {};
+    }
+
+    // Peel the skin. Every level must stay one piece with the section's own hole count, or the
+    // single-uncut-outer-ring invariant does not hold and this is not the right generator.
+    std::vector<ExPolygon> peel;
+    peel.reserve(sl);
+    for (size_t k = 0; k < sl; ++k) {
+        const double d = 0.5 * double(width) + double(k) * double(spacing);
+        ExPolygons e = offset_ex(ExPolygons{ region }, -float(d));
+        if (e.size() != 1 || e.front().holes.size() != region.holes.size()) {
+            add_note(degrade_note, "interpolated rings declined: the surface skin does not peel as "
+                                   "one piece - the section pinches within the wall loops");
+            return {};
+        }
+        peel.push_back(std::move(e.front()));
+    }
+
+    const ExPolygon &interior = peel.back();
+    const double pitch_mm = double(spacing) * SCALING_FACTOR /
+                            ((woven.enabled && woven.density > 0.0) ? woven.density : 1.0);
+
+    // The raster only has to keep neighbouring level sets apart, so it is built once at half a
+    // bead to learn the extent, and again finer only if the ring count it implies asks for it.
+    CsRingField field;
+    std::string why;
+    double grid_mm = 0.5 * double(spacing) * SCALING_FACTOR;
+    if (!field.build(interior, grid_mm, &why)) {
+        add_note(degrade_note, "interpolated rings declined: " + why);
+        return {};
+    }
+    const size_t n = field.ring_count_for_pitch(pitch_mm);
+    if (n > 0) {
+        const double want = 0.5 * field.extent_percentile(0.05) / double(n + 1);
+        if (want > 0.02 && want < grid_mm) {
+            grid_mm = want;
+            if (!field.build(interior, grid_mm, &why)) {
+                add_note(degrade_note, "interpolated rings declined: " + why);
+                return {};
+            }
+        }
+    }
+
+    CsRingFamily fam;
+    if (!field.family(n, fam, &why)) {
+        add_note(degrade_note, "interpolated rings declined: " + why);
+        return {};
+    }
+    // One level per bore is fine for the generator but not for a linear nested stack, so a
+    // family that split has to wait for the cell assembly.
+    for (size_t i = 1; i < fam.rings.size(); ++i)
+        if (fam.rings[i].t <= fam.rings[i - 1].t + 1e-12) {
+            add_note(degrade_note, "interpolated rings declined: a level set split into several "
+                                   "loops - this section needs cell assembly");
+            return {};
+        }
+
+    ContourChain cc;
+    cc.has_bore = !region.holes.empty();
+    std::vector<char> is_lattice, pinned;
+    auto push = [&](Polygon &&pl, bool lattice) {
+        cc.loops.push_back(std::move(pl));
+        is_lattice.push_back(lattice ? 1 : 0);
+        pinned.push_back(0);
+    };
+    for (size_t k = 0; k < sl; ++k)
+        push(Polygon(peel[k].contour), false);
+    for (CsRing &r : fam.rings)
+        push(std::move(r.poly), true);
+    if (cc.has_bore)
+        for (size_t k = sl; k-- > 0; )
+            push(Polygon(peel[k].holes.front()), false);
+
+    if (cc.loops.size() < 2) {
+        add_note(degrade_note, "interpolated rings declined: nothing left to print after the skin");
+        return {};
+    }
+
+    if (woven.enabled && n > 0) {
+        // The ring count is an integer, so the delivered pitch lands on a rung of a ladder and
+        // only sometimes on the density that was asked for. That is a far smaller and far more
+        // predictable error than the gap cap it replaces - which silently held a 25% wall at
+        // 38% - but it is still a difference between what was asked and what was printed, and
+        // it is said out loud on the same terms.
+        const double got_mm = field.extent_percentile(0.75) / double(n + 1);
+        if (got_mm > 1e-9 && std::abs(got_mm / pitch_mm - 1.0) > 0.10) {
+            char msg[224];
+            std::snprintf(msg, sizeof(msg),
+                "continuous shell: infill density rounded - %zu interpolated rings put the lattice "
+                "at %.2f mm where %.2f mm was asked, so this wall fills at about %.0f%% rather "
+                "than the requested %.0f%%",
+                n, got_mm, pitch_mm, 100.0 * double(spacing) * SCALING_FACTOR / got_mm,
+                100.0 * woven.density);
+            add_note(degrade_note, msg);
+        }
+        cc.woven_infill = true;                  // tag [shell | infill | shell] downstream
+        if (woven.weave > 0.0)
+            apply_weave(cc, is_lattice, pinned, woven, spacing, layer_index);
+    } else if (woven.enabled) {
+        add_note(degrade_note, "continuous shell: wall too thin to sparsify - printed solid");
+    }
+
+    std::vector<ContourChain> out;
+    out.push_back(std::move(cc));
+    return out;
+}
+
 std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &flow, size_t layer_index, const WovenInfill &woven,
                                          const ContinuousShellWidthLimits &limits,
                                          bool adaptive = false, double layer_height = 0.,
                                          bool spiral_wanted = false, double junction_ramp = 1., double seam_theta = 0.,
-                                         std::string *fail_reason = nullptr, std::string *degrade_note = nullptr)
+                                         std::string *fail_reason = nullptr, std::string *degrade_note = nullptr,
+                                         bool interpolated = false)
 {
     const coord_t spacing = flow.scaled_spacing();
     const coord_t width   = flow.scaled_width();
@@ -2652,6 +2795,23 @@ std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &fl
                            "or continuous_shell_interior_spiral to 0).";
         return {};
     }
+    // Interpolated rings REPLACE ring generation, so they run ahead of the adaptive plan as
+    // well as the marcher. Sitting after the plan instead was a silent no-op on exactly the
+    // sections the plan already handles: the plan returns its own chain, so the annulus rows
+    // of the fixture table came back byte-identical to marching and only the sections the plan
+    // declined took the new path at all.
+    if (interpolated) {
+        if (adaptive)
+            add_note(degrade_note, "adaptive beading superseded by interpolated rings: this wall "
+                                   "gets evenly spaced rings at nominal width, not per-angle widths");
+        if (spiral_wanted)
+            add_note(degrade_note, "interior spiral declined: not yet ported to interpolated rings");
+        std::vector<ContourChain> ip = interpolated_chains(region, flow, layer_index, woven,
+                                                           spacing, width, degrade_note);
+        if (!ip.empty())
+            return ip;
+    }
+
     if (adaptive && region.holes.size() != 1) {
         add_note(degrade_note, region.holes.empty()
                                    ? "adaptive beading out of scope: solid (no bore) section"
@@ -3078,6 +3238,9 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     // SPIRAL stays gated on force_solid: it reorganises the buried interior into one migrating
     // arm, which is not what a solid cap is for.
     const bool adaptive = config != nullptr && config->continuous_shell_adaptive_beading.value;
+    // Interpolated rings replace band marching for the whole section, so they run ahead of both
+    // the adaptive plan and the marcher, and decline back to them rather than half-committing.
+    const bool interpolated = config != nullptr && config->continuous_shell_interpolated_rings.value;
     const bool   spiral_wanted = adaptive && !force_solid && config->continuous_shell_interior_spiral.value;
     const double junction_ramp = (config != nullptr)
                                ? std::clamp(config->continuous_shell_junction_ramp.value / 100.0, 0.05, 1.0) : 1.0;
@@ -3094,7 +3257,7 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     std::string plan_fail;
     const std::vector<ContourChain> chains = contour_spiral(merged.front(), flow, layer_index, woven, width_limits,
                                                             adaptive, layer_height, spiral_wanted, junction_ramp, cs_seam_theta,
-                                                            &plan_fail, degrade_note);
+                                                            &plan_fail, degrade_note, interpolated);
     if (chains.empty()) {
         if (reason != nullptr)
             *reason = !plan_fail.empty() ? plan_fail : "Continuous shell mode could not construct a contour spiral.";

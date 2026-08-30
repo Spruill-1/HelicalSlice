@@ -3462,3 +3462,209 @@ TEST_CASE("Continuous shell woven signature table", "[.][ContinuousShellWeaveSig
     std::printf("\n%zu of %zu fixtures built\n\n", built_ok, rows.size());
     REQUIRE(built_ok > 0);
 }
+
+// ---------------------------------------------------------------------------------------
+// The INTERPOLATED-RINGS table: the same fixtures as the woven fence, with
+// continuous_shell_interpolated_rings on, so the two can be read side by side.
+//
+//     libslic3r_tests.exe "[ContinuousShellWeaveSig]"  > marched.txt
+//     libslic3r_tests.exe "[ContinuousShellInterpSig]" > interpolated.txt
+//
+// What to look for is not the signature - the two paths are not meant to agree - but the
+// notes. Every marched row reports the gap cap holding the stride short of the requested
+// density; an interpolated row that still does has not delivered on the point of the change.
+TEST_CASE("Continuous shell interpolated-rings table", "[.][ContinuousShellInterpSig]")
+{
+    const Flow flow(0.5f, 0.25f, 0.5f);
+
+    struct Row { const char *name; Surfaces surf; int density; int weave; int shift; size_t layer; };
+    std::vector<Row> rows{
+        { "annulus r10/bore4   d25 w100     L0", cs_fence_tube(10.0, 4.0),      25, 100, 50, 0 },
+        { "annulus r10/bore4   d25 w100     L3", cs_fence_tube(10.0, 4.0),      25, 100, 50, 3 },
+        { "annulus r10/bore4   d33 w100     L0", cs_fence_tube(10.0, 4.0),      33, 100, 50, 0 },
+        { "annulus r10/bore4   d25 w0       L0", cs_fence_tube(10.0, 4.0),      25,   0, 50, 0 },
+        { "annulus r10/bore4   d25 w200     L0", cs_fence_tube(10.0, 4.0),      25, 200, 50, 0 },
+        { "annulus r10/bore4   d25 w100 s0  L0", cs_fence_tube(10.0, 4.0),      25, 100,  0, 0 },
+        { "eccentric bore@+2   d25 w100     L0", cs_fence_tube(10.0, 4.0, 2.0), 25, 100, 50, 0 },
+        { "eccentric bore@+2   d25 w100     L3", cs_fence_tube(10.0, 4.0, 2.0), 25, 100, 50, 3 },
+        { "eccentric bore@+0.5 d25 w100     L0", cs_fence_tube(10.0, 4.0, 0.5), 25, 100, 50, 0 },
+        { "star tube lobe0.8   d25 w100     L0", cs_fence_tube(10.0, 4.0, 0.0, 0.8), 25, 100, 50, 0 },
+        { "solid disc r10      d25 w100     L0", cs_fence_disc(10.0),           25, 100, 50, 0 },
+        { "solid disc r10      d25 w100     L3", cs_fence_disc(10.0),           25, 100, 50, 3 },
+        { "taper wall 2.4mm    d25 w100     L0", cs_fence_tube(6.4, 4.0),       25, 100, 50, 0 },
+        { "sub-bead wall 0.3mm d25 w100     L0", cs_fence_tube(5.0, 4.7),       25, 100, 50, 0 },
+    };
+
+    std::printf("\n%-40s %8s %6s %8s %10s %7s %13s  %s\n", "fixture", "area_mm2", "paths",
+                "points", "length_mm", "cover", "width lo/hi", "signature");
+    size_t built_ok = 0, declined = 0;
+    for (Row &r : rows) {
+        PrintRegionConfig cfg;
+        cfg.continuous_shell_adaptive_beading.value    = true;
+        cfg.continuous_shell_interpolated_rings.value  = true;
+        cfg.continuous_shell_infill_density.value      = r.density;
+        cfg.continuous_shell_infill_weave.value        = r.weave;
+        cfg.continuous_shell_infill_weave_shift.value  = r.shift;
+        ExtrusionEntityCollection e;
+        std::string reason, note;
+        const bool built = ContinuousShellPathBuilder::build_cross_section(
+            r.surf, flow, 0.25, &cfg, e, &reason, false, r.layer, false, {}, nullptr, &note);
+        double area = 0.0;
+        for (const Surface &sf : r.surf)
+            area += sf.expolygon.area() * SCALING_FACTOR * SCALING_FACTOR;
+        if (! built) {
+            std::printf("%-40s %8.2f %6s %8s %10s %7s  FAILED: %s\n", r.name, area, "-", "-",
+                        "-", "-", reason.c_str());
+            continue;
+        }
+        ++built_ok;
+        if (note.find("interpolated rings declined") != std::string::npos)
+            ++declined;
+        const CsFence s = cs_fence_signature(e);
+        const double cover = s.volume_mm3 / (area * 0.25);
+        std::printf("%-40s %8.2f %6zu %8zu %10.3f %7.3f %6.3f/%.3f  %016llx\n", r.name, area,
+                    s.paths, s.points, s.length_mm, cover, double(s.w_min), double(s.w_max),
+                    static_cast<unsigned long long>(s.hash));
+        if (! note.empty())
+            std::printf("%-40s   -> %s\n", "", note.c_str());
+    }
+    std::printf("\n%zu of %zu fixtures built, %zu of those fell back to marching\n\n",
+                built_ok, rows.size(), declined);
+    REQUIRE(built_ok > 0);
+}
+
+// ---------------------------------------------------------------------------------------
+// Interpolated rings (continuous_shell_interpolated_rings).
+// ---------------------------------------------------------------------------------------
+
+namespace {
+
+// Build one layer and hand back its beads as ordered points with the segment lengths.
+struct CsRun { std::vector<Vec2d> pts; std::vector<double> seg; };
+
+CsRun cs_interp_run(const Surfaces &surf, const Flow &flow, PrintRegionConfig &cfg,
+                    size_t layer_index, std::string *note_out)
+{
+    ExtrusionEntityCollection e;
+    std::string reason, note;
+    const bool built = ContinuousShellPathBuilder::build_cross_section(
+        surf, flow, 0.25, &cfg, e, &reason, false, layer_index, false, {}, nullptr, &note);
+    INFO(reason);
+    REQUIRE(built);
+    if (note_out) *note_out = note;
+    std::vector<ExtrusionPath *> paths;
+    for (ExtrusionEntity *ent : e.entities)
+        ContinuousShellPathBuilder::collect_paths(ent, paths);
+    CsRun r;
+    for (const ExtrusionPath *p : paths)
+        for (const Point3 &q : p->polyline.points)
+            r.pts.emplace_back(double(q.x()) * SCALING_FACTOR, double(q.y()) * SCALING_FACTOR);
+    for (size_t i = 1; i < r.pts.size(); ++i)
+        r.seg.push_back((r.pts[i] - r.pts[i - 1]).norm());
+    return r;
+}
+
+PrintRegionConfig cs_interp_cfg(bool interpolated, int density, int weave = 100)
+{
+    PrintRegionConfig c;
+    c.continuous_shell_adaptive_beading.value   = true;
+    c.continuous_shell_interpolated_rings.value = interpolated;
+    c.continuous_shell_infill_density.value     = density;
+    c.continuous_shell_infill_weave.value       = weave;
+    c.continuous_shell_infill_weave_shift.value = 50;
+    return c;
+}
+
+} // namespace
+
+TEST_CASE("Interpolated rings keep the outer surface one uncut ring", "[ContinuousShell]")
+{
+    // THE surface-finish invariant. Subsectioning happens inside the peeled skin, so however
+    // the interior is divided, the outermost loop of the layer stays a single continuous ring.
+    // A partition that reached the surface would show up here as the outer band being visited
+    // in several separate runs, once per cell, with interior excursions between them.
+    const Flow flow(0.5f, 0.25f, 0.5f);
+    const Surfaces surf = cs_fence_tube(10.0, 4.0);
+    PrintRegionConfig cfg = cs_interp_cfg(true, 25);
+    std::string note;
+    const CsRun run = cs_interp_run(surf, flow, cfg, 0, &note);
+    INFO(note);
+
+    // The outer skin ring sits half a bead inside the contour: r = 10 - 0.25.
+    const double r_skin = 9.75, band = 0.5 * 0.4463;
+    size_t runs = 0, in_band = 0;
+    bool   was_in = false;
+    for (const Vec2d &p : run.pts) {
+        const bool now = std::abs(p.norm() - r_skin) < band;
+        if (now) ++in_band;
+        if (now && ! was_in) ++runs;
+        was_in = now;
+    }
+    INFO("points in the outer band: " << in_band << " in " << runs << " run(s)");
+    REQUIRE(in_band > 50);
+    // One run, or two if the spiral happens to start partway around it. Never one per cell.
+    CHECK(runs <= 2);
+}
+
+TEST_CASE("Interpolated rings deliver the density the gap cap used to override", "[ContinuousShell]")
+{
+    // Marching cannot place its kept rings further apart than CS_MAX_GAP_SLOTS, so on this wall
+    // it holds the stride at 2.7 slots where 4 were asked and fills at 38% instead of 25% -
+    // and says so. Interpolated rings choose the ring count directly, so there is nothing to
+    // cap and nothing to report.
+    const Flow flow(0.5f, 0.25f, 0.5f);
+    const Surfaces surf = cs_fence_tube(10.0, 4.0);
+
+    std::string note_off, note_on;
+    PrintRegionConfig off = cs_interp_cfg(false, 25);
+    PrintRegionConfig on  = cs_interp_cfg(true, 25);
+    const CsRun r_off = cs_interp_run(surf, flow, off, 0, &note_off);
+    const CsRun r_on  = cs_interp_run(surf, flow, on,  0, &note_on);
+
+    INFO("marched:      " << note_off);
+    INFO("interpolated: " << note_on);
+    CHECK(note_off.find("gap cap") != std::string::npos);
+    CHECK(note_on.find("gap cap") == std::string::npos);
+
+    // Less material, because the requested density is actually honoured.
+    const double len_off = std::accumulate(r_off.seg.begin(), r_off.seg.end(), 0.0);
+    const double len_on  = std::accumulate(r_on.seg.begin(),  r_on.seg.end(),  0.0);
+    INFO("path length marched " << len_off << " mm, interpolated " << len_on << " mm");
+    CHECK(len_on < len_off);
+}
+
+TEST_CASE("Interpolated rings answer the density knob monotonically", "[ContinuousShell]")
+{
+    // The knob has to mean something. Under marching the gap cap flattens it: 25% and 33% both
+    // come out at 38% on this wall. Here more density must mean more material, every step.
+    const Flow flow(0.5f, 0.25f, 0.5f);
+    const Surfaces surf = cs_fence_tube(10.0, 4.0);
+    double prev = 0.0;
+    for (const int d : { 15, 25, 50, 75 }) {
+        PrintRegionConfig cfg = cs_interp_cfg(true, d);
+        std::string note;
+        const CsRun r = cs_interp_run(surf, flow, cfg, 0, &note);
+        const double len = std::accumulate(r.seg.begin(), r.seg.end(), 0.0);
+        INFO("density " << d << "% -> " << len << " mm (" << note << ")");
+        CHECK(len > prev);
+        prev = len;
+    }
+}
+
+TEST_CASE("Interpolated rings are byte-identical to marching when off", "[ContinuousShell]")
+{
+    // The option must not perturb anything by existing. The two signature fences cover the
+    // fixture battery; this pins the contrast for one section directly.
+    const Flow flow(0.5f, 0.25f, 0.5f);
+    for (const Surfaces &surf : { cs_fence_tube(10.0, 4.0), cs_fence_tube(10.0, 4.0, 2.0),
+                                  cs_fence_disc(10.0) }) {
+        PrintRegionConfig off = cs_interp_cfg(false, 25);
+        PrintRegionConfig on  = cs_interp_cfg(true, 25);
+        const CsSig a = cs_signature(surf, flow, off);
+        const CsSig b = cs_signature(surf, flow, on);
+        CHECK(a.pts.size() > 0);
+        CHECK(a.pts != b.pts);           // the option is not a no-op when it is ON
+        PrintRegionConfig off2 = cs_interp_cfg(false, 25);
+        CHECK(a.pts == cs_signature(surf, flow, off2).pts);
+    }
+}

@@ -6110,6 +6110,21 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(true));
 
+    def = this->add("continuous_shell_interpolated_rings", coBool);
+    def->label = L("Continuous shell interpolated rings");
+    def->category = L("Strength");
+    def->tooltip = L("Builds the continuous-shell interior by interpolating rings between the inner edge of the "
+                     "outer wall and the bore wall (or the section centroid, where there is no bore), instead of "
+                     "marching fixed-spacing inward offsets. Offsets do not stay parallel, so a marched wall can "
+                     "leave gaps several times the bead spacing beside gaps of one - the pockets, tip voids and "
+                     "solid cores that sparse infill then has to work around. Interpolated rings are evenly "
+                     "spaced by construction, and the sparse density sets the ring count directly rather than "
+                     "decimating a marched stack, so the lattice gap cap no longer overrides the requested "
+                     "density. A section with several bores is subsectioned by nearest bore; the outer surface "
+                     "stays a single uncut ring per layer. Experimental, off by default.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("continuous_shell_interior_spiral", coBool);
     def->label = L("Continuous shell interior spiral");
     def->category = L("Strength");
