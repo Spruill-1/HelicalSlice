@@ -1970,6 +1970,316 @@ coord_t vanish_depth(const ExPolygons &shape, coord_t hi)
     return lo + (hi - lo) / 2;
 }
 
+// THE WEAVE, extracted verbatim from apply_woven_infill's decimation branch so that a ring
+// stack built any other way can use it too. It needs nothing from the sparsifier but the
+// rings and two flags per ring: whether the ring is interior lattice (rather than a surface
+// loop), and whether it is pinned in place. Everything else it derives from the geometry.
+void apply_weave(ContourChain &cc, const std::vector<char> &kept_infill,
+                 const std::vector<char> &kept_pocket, const WovenInfill &woven,
+                 coord_t spacing, size_t layer_index)
+{
+// THE WEAVE, LOCAL TO EACH POINT.
+//
+// Two earlier formulations both failed, and for the same underlying reason - they
+// needed a global frame for something that is purely local.
+//
+// By ANGLE about the section centroid: a ring is only single-valued in angle if
+// the centroid sees all of it, so the whole weave had to be gated on `star_ok`.
+// Sections failing that got NO weave at all - thinned to the sparse stride but
+// never displaced, leaving plain nested tubes with nothing tying them together,
+// which is this subsystem's original failure mode. It sat undetected in the
+// non-star path for the entire campaign because every plate until PlateP was
+// star-shaped; PlateP's crescent was the first section to take it, and the one
+// object on that plate that peeled.
+//
+// By normalised ARC LENGTH along each ring: no centroid needed, but it assumes
+// equal fractions of arc length on adjacent rings lie across from each other.
+// On a wall of varying thickness they do not - the outer ring is much longer than
+// the inner one - so the correspondence check tripped and the ECCENTRIC object
+// stopped being woven too.
+//
+// What a point actually needs is its distance to the neighbouring ring and the
+// direction to it. Both are local: take the NEAREST point on that ring. No
+// parameterisation, no correspondence, no centroid, no star-shape assumption, and
+// nothing to gate on.
+//
+// It has to be the nearest point, though, and not a walk toward one. This used to
+// hill-climb a single index forwards and backwards from the previous sample's
+// answer, on the reasoning that adjacent points have adjacent neighbours. That
+// holds until the section is concave: a ring wraps AROUND a notch, so a point
+// facing it has one candidate across the gap and another round the far side of
+// the notch, and the distance function has two basins. Once the index settles in
+// the wrong one every later sample inherits it - the walk cannot cross the ridge
+// between them, and the step guard cannot either.
+//
+// Measured on the crescent, every ring, over its concave stretch: the walk was
+// wrong on 100% of samples, reporting a median gap of 5.206 mm where the true one
+// is 1.189. The gap feeds the amplitude law directly (cap = weave * share *
+// (gap - 0.8 * spacing)), so it permitted an excursion of 7.458 mm against a true
+// 0.873 - and the crescent's concave rings moved 7.384. The same index also picks
+// the DIRECTION of the excursion, and carries the phase field from ring to ring,
+// so one wrong answer spoiled the amplitude, the direction and the phase at once.
+// That is the crescent's concave side, which four measurements and five
+// hypotheses had failed to account for.
+//
+// Convex geometry is untouched: there the walk already agreed with the true
+// nearest on over 98% of samples, and the remainder differed by under 0.02 mm.
+auto nearest_on = [](const Points &from, const Points &to) {
+    std::vector<size_t> idx(from.size(), 0);
+    if (from.empty() || to.empty()) return idx;
+    auto coord = [&to](size_t i, size_t dim) -> double {
+        return dim == 0 ? double(to[i].x()) : double(to[i].y());
+    };
+    KDTreeIndirect<2, double, decltype(coord)> tree(coord, to.size());
+    for (size_t i = 0; i < from.size(); ++i) {
+        const std::array<double, 2> q{ double(from[i].x()), double(from[i].y()) };
+        const size_t k = find_closest_point(tree, q);
+        idx[i] = (k == decltype(tree)::npos) ? 0 : k;
+    }
+    return idx;
+};
+
+const size_t NR = cc.loops.size();
+// PIN the ring that hugs a shell: it stays concentric and welded to that shell the
+// whole way round, anchoring the lattice, and its neighbour covers the whole of
+// their gap instead of half. Without it the anchor's swing toward the interior
+// carried it off the shell for half the circumference, and the printed part came
+// apart into concentric sections along exactly that surface.
+// PIN ONLY AGAINST A REAL FACE.
+//
+// The pin costs a ring all of its motion, and motion is what stops voids stacking.
+// It is worth that price against a printed SURFACE: a lattice that parts from the
+// wall it is supposed to brace is how a part comes apart into concentric sections,
+// which is what the pin was introduced to stop. It is not obviously worth it
+// against anything else, and `kept_infill == 0` catches three different things:
+// shell rings, which are faces; the medial TERMINUS, which is a buried point; and
+// (below) a pocket face, which is the boundary with another chain's material.
+//
+// A terminus is not a face - the same argument that stopped a pinch end being
+// skinned. Neither is a pocket boundary: what is needed there is that the two
+// chains are connected, not that they touch at every azimuth, and every other
+// interface in this lattice does its job at 40-70%.
+//
+// On the eccentric object that is the difference between three of thirteen rings
+// free to move and six.
+// "Pin only against a printed FACE" was tried - a terminus and a pocket boundary
+// are not surfaces - and it is wrong, which is worth recording because it sounds
+// right. The pin's criterion is not what the neighbour IS, it is whether the
+// neighbour MOVES. A shell, a terminus and a pocket face are all immovable, so a
+// ring that weaves beside any of them opens a void at a FIXED radius, and a void
+// at a fixed radius is the one thing that stacks. Measured on the eccentric:
+//
+//     pin against terminus + pocket   through-void 37%, worst channel 1.79 mm2
+//     terminus not a face             through-void 36%, worst channel 3.32 mm2
+//     neither is a face               through-void 32%, worst channel 3.02 mm2
+//
+// Every average improves and the worst channel nearly doubles, which is the trade
+// that matters the wrong way round: a peel needs one continuous void, not a good
+// average.
+std::vector<char> pinned(NR, 0);
+for (size_t j = 0; j < NR; ++j) {
+    if (!kept_infill[j]) continue;
+    if ((j > 0 && !kept_infill[j - 1]) || (j + 1 < NR && !kept_infill[j + 1]))
+        pinned[j] = 1;
+    // A pocket face is NOT a printed surface, so under the face-only rule it is
+    // not pinned either - see above. Kept, so the boundary has something to weld
+    // to; free, so it is not two more rings that never move.
+    if (j < kept_pocket.size() && kept_pocket[j] != 0)
+        pinned[j] = 1;
+    // Pinning the ring on the OTHER side of that boundary as well - the pinch
+    // chain's own outermost ring, which hugs foreign material exactly as an
+    // anchor hugs a shell - was tried and reverted. It raised the boundary weld
+    // from 69% to 88% and then detached the pocket chain internally: its second
+    // ring is already pinned against its terminus, so pinning the first left two
+    // pinned rings three slots apart with nothing free between them to reach.
+    // The pin needs a free neighbour to do the reaching, and a three-ring chain
+    // has none to spare.
+}
+
+// The saturating drive, SHARPENED from 4 to 8 on 2026-08-29.
+//
+// The complaint that sent me here: a tube's mid-wall reads as "a roughly 1 mm
+// thick void forming a tube of its own, crossed only where the helical seam is".
+// Measured, that is exactly right - the weakest mid-wall interface was BONDED over
+// 22% of its length (centres within 0.8 of a bead width; the welds that do happen
+// are real, it is their number that is short), leaving a cylindrical gap of about
+// 1 mm open over three quarters of the circumference.
+//
+// Two knobs decide how much of an interface bonds, and both were tuned against
+// instruments this campaign has since withdrawn - a weld map whose threshold sat
+// exactly where the data lands, and a ring matcher that kept 45% of its rays.
+// Re-swept against the bonded fraction and the weld map together:
+//
+//   overshoot   weakest interface   azimuths with NO weld   tallest dead run
+//       4               22%                  23.0%              2 layers
+//       6               27%                  18.0%              2
+//       8               29%                  13.2%              2
+//      12               32%                  19.0%              3
+//      20               32%                  20.0%              2
+//
+// 8 is a genuine optimum rather than a dial: past it the interface keeps improving
+// and the dead azimuths get worse again, because the transitions stop covering the
+// gaps between one ring's extremes. A sharper drive spends more of each ring at
+// full excursion, which is where the anti-phase contact happens.
+//
+// The DRIFT stays at 2.0. Zeroing it looks free - the weakest interface goes 22%
+// to 27% at no material cost - and is not: rings j and j+2 come into phase, their
+// welds line up into radial spokes, and the azimuths carrying no weld anywhere
+// across the depth go 23.0% to 36.3% with the tallest dead run 2 layers to 5. That
+// is the columnar failure this subsystem started with. The drift buys per-azimuth
+// coverage with per-interface bond, and it is the right trade.
+const double overshoot   = 8.0;
+const double drift_slots = 2.0;
+size_t n_infill = 0;
+for (const char c : kept_infill) n_infill += (c != 0) ? 1 : 0;
+const double drift = std::min(2.0 * M_PI / double(std::max<size_t>(2, n_infill)),
+                              drift_slots * 2.0 * std::asin(1.0 / overshoot));
+const double layer_phase = double(layer_index) * woven.dphase;
+
+// The rings are read from a snapshot so a ring already displaced this layer does
+// not shift the gaps its neighbour is about to measure.
+const Polygons before = cc.loops;
+
+// PHASE IS A FIELD ACROSS THE WALL, not a per-ring function of its own length.
+//
+// Phasing each ring by its OWN normalised arc length gives every ring the same
+// lobe COUNT. On an annulus that is harmless - all the rings are nearly the same
+// length, so anti-phase holds the whole way round. On a section whose rings differ
+// in length it is not: the inner rings of a crescent are far shorter than its
+// outer ones, so the same count means different wavelengths, and adjacent rings
+// BEAT against each other - in opposition in some places and in phase in others.
+// Two rings only tie where they oppose, so the ties collapse wherever the beat
+// puts them in phase. That is why the crescent still peeled on its concave side
+// after the weave was made to apply there at all: it was applying, but detuned.
+//
+// So the phase is carried ACROSS the wall instead. Ring 0 takes its phase from its
+// own arc length; every ring after it inherits the phase of its NEAREST point on
+// the ring outside it. Adjacent rings are then in exact anti-phase everywhere by
+// construction, whatever their lengths, and the lobes line up along the wall
+// rather than around each ring independently. On a circle the inherited phase is
+// the same angular position, so this reduces exactly to what annuli already do -
+// which is why their validated behaviour is unchanged.
+std::vector<std::vector<double>> basephase(NR);
+for (size_t j = 0; j < NR; ++j) {
+    const Points &pts = before[j].points;
+    basephase[j].assign(pts.size(), 0.0);
+    if (pts.empty()) continue;
+    if (j == 0) {
+        double run = 0.0;
+        std::vector<double> cum(pts.size() + 1, 0.0);
+        for (size_t i = 0; i < pts.size(); ++i)
+            cum[i + 1] = cum[i] + (pts[(i + 1) % pts.size()] - pts[i]).cast<double>().norm();
+        const double tot = cum[pts.size()];
+        for (size_t i = 0; i < pts.size(); ++i)
+            basephase[j][i] = (tot > 1e-9)
+                ? woven.lobes * 2.0 * M_PI * (cum[i] / tot) : 0.0;
+        (void)run;
+    } else {
+        const std::vector<size_t> up = nearest_on(pts, before[j - 1].points);
+        for (size_t i = 0; i < pts.size(); ++i)
+            basephase[j][i] = basephase[j - 1][up[i]];
+    }
+}
+
+// Counting PINNED rings in this index too - so a ring's phase depends on where
+// it sits rather than on how many neighbours happen to be pinned - was tried and
+// is a wash: the crescent's worst channel 1.33 -> 1.21 mm2, the lobed one's
+// 0.44 -> 0.53, everything else unmoved. Not worth changing every object's
+// geometry for.
+size_t infill_ring = 0;
+for (size_t j = 0; j < NR; ++j) {
+    if (!kept_infill[j] || pinned[j]) continue;
+    const double ring_phase = layer_phase + double(infill_ring) * (M_PI + drift);
+    ++infill_ring;
+    const Points &me = before[j].points;
+    if (me.size() < 8) continue;
+    const std::vector<size_t> io = (j > 0)      ? nearest_on(me, before[j - 1].points)
+                                                : std::vector<size_t>();
+    const std::vector<size_t> ii = (j + 1 < NR) ? nearest_on(me, before[j + 1].points)
+                                                : std::vector<size_t>();
+    // A gap wider than a wall crossing CLAMPS the excursion. It does not cancel
+    // it, and the difference between those two is the whole point.
+    //
+    // The nearest point on the next ring is the right thing to weave toward while
+    // the two rings FACE each other. Where the next ring ends, or is much shorter
+    // than this one, the nearest point on it is round its end - along the wall,
+    // not across it - and the law then sizes an excursion from a distance that
+    // crosses no material at all. Worse, another chain's rings can be sitting in
+    // that space: band marching splits a wall into chains, and a chain measures
+    // gaps only within itself, so it reads a void where its neighbour chain's
+    // material is.
+    //
+    // Measured on the eccentric object, whose wall marches into two chains: the
+    // first chain's rings 3 and 4 sit a median 3.716 mm apart with the SECOND
+    // chain's three rings in between them. The law read that as the gap to close,
+    // permitted 5.063 mm of excursion, and flung both rings 2.53 mm into the
+    // pocket the other chain had already filled. That is the solid chunk that
+    // survived the pinch-boundary fix.
+    //
+    // Rejecting such a neighbour was the first fix and it was the wrong
+    // instrument. The weave does two jobs: in plane it welds rings to each other,
+    // and in Z it is the ONLY thing that makes one layer's lattice differ from the
+    // next, so that voids precess instead of stacking into channels. A reject
+    // gives up both - no weld AND no motion - which is the worst of the three
+    // outcomes. Measured across the battery as the fraction of ring length the
+    // weave actually moves:
+    //
+    //   P6_solid 44.0%  P1_sparse 39.1%  P4_lobed 38.6%    all came out well
+    //   P5_crescent 30.5%  P7_taper 24.7%
+    //   P3_ecc 17.5%                                      the one that did not
+    //
+    // The eccentric is the least mobile lattice in the suite and the only one
+    // whose voids stack: 47% of its void area is present on all ten consecutive
+    // layers against the crescent's 23%, and it changes 14.4% per layer against
+    // 26.1%. Its topology already freezes seven rings outright (two faces, a bore,
+    // a pocket's two sides, a terminus), so its few free rings have to move MORE
+    // than another object's, not less - and the reject had zeroed the amplitude
+    // over 47% of the one free ring in its pocket chain.
+    //
+    // Clamping keeps the motion and still bounds the excursion at what a legal gap
+    // would earn. The bound is what the sparsifier guarantees on the other side: it
+    // raises the kept-ring count until no gap exceeds CS_MAX_GAP_SLOTS, plus the
+    // half-slot of margin the reject carried, so every point that weaves today is
+    // byte-identical afterwards and the change only gives motion back where there
+    // was none. Per POINT, not per ring: a ring can face its neighbour over most of
+    // its length and run past its end for the rest.
+    //
+    // This is a PART of the fix, not all of it: it takes the eccentric from 17.5%
+    // to 20.9%, still short of the objects that print well. The rest is that the
+    // gap cap counts SLOTS, and a slot is a fixed distance only where consecutive
+    // offsets are parallel - see the handoff.
+    const double reach = (CS_MAX_GAP_SLOTS + 0.5) * double(spacing);
+    Points moved(me.size());
+    for (size_t i = 0; i < me.size(); ++i) {
+        const Vec2d here = me[i].cast<double>();
+        Vec2d out(0., 0.);
+        double g_out = 0.0, g_in = 0.0;
+        if (!io.empty()) {
+            const Vec2d d = before[j - 1].points[io[i]].cast<double>() - here;
+            const double g = d.norm();
+            if (g > 1e-9) { g_out = std::min(g, reach); out += d / g; }
+        }
+        if (!ii.empty()) {
+            const Vec2d d = here - before[j + 1].points[ii[i]].cast<double>();
+            const double g = d.norm();
+            if (g > 1e-9) { g_in = std::min(g, reach); out += d / g; }
+        }
+        const double len = out.norm();
+        if (len < 1e-9) { moved[i] = me[i]; continue; }
+        out /= len;
+        const double sh_out = (j > 0 && kept_infill[j - 1] && !pinned[j - 1]) ? 0.5 : 1.0;
+        const double sh_in  = (j + 1 < NR && kept_infill[j + 1] && !pinned[j + 1]) ? 0.5 : 1.0;
+        const double cap_out = std::max(0.0, woven.weave * sh_out * (g_out - 0.8 * double(spacing)));
+        const double cap_in  = std::max(0.0, woven.weave * sh_in  * (g_in  - 0.8 * double(spacing)));
+        const double e = std::clamp(
+            overshoot * std::sin(basephase[j][i] + ring_phase), -1.0, 1.0);
+        const Vec2d q = here + out * (e * (e >= 0.0 ? cap_out : cap_in));
+        moved[i] = Point(coord_t(std::llround(q.x())), coord_t(std::llround(q.y())));
+    }
+    cc.loops[j].points = std::move(moved);
+}
+}
+
 // Sparse woven infill applied to ONE chain. Extracted from the marching loop so the
 // PLAN path can call it too: before that, switching on continuous_shell_infill_density
 // silently disabled adaptive beading for the whole object, because the plan branch
@@ -2263,308 +2573,8 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
             if (!cc.ring_widths.empty()) cc.ring_widths = std::move(kept_w);
             cc.woven_infill = true;   // spiralize_rings should tag [shell | infill | shell] accordingly
 
-            if (woven.weave > 0.0) {
-                // THE WEAVE, LOCAL TO EACH POINT.
-                //
-                // Two earlier formulations both failed, and for the same underlying reason - they
-                // needed a global frame for something that is purely local.
-                //
-                // By ANGLE about the section centroid: a ring is only single-valued in angle if
-                // the centroid sees all of it, so the whole weave had to be gated on `star_ok`.
-                // Sections failing that got NO weave at all - thinned to the sparse stride but
-                // never displaced, leaving plain nested tubes with nothing tying them together,
-                // which is this subsystem's original failure mode. It sat undetected in the
-                // non-star path for the entire campaign because every plate until PlateP was
-                // star-shaped; PlateP's crescent was the first section to take it, and the one
-                // object on that plate that peeled.
-                //
-                // By normalised ARC LENGTH along each ring: no centroid needed, but it assumes
-                // equal fractions of arc length on adjacent rings lie across from each other.
-                // On a wall of varying thickness they do not - the outer ring is much longer than
-                // the inner one - so the correspondence check tripped and the ECCENTRIC object
-                // stopped being woven too.
-                //
-                // What a point actually needs is its distance to the neighbouring ring and the
-                // direction to it. Both are local: take the NEAREST point on that ring. No
-                // parameterisation, no correspondence, no centroid, no star-shape assumption, and
-                // nothing to gate on.
-                //
-                // It has to be the nearest point, though, and not a walk toward one. This used to
-                // hill-climb a single index forwards and backwards from the previous sample's
-                // answer, on the reasoning that adjacent points have adjacent neighbours. That
-                // holds until the section is concave: a ring wraps AROUND a notch, so a point
-                // facing it has one candidate across the gap and another round the far side of
-                // the notch, and the distance function has two basins. Once the index settles in
-                // the wrong one every later sample inherits it - the walk cannot cross the ridge
-                // between them, and the step guard cannot either.
-                //
-                // Measured on the crescent, every ring, over its concave stretch: the walk was
-                // wrong on 100% of samples, reporting a median gap of 5.206 mm where the true one
-                // is 1.189. The gap feeds the amplitude law directly (cap = weave * share *
-                // (gap - 0.8 * spacing)), so it permitted an excursion of 7.458 mm against a true
-                // 0.873 - and the crescent's concave rings moved 7.384. The same index also picks
-                // the DIRECTION of the excursion, and carries the phase field from ring to ring,
-                // so one wrong answer spoiled the amplitude, the direction and the phase at once.
-                // That is the crescent's concave side, which four measurements and five
-                // hypotheses had failed to account for.
-                //
-                // Convex geometry is untouched: there the walk already agreed with the true
-                // nearest on over 98% of samples, and the remainder differed by under 0.02 mm.
-                auto nearest_on = [](const Points &from, const Points &to) {
-                    std::vector<size_t> idx(from.size(), 0);
-                    if (from.empty() || to.empty()) return idx;
-                    auto coord = [&to](size_t i, size_t dim) -> double {
-                        return dim == 0 ? double(to[i].x()) : double(to[i].y());
-                    };
-                    KDTreeIndirect<2, double, decltype(coord)> tree(coord, to.size());
-                    for (size_t i = 0; i < from.size(); ++i) {
-                        const std::array<double, 2> q{ double(from[i].x()), double(from[i].y()) };
-                        const size_t k = find_closest_point(tree, q);
-                        idx[i] = (k == decltype(tree)::npos) ? 0 : k;
-                    }
-                    return idx;
-                };
-
-                const size_t NR = cc.loops.size();
-                // PIN the ring that hugs a shell: it stays concentric and welded to that shell the
-                // whole way round, anchoring the lattice, and its neighbour covers the whole of
-                // their gap instead of half. Without it the anchor's swing toward the interior
-                // carried it off the shell for half the circumference, and the printed part came
-                // apart into concentric sections along exactly that surface.
-                // PIN ONLY AGAINST A REAL FACE.
-                //
-                // The pin costs a ring all of its motion, and motion is what stops voids stacking.
-                // It is worth that price against a printed SURFACE: a lattice that parts from the
-                // wall it is supposed to brace is how a part comes apart into concentric sections,
-                // which is what the pin was introduced to stop. It is not obviously worth it
-                // against anything else, and `kept_infill == 0` catches three different things:
-                // shell rings, which are faces; the medial TERMINUS, which is a buried point; and
-                // (below) a pocket face, which is the boundary with another chain's material.
-                //
-                // A terminus is not a face - the same argument that stopped a pinch end being
-                // skinned. Neither is a pocket boundary: what is needed there is that the two
-                // chains are connected, not that they touch at every azimuth, and every other
-                // interface in this lattice does its job at 40-70%.
-                //
-                // On the eccentric object that is the difference between three of thirteen rings
-                // free to move and six.
-                // "Pin only against a printed FACE" was tried - a terminus and a pocket boundary
-                // are not surfaces - and it is wrong, which is worth recording because it sounds
-                // right. The pin's criterion is not what the neighbour IS, it is whether the
-                // neighbour MOVES. A shell, a terminus and a pocket face are all immovable, so a
-                // ring that weaves beside any of them opens a void at a FIXED radius, and a void
-                // at a fixed radius is the one thing that stacks. Measured on the eccentric:
-                //
-                //     pin against terminus + pocket   through-void 37%, worst channel 1.79 mm2
-                //     terminus not a face             through-void 36%, worst channel 3.32 mm2
-                //     neither is a face               through-void 32%, worst channel 3.02 mm2
-                //
-                // Every average improves and the worst channel nearly doubles, which is the trade
-                // that matters the wrong way round: a peel needs one continuous void, not a good
-                // average.
-                std::vector<char> pinned(NR, 0);
-                for (size_t j = 0; j < NR; ++j) {
-                    if (!kept_infill[j]) continue;
-                    if ((j > 0 && !kept_infill[j - 1]) || (j + 1 < NR && !kept_infill[j + 1]))
-                        pinned[j] = 1;
-                    // A pocket face is NOT a printed surface, so under the face-only rule it is
-                    // not pinned either - see above. Kept, so the boundary has something to weld
-                    // to; free, so it is not two more rings that never move.
-                    if (j < kept_pocket.size() && kept_pocket[j] != 0)
-                        pinned[j] = 1;
-                    // Pinning the ring on the OTHER side of that boundary as well - the pinch
-                    // chain's own outermost ring, which hugs foreign material exactly as an
-                    // anchor hugs a shell - was tried and reverted. It raised the boundary weld
-                    // from 69% to 88% and then detached the pocket chain internally: its second
-                    // ring is already pinned against its terminus, so pinning the first left two
-                    // pinned rings three slots apart with nothing free between them to reach.
-                    // The pin needs a free neighbour to do the reaching, and a three-ring chain
-                    // has none to spare.
-                }
-
-                // The saturating drive, SHARPENED from 4 to 8 on 2026-08-29.
-                //
-                // The complaint that sent me here: a tube's mid-wall reads as "a roughly 1 mm
-                // thick void forming a tube of its own, crossed only where the helical seam is".
-                // Measured, that is exactly right - the weakest mid-wall interface was BONDED over
-                // 22% of its length (centres within 0.8 of a bead width; the welds that do happen
-                // are real, it is their number that is short), leaving a cylindrical gap of about
-                // 1 mm open over three quarters of the circumference.
-                //
-                // Two knobs decide how much of an interface bonds, and both were tuned against
-                // instruments this campaign has since withdrawn - a weld map whose threshold sat
-                // exactly where the data lands, and a ring matcher that kept 45% of its rays.
-                // Re-swept against the bonded fraction and the weld map together:
-                //
-                //   overshoot   weakest interface   azimuths with NO weld   tallest dead run
-                //       4               22%                  23.0%              2 layers
-                //       6               27%                  18.0%              2
-                //       8               29%                  13.2%              2
-                //      12               32%                  19.0%              3
-                //      20               32%                  20.0%              2
-                //
-                // 8 is a genuine optimum rather than a dial: past it the interface keeps improving
-                // and the dead azimuths get worse again, because the transitions stop covering the
-                // gaps between one ring's extremes. A sharper drive spends more of each ring at
-                // full excursion, which is where the anti-phase contact happens.
-                //
-                // The DRIFT stays at 2.0. Zeroing it looks free - the weakest interface goes 22%
-                // to 27% at no material cost - and is not: rings j and j+2 come into phase, their
-                // welds line up into radial spokes, and the azimuths carrying no weld anywhere
-                // across the depth go 23.0% to 36.3% with the tallest dead run 2 layers to 5. That
-                // is the columnar failure this subsystem started with. The drift buys per-azimuth
-                // coverage with per-interface bond, and it is the right trade.
-                const double overshoot   = 8.0;
-                const double drift_slots = 2.0;
-                size_t n_infill = 0;
-                for (const char c : kept_infill) n_infill += (c != 0) ? 1 : 0;
-                const double drift = std::min(2.0 * M_PI / double(std::max<size_t>(2, n_infill)),
-                                              drift_slots * 2.0 * std::asin(1.0 / overshoot));
-                const double layer_phase = double(layer_index) * woven.dphase;
-
-                // The rings are read from a snapshot so a ring already displaced this layer does
-                // not shift the gaps its neighbour is about to measure.
-                const Polygons before = cc.loops;
-
-                // PHASE IS A FIELD ACROSS THE WALL, not a per-ring function of its own length.
-                //
-                // Phasing each ring by its OWN normalised arc length gives every ring the same
-                // lobe COUNT. On an annulus that is harmless - all the rings are nearly the same
-                // length, so anti-phase holds the whole way round. On a section whose rings differ
-                // in length it is not: the inner rings of a crescent are far shorter than its
-                // outer ones, so the same count means different wavelengths, and adjacent rings
-                // BEAT against each other - in opposition in some places and in phase in others.
-                // Two rings only tie where they oppose, so the ties collapse wherever the beat
-                // puts them in phase. That is why the crescent still peeled on its concave side
-                // after the weave was made to apply there at all: it was applying, but detuned.
-                //
-                // So the phase is carried ACROSS the wall instead. Ring 0 takes its phase from its
-                // own arc length; every ring after it inherits the phase of its NEAREST point on
-                // the ring outside it. Adjacent rings are then in exact anti-phase everywhere by
-                // construction, whatever their lengths, and the lobes line up along the wall
-                // rather than around each ring independently. On a circle the inherited phase is
-                // the same angular position, so this reduces exactly to what annuli already do -
-                // which is why their validated behaviour is unchanged.
-                std::vector<std::vector<double>> basephase(NR);
-                for (size_t j = 0; j < NR; ++j) {
-                    const Points &pts = before[j].points;
-                    basephase[j].assign(pts.size(), 0.0);
-                    if (pts.empty()) continue;
-                    if (j == 0) {
-                        double run = 0.0;
-                        std::vector<double> cum(pts.size() + 1, 0.0);
-                        for (size_t i = 0; i < pts.size(); ++i)
-                            cum[i + 1] = cum[i] + (pts[(i + 1) % pts.size()] - pts[i]).cast<double>().norm();
-                        const double tot = cum[pts.size()];
-                        for (size_t i = 0; i < pts.size(); ++i)
-                            basephase[j][i] = (tot > 1e-9)
-                                ? woven.lobes * 2.0 * M_PI * (cum[i] / tot) : 0.0;
-                        (void)run;
-                    } else {
-                        const std::vector<size_t> up = nearest_on(pts, before[j - 1].points);
-                        for (size_t i = 0; i < pts.size(); ++i)
-                            basephase[j][i] = basephase[j - 1][up[i]];
-                    }
-                }
-
-                // Counting PINNED rings in this index too - so a ring's phase depends on where
-                // it sits rather than on how many neighbours happen to be pinned - was tried and
-                // is a wash: the crescent's worst channel 1.33 -> 1.21 mm2, the lobed one's
-                // 0.44 -> 0.53, everything else unmoved. Not worth changing every object's
-                // geometry for.
-                size_t infill_ring = 0;
-                for (size_t j = 0; j < NR; ++j) {
-                    if (!kept_infill[j] || pinned[j]) continue;
-                    const double ring_phase = layer_phase + double(infill_ring) * (M_PI + drift);
-                    ++infill_ring;
-                    const Points &me = before[j].points;
-                    if (me.size() < 8) continue;
-                    const std::vector<size_t> io = (j > 0)      ? nearest_on(me, before[j - 1].points)
-                                                                : std::vector<size_t>();
-                    const std::vector<size_t> ii = (j + 1 < NR) ? nearest_on(me, before[j + 1].points)
-                                                                : std::vector<size_t>();
-                    // A gap wider than a wall crossing CLAMPS the excursion. It does not cancel
-                    // it, and the difference between those two is the whole point.
-                    //
-                    // The nearest point on the next ring is the right thing to weave toward while
-                    // the two rings FACE each other. Where the next ring ends, or is much shorter
-                    // than this one, the nearest point on it is round its end - along the wall,
-                    // not across it - and the law then sizes an excursion from a distance that
-                    // crosses no material at all. Worse, another chain's rings can be sitting in
-                    // that space: band marching splits a wall into chains, and a chain measures
-                    // gaps only within itself, so it reads a void where its neighbour chain's
-                    // material is.
-                    //
-                    // Measured on the eccentric object, whose wall marches into two chains: the
-                    // first chain's rings 3 and 4 sit a median 3.716 mm apart with the SECOND
-                    // chain's three rings in between them. The law read that as the gap to close,
-                    // permitted 5.063 mm of excursion, and flung both rings 2.53 mm into the
-                    // pocket the other chain had already filled. That is the solid chunk that
-                    // survived the pinch-boundary fix.
-                    //
-                    // Rejecting such a neighbour was the first fix and it was the wrong
-                    // instrument. The weave does two jobs: in plane it welds rings to each other,
-                    // and in Z it is the ONLY thing that makes one layer's lattice differ from the
-                    // next, so that voids precess instead of stacking into channels. A reject
-                    // gives up both - no weld AND no motion - which is the worst of the three
-                    // outcomes. Measured across the battery as the fraction of ring length the
-                    // weave actually moves:
-                    //
-                    //   P6_solid 44.0%  P1_sparse 39.1%  P4_lobed 38.6%    all came out well
-                    //   P5_crescent 30.5%  P7_taper 24.7%
-                    //   P3_ecc 17.5%                                      the one that did not
-                    //
-                    // The eccentric is the least mobile lattice in the suite and the only one
-                    // whose voids stack: 47% of its void area is present on all ten consecutive
-                    // layers against the crescent's 23%, and it changes 14.4% per layer against
-                    // 26.1%. Its topology already freezes seven rings outright (two faces, a bore,
-                    // a pocket's two sides, a terminus), so its few free rings have to move MORE
-                    // than another object's, not less - and the reject had zeroed the amplitude
-                    // over 47% of the one free ring in its pocket chain.
-                    //
-                    // Clamping keeps the motion and still bounds the excursion at what a legal gap
-                    // would earn. The bound is what the sparsifier guarantees on the other side: it
-                    // raises the kept-ring count until no gap exceeds CS_MAX_GAP_SLOTS, plus the
-                    // half-slot of margin the reject carried, so every point that weaves today is
-                    // byte-identical afterwards and the change only gives motion back where there
-                    // was none. Per POINT, not per ring: a ring can face its neighbour over most of
-                    // its length and run past its end for the rest.
-                    //
-                    // This is a PART of the fix, not all of it: it takes the eccentric from 17.5%
-                    // to 20.9%, still short of the objects that print well. The rest is that the
-                    // gap cap counts SLOTS, and a slot is a fixed distance only where consecutive
-                    // offsets are parallel - see the handoff.
-                    const double reach = (CS_MAX_GAP_SLOTS + 0.5) * double(spacing);
-                    Points moved(me.size());
-                    for (size_t i = 0; i < me.size(); ++i) {
-                        const Vec2d here = me[i].cast<double>();
-                        Vec2d out(0., 0.);
-                        double g_out = 0.0, g_in = 0.0;
-                        if (!io.empty()) {
-                            const Vec2d d = before[j - 1].points[io[i]].cast<double>() - here;
-                            const double g = d.norm();
-                            if (g > 1e-9) { g_out = std::min(g, reach); out += d / g; }
-                        }
-                        if (!ii.empty()) {
-                            const Vec2d d = here - before[j + 1].points[ii[i]].cast<double>();
-                            const double g = d.norm();
-                            if (g > 1e-9) { g_in = std::min(g, reach); out += d / g; }
-                        }
-                        const double len = out.norm();
-                        if (len < 1e-9) { moved[i] = me[i]; continue; }
-                        out /= len;
-                        const double sh_out = (j > 0 && kept_infill[j - 1] && !pinned[j - 1]) ? 0.5 : 1.0;
-                        const double sh_in  = (j + 1 < NR && kept_infill[j + 1] && !pinned[j + 1]) ? 0.5 : 1.0;
-                        const double cap_out = std::max(0.0, woven.weave * sh_out * (g_out - 0.8 * double(spacing)));
-                        const double cap_in  = std::max(0.0, woven.weave * sh_in  * (g_in  - 0.8 * double(spacing)));
-                        const double e = std::clamp(
-                            overshoot * std::sin(basephase[j][i] + ring_phase), -1.0, 1.0);
-                        const Vec2d q = here + out * (e * (e >= 0.0 ? cap_out : cap_in));
-                        moved[i] = Point(coord_t(std::llround(q.x())), coord_t(std::llround(q.y())));
-                    }
-                    cc.loops[j].points = std::move(moved);
-                }
-            }
+            if (woven.weave > 0.0)
+                apply_weave(cc, kept_infill, kept_pocket, woven, spacing, layer_index);
         } else if (woven.solid_stagger > 0.0 && thick && !cc.star_ok && cc.plan == nullptr) {
             // The brick stagger is still parametrized by angle about the centroid, so unlike the
             // weave it is genuinely undefined on a folded section. Declining is right; declining
