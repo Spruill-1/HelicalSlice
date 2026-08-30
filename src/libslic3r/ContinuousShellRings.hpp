@@ -91,7 +91,11 @@ public:
     // count: anywhere thinner is crowded, which is the degradation ladder's business, not a
     // reason to let the widest place open past what a weave can bridge. 0 - no room for a
     // buried ring at all - is a legitimate answer, not a failure.
-    size_t ring_count_for_max_gap(double max_gap_mm) const;
+    // `pct` picks which extent the count answers to: 1.0, the default, is the widest place, so
+    // no gap anywhere exceeds max_gap. Lowering it answers to a typical extent instead - the
+    // thin parts then stop crowding, and the wide parts open past the weld distance in exchange.
+    // That trade is the one-count alternative to subsectioning, and it is a trade, not a fix.
+    size_t ring_count_for_max_gap(double max_gap_mm, double pct = 1.0) const;
 
     // The local extent W(p) in mm, by bilinear lookup of the gridded field - O(1), and good to
     // a few percent, which is far finer than the 0.05 mm buckets a bead width is quantised to.

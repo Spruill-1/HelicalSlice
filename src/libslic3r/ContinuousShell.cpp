@@ -2645,47 +2645,105 @@ void apply_woven_infill(ContourChain &cc, const WovenInfill &woven, coord_t spac
 // stride, no gap cap, and nothing that can leave a pocket.
 //
 // Returns empty to decline, and says why. Declining falls through to band marching.
-std::vector<ContourChain> interpolated_chains(const ExPolygon &region, const Flow &flow,
-                                              size_t layer_index, const WovenInfill &woven,
-                                              coord_t spacing, coord_t width,
-                                              std::string *degrade_note)
+// Voronoi cells of a point set, clipped to a region.
+//
+// Sutherland-Hodgman against each pair's perpendicular bisector, starting from a padded box:
+// O(n^2) per cell, which for the handful of sites a re-section ever wants is nothing, and exact
+// in integer-rounded coordinates. This is the ONE place the geometry is genuinely cut - the
+// nearest-source field never needs it - and a cut is what per-cell ring counts require, since
+// two cells that choose different counts put their level sets at different places and cannot
+// continue through each other.
+Polygon cs_clip_halfplane(const Polygon &poly, const Point &keep, const Point &other)
 {
-    const size_t sl = std::max<size_t>(1, woven.shell_loops);
-
-    // SPARSE interiors only. A fixed ring count is exactly right for a lattice - every gap the
-    // same fraction of the wall - and exactly wrong for solid fill, where the count has to follow
-    // the local thickness and Arachne's per-angle beading already does that properly. Taking
-    // solid layers here put 35 rings across a crescent's widest place and crushed 92% of the rest
-    // of that layer under them.
-    // The test is the DENSITY, not `enabled`: a forced-solid layer arrives here enabled, with
-    // stride 1 and no density, because that is how the brick stagger reaches a solid cap.
-    if (!woven.enabled || woven.density <= 0.0) {
-        add_note(degrade_note, "interpolated rings declined: this layer is solid, and a ring count "
-                               "fixed by the widest place is a lattice rule, not a solid-fill one");
-        return {};
-    }
-
-    if (woven.solid_mask != nullptr && !woven.solid_mask->empty()) {
-        add_note(degrade_note, "interpolated rings declined: part of this layer must stay solid");
-        return {};
-    }
-
-    // Peel the skin. Every level must stay one piece with the section's own hole count, or the
-    // single-uncut-outer-ring invariant does not hold and this is not the right generator.
-    std::vector<ExPolygon> peel;
-    peel.reserve(sl);
-    for (size_t k = 0; k < sl; ++k) {
-        const double d = 0.5 * double(width) + double(k) * double(spacing);
-        ExPolygons e = offset_ex(ExPolygons{ region }, -float(d));
-        if (e.size() != 1 || e.front().holes.size() != region.holes.size()) {
-            add_note(degrade_note, "interpolated rings declined: the surface skin does not peel as "
-                                   "one piece - the section pinches within the wall loops");
-            return {};
+    if (poly.points.size() < 3)
+        return Polygon{};
+    const Vec2d  nrm = (other - keep).cast<double>();
+    const double c   = nrm.dot(0.5 * (keep + other).cast<double>());
+    auto in = [&](const Point &p) { return nrm.dot(p.cast<double>()) <= c; };
+    Polygon out;
+    for (size_t i = 0; i < poly.points.size(); ++i) {
+        const Point &a = poly.points[i];
+        const Point &b = poly.points[(i + 1) % poly.points.size()];
+        const bool ia = in(a), ib = in(b);
+        if (ia)
+            out.points.push_back(a);
+        if (ia != ib) {
+            const double da = nrm.dot(a.cast<double>()) - c;
+            const double db = nrm.dot(b.cast<double>()) - c;
+            const double t  = da / (da - db);
+            const Vec2d  q  = a.cast<double>() + t * (b - a).cast<double>();
+            out.points.emplace_back(coord_t(std::llround(q.x())), coord_t(std::llround(q.y())));
         }
-        peel.push_back(std::move(e.front()));
     }
+    return out;
+}
 
-    const ExPolygon &interior = peel.back();
+ExPolygons cs_voronoi_cells(const ExPolygon &region, const Points &sites)
+{
+    ExPolygons out;
+    if (sites.size() < 2)
+        return out;
+    BoundingBox bb = get_extents(region);
+    bb.offset(coord_t(scale_(5.)));
+    for (size_t i = 0; i < sites.size(); ++i) {
+        Polygon cell{ bb.min, Point(bb.max.x(), bb.min.y()), bb.max, Point(bb.min.x(), bb.max.y()) };
+        for (size_t j = 0; j < sites.size() && cell.points.size() >= 3; ++j)
+            if (j != i)
+                cell = cs_clip_halfplane(cell, sites[i], sites[j]);
+        if (cell.points.size() < 3)
+            continue;
+        for (ExPolygon &e : intersection_ex(ExPolygons{ region }, Polygons{ cell }))
+            if (e.area() > 0)
+                out.push_back(std::move(e));
+    }
+    return out;
+}
+
+// Farthest-point sites inside a region: each new one is placed as far as possible from every
+// site already chosen, which is what spreads them over the region rather than clustering them.
+Points cs_farthest_sites(const ExPolygon &region, size_t k, coord_t step)
+{
+    Points out;
+    if (k == 0)
+        return out;
+    const BoundingBox bb = get_extents(region);
+    Points cand;
+    for (coord_t y = bb.min.y() + step / 2; y < bb.max.y(); y += step)
+        for (coord_t x = bb.min.x() + step / 2; x < bb.max.x(); x += step)
+            if (region.contains(Point(x, y)))
+                cand.push_back(Point(x, y));
+    if (cand.empty())
+        return out;
+    out.push_back(cand[cand.size() / 2]);
+    while (out.size() < k) {
+        double best = -1.;
+        Point  pick = out.front();
+        for (const Point &c : cand) {
+            double d = std::numeric_limits<double>::max();
+            for (const Point &s : out)
+                d = std::min(d, (c - s).cast<double>().squaredNorm());
+            if (d > best) { best = d; pick = c; }
+        }
+        if (best <= 0.)
+            break;
+        out.push_back(pick);
+    }
+    return out;
+}
+
+// The ring family for ONE region, and the chains it becomes. Called on a whole peeled interior,
+// or on a single cell of one when the interior has been subsectioned so each cell can choose its
+// own ring count. `attach_skin` is what distinguishes the two: an interior owns the surface skin
+// and hangs it on its trunk chain, while a cell owns none of it - the skin is emitted once,
+// whole and uncut, and the cells sit inside it.
+std::vector<ContourChain> cs_interior_chains(const ExPolygon &interior,
+                                             const std::vector<ExPolygon> &peel, size_t sl,
+                                             bool attach_skin, const Flow &flow,
+                                             size_t layer_index, const WovenInfill &woven,
+                                             coord_t spacing, std::string *degrade_note,
+                                             double *collapse_out = nullptr)
+{
+    double collapse_share = 0.;
     const double sp_mm = double(spacing) * SCALING_FACTOR;
 
     // How far apart two rings may sit and still weld. This is CS_MAX_GAP_SLOTS, which a peel
@@ -2727,6 +2785,14 @@ std::vector<ContourChain> interpolated_chains(const ExPolygon &region, const Flo
 // cheap when it declines, and because a region whose widest place is a local bulge rather than
 // a taper is exactly the case it should help; but it is not carrying anything today.
 static const size_t CS_MAX_RESECTION_SITES = 2;
+    // The one-count alternative to subsectioning: answer the count to a PERCENTILE of the extent
+    // rather than to its maximum. Default 1.0 - the widest place - which is what holds every gap
+    // under the weld distance. Lower it and the thin parts stop crowding while the wide parts
+    // open past that distance, which is the peel risk this campaign has measured twice. It is a
+    // trade, not a fix, and it is here to be measured against the cells.
+    const char *pct_env = std::getenv("CS_INTERP_PCT");
+    const double count_pct = pct_env ? std::clamp(std::atof(pct_env), 0.05, 1.0) : 1.0;
+
     auto fld = std::make_shared<CsRingField>();
     CsRingField &field = *fld;
     std::string why;
@@ -2739,7 +2805,7 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
             add_note(degrade_note, "interpolated rings declined: " + why);
             return {};
         }
-        n = field.ring_count_for_max_gap(pitch_mm);
+        n = field.ring_count_for_max_gap(pitch_mm, count_pct);
         if (n > 0) {
             // The raster only has to keep neighbouring level sets apart, so it starts at half a
             // bead and is rebuilt finer only if the count it implies asks for it.
@@ -2750,7 +2816,7 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
                     add_note(degrade_note, "interpolated rings declined: " + why);
                     return {};
                 }
-                n = field.ring_count_for_max_gap(pitch_mm);
+                n = field.ring_count_for_max_gap(pitch_mm, count_pct);
             }
         }
         const double share = (n == 0) ? 0.0
@@ -2768,7 +2834,7 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
                 add_note(degrade_note, "interpolated rings declined: " + why);
                 return {};
             }
-            n = field.ring_count_for_max_gap(pitch_mm);
+            n = field.ring_count_for_max_gap(pitch_mm, count_pct);
             break;
         }
         if (sites.size() >= CS_MAX_RESECTION_SITES)
@@ -2821,6 +2887,7 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
         // affected: some corner nearly always collapses, and whether to act depends on how much
         // of the wall goes with it.
         const double share = field.fraction_narrower_than(double(w_floor) * double(n + 1));
+        collapse_share = share;
         if (share > 0.005) {
             char msg[240];
             std::snprintf(msg, sizeof(msg),
@@ -2862,7 +2929,7 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
     std::vector<Build> done, active;
     for (size_t k = 0; k < levels.front().size(); ++k) {
         Build b;
-        if (k == 0)                                   // the skin belongs to the trunk
+        if (attach_skin && k == 0)                    // the skin belongs to the trunk
             for (size_t j = 0; j < sl; ++j) {
                 b.cc.loops.push_back(peel[j].contour);
                 b.lat.push_back(0);
@@ -2911,9 +2978,9 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
     // the stack stays monotone across the wall. Which bore is the one its innermost ring is
     // labelled with - that label IS the cell.
     for (Build &b : done) {
-        if (b.last == nullptr || region.holes.empty())
+        if (!attach_skin || b.last == nullptr || peel.back().holes.empty())
             continue;
-        std::vector<size_t> tally(region.holes.size(), 0);
+        std::vector<size_t> tally(peel.back().holes.size(), 0);
         for (const int lab : b.last->bore)
             if (lab >= 0 && size_t(lab) < tally.size())
                 ++tally[size_t(lab)];
@@ -2955,10 +3022,119 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
         add_note(degrade_note, "interpolated rings declined: nothing left to print after the skin");
         return {};
     }
-    if (n == 0)
+    if (n == 0 && attach_skin)
         add_note(degrade_note, "continuous shell: wall too thin to sparsify - printed solid");
+    if (collapse_out) *collapse_out = collapse_share;
     return out;
 }
+std::vector<ContourChain> interpolated_chains(const ExPolygon &region, const Flow &flow,
+                                              size_t layer_index, const WovenInfill &woven,
+                                              coord_t spacing, coord_t width,
+                                              std::string *degrade_note)
+{
+    const size_t sl = std::max<size_t>(1, woven.shell_loops);
+
+    // SPARSE interiors only. A fixed ring count is exactly right for a lattice - every gap the
+    // same fraction of the wall - and exactly wrong for solid fill, where the count has to follow
+    // the local thickness and Arachne's per-angle beading already does that properly. Taking
+    // solid layers here put 35 rings across a crescent's widest place and crushed 92% of the rest
+    // of that layer under them.
+    // The test is the DENSITY, not `enabled`: a forced-solid layer arrives here enabled, with
+    // stride 1 and no density, because that is how the brick stagger reaches a solid cap.
+    if (!woven.enabled || woven.density <= 0.0) {
+        add_note(degrade_note, "interpolated rings declined: this layer is solid, and a ring count "
+                               "fixed by the widest place is a lattice rule, not a solid-fill one");
+        return {};
+    }
+
+    if (woven.solid_mask != nullptr && !woven.solid_mask->empty()) {
+        add_note(degrade_note, "interpolated rings declined: part of this layer must stay solid");
+        return {};
+    }
+
+    // Peel the skin. Every level must stay one piece with the section's own hole count, or the
+    // single-uncut-outer-ring invariant does not hold and this is not the right generator.
+    std::vector<ExPolygon> peel;
+    peel.reserve(sl);
+    for (size_t k = 0; k < sl; ++k) {
+        const double d = 0.5 * double(width) + double(k) * double(spacing);
+        ExPolygons e = offset_ex(ExPolygons{ region }, -float(d));
+        if (e.size() != 1 || e.front().holes.size() != region.holes.size()) {
+            add_note(degrade_note, "interpolated rings declined: the surface skin does not peel as "
+                                   "one piece - the section pinches within the wall loops");
+            return {};
+        }
+        peel.push_back(std::move(e.front()));
+    }
+
+    const ExPolygon &interior = peel.back();
+
+    // ONE region, one ring count. This is the shipped path, and the count it chooses has to
+    // serve the whole region: the gap is W(p)/(n+1), so a region whose extent varies more than
+    // the weld distance over the bead floor - about 3.5-fold - cannot help crowding somewhere.
+    double share = 0.;
+    std::vector<ContourChain> single =
+        cs_interior_chains(interior, peel, sl, true, flow, layer_index, woven, spacing,
+                           degrade_note, &share);
+
+    // CELLS. Subsectioning fixes the crowding because each cell spans a narrower range of
+    // extents and so can choose a count that fits it - measured on a crescent, the collapsed
+    // area falls 6.7 / 5.5 / 4.3 / 3.3 / 2.4 / 1.7% at one to eight cells. It is not free: two
+    // cells that choose different counts put their level sets in different places, so their
+    // rings weld across the cell boundary instead of continuing through it. That interface is
+    // the parked multibore branch's open question and no plate has yet asked it, which is why
+    // this stays behind an explicit request rather than switching itself on.
+    const char *cells_env = std::getenv("CS_INTERP_CELLS");
+    const int   want_cells = cells_env ? std::atoi(cells_env) : 0;
+    if (want_cells < 2 || single.empty() || share <= 0.005)
+        return single;
+
+    const coord_t step  = std::max<coord_t>(spacing, coord_t(scale_(0.5)));
+    const Points  sites = cs_farthest_sites(interior, size_t(want_cells), step);
+    const ExPolygons cells = cs_voronoi_cells(interior, sites);
+    if (cells.size() < 2)
+        return single;
+
+    // The skin is emitted ONCE, whole and uncut, as its own chain: the outer surface stays a
+    // single ring per layer whatever the interior is divided into.
+    std::vector<ContourChain> out;
+    {
+        ContourChain skin;
+        for (size_t k = 0; k < sl; ++k)
+            skin.loops.push_back(peel[k].contour);
+        for (size_t h = 0; h < peel.back().holes.size(); ++h)
+            for (size_t k = sl; k-- > 0; )
+                skin.loops.push_back(peel[k].holes[h]);
+        skin.has_bore = !peel.back().holes.empty();
+        if (skin.loops.size() >= 2)
+            out.push_back(std::move(skin));
+    }
+
+    double worst = 0.;
+    size_t filled = 0;
+    for (const ExPolygon &cell : cells) {
+        double cshare = 0.;
+        std::vector<ContourChain> cc =
+            cs_interior_chains(cell, peel, sl, false, flow, layer_index, woven, spacing,
+                               nullptr, &cshare);
+        if (cc.empty())
+            continue;
+        ++filled;
+        worst = std::max(worst, cshare);
+        for (ContourChain &c : cc)
+            out.push_back(std::move(c));
+    }
+    if (filled == 0)
+        return single;
+    char msg[224];
+    std::snprintf(msg, sizeof(msg),
+        "continuous shell: interpolated rings subsectioned into %zu cells, each choosing its own "
+        "ring count - collapse %.1f%% -> %.1f%% at the cost of an interface at every cut",
+        filled, 100.0 * share, 100.0 * worst);
+    add_note(degrade_note, msg);
+    return out;
+}
+
 
 std::vector<ContourChain> contour_spiral(const ExPolygon &region, const Flow &flow, size_t layer_index, const WovenInfill &woven,
                                          const ContinuousShellWidthLimits &limits,

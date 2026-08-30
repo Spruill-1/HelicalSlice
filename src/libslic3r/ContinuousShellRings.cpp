@@ -503,14 +503,14 @@ double CsRingField::fraction_narrower_than(double w_mm) const
     return seen ? double(below) / double(seen) : 0.;
 }
 
-size_t CsRingField::ring_count_for_max_gap(double max_gap_mm) const
+size_t CsRingField::ring_count_for_max_gap(double max_gap_mm, double pct) const
 {
     if (! m_valid || max_gap_mm <= 0.)
         return 0;
     // The WIDEST place in the region, not a percentile of it. A percentile leaves the widest
     // quartile free to open past the bound, and the widest place is exactly where a lattice
     // stops welding - the failure this bound exists to prevent.
-    const double W = this->extent_percentile(1.0);
+    const double W = this->extent_percentile(pct);
     const double need = W / max_gap_mm;          // gaps required to stay within the bound
     if (need <= 1.0 + 1e-9)
         return 0;                                // the skin already spans it
