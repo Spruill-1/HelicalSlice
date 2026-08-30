@@ -2659,3 +2659,74 @@ cells sit at fixed 3D positions independent of the section, while a concentric l
 at radii the section's own offsets decide. **A concentric lattice inherits the part's geometry into
 its void structure, tapers and all.** That is the structural reason this keeps coming back, and it
 is not fixable by another rule.
+
+### Correction (2026-08-29): the prismatic-void hunt was the wrong object
+
+The crescent's tip voids are real geometrically and **are not noticeable in the part**. The tube is
+the problematic one, and the description of it is precise: *"a roughly 1 mm thick void in the
+centre of the ring, crossed only where the helical seam is - the void more or less forms a tube of
+its own."*
+
+That is a **cylindrical** void, and it is invisible to every instrument built for the prismatic
+criterion, because the welds precess with the weave: no single (x,y) is void on every layer, so
+ANDing layers erases it. The prismatic measure is still correct and still worth having; it simply
+answers a different question from the one the hand was asking.
+
+### What the tube's wall actually is
+
+Measured at five thresholds, from "centres one bead apart" to "fused":
+
+| interface | touching 0.456 | edges overlap 0.405 | bonded 0.360 |
+|---|---|---|---|
+| 2 -> 3 | 49% | 47% | 46% |
+| **3 -> 4** | **24%** | **23%** | **22%** |
+| 4 -> 5 | 31% | 29% | 26% |
+| 5 -> 6 | 29% | 27% | 25% |
+
+Nearly flat across thresholds, which settles a question worth settling: **the welds that happen
+are real bonds**, well inside the bead, not kisses at the tolerance edge. It is their NUMBER that
+is short. With a 1.19 mm gap and 0.45 mm beads, 78% of that interface is an open cylinder about
+0.75 mm across - and at the cap-4 spacing it was 1.14 mm, which is the millimetre in the report.
+
+### Both knobs that decide it were tuned against withdrawn instruments
+
+`overshoot` and `drift` were swept against a weld map whose threshold sat exactly where the data
+lands, and the "zeroing the drift does not fix it" datum came from the `rank_rows` matcher that
+kept 45% of its rays. Re-swept against the bonded fraction and the weld map together:
+
+| overshoot | weakest interface | azimuths with NO weld | tallest dead run |
+|---|---|---|---|
+| **4 (was shipped)** | 22% | 23.0% | 2 layers |
+| 6 | 27% | 18.0% | 2 |
+| **8 (now)** | **29%** | **13.2%** | **2** |
+| 12 | 32% | 19.0% | 3 |
+| 20 | 32% | 20.0% | 2 |
+
+**8 is an optimum, not a dial** - past it the interface keeps improving while the dead azimuths get
+worse, because the transitions stop covering the gaps between one ring's extremes. Across the
+battery: weakest interface 22 -> 29, 22 -> 29, 22 -> 27, 22 -> 30, 9 -> 10, widest untied void
+unchanged or better on every object, +0.6 to +1.5% path.
+
+One regression, localised: the crescent's innermost interface, ring to medial terminus, 17% -> 6%.
+Its two rings differ in length by a factor of two and a squarer wave matches them worse. The other
+four crescent interfaces improve (31->34, 20->27, 11->17, 16->23).
+
+### The drift stays, and why - because it looks free and is not
+
+Zeroing the drift raises the weakest interface 22% -> 27% at **no material cost**, which is exactly
+the kind of result that gets shipped without a second look. It also brings rings j and j+2 into
+phase so their welds line up into **radial spokes**: azimuths carrying no weld anywhere across the
+depth go **23.0% -> 36.3%**, and the tallest dead run 2 layers -> 5. That is the columnar failure
+this subsystem started with.
+
+**The drift buys per-azimuth coverage with per-interface bond**, and that is the right trade. Two
+metrics, opposed, and each one alone would have recommended the wrong thing.
+
+### PlateQ round 7 published
+
+5.36 g, 29 min. P1_sparse and P5_crescent at the gap cap of 3 that held. P1 is the object the round
+is about: same ~0.75 mm void ring, 22% -> 29% of it bridged, dead azimuths 23% -> 13%. It should
+read as a broken necklace rather than a continuous tube. P5 carries the medial-terminus risk.
+
+Falsified by P1's wall still reading as a continuous tube - which would mean bonded FRACTION is not
+what the hand is reading and the target is the gap width itself - or by P5 parting at its medial.
