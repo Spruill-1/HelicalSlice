@@ -3976,11 +3976,6 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
                                        scarf_len, scarf_floor, chain.plan.get(), cs_layer_h_scaled,
                                        chain.width_fn.get(),
                                        chain.ring_slot.empty() ? nullptr : &chain.ring_slot);
-        if (std::getenv("CS_SUBDBG") && !(sub.points.size() >= 2 && sub.points.size() == flags.size()
-            && sub.points.size() == zoff.size() && sub.points.size() == widths.size()))
-            std::fprintf(stderr, "CS_SUBDBG pts=%zu flags=%zu zoff=%zu widths=%zu loops=%zu\n",
-                         sub.points.size(), flags.size(), zoff.size(), widths.size(),
-                         chain.loops.size());
         if (sub.points.size() >= 2 && sub.points.size() == flags.size() && sub.points.size() == zoff.size()
             && sub.points.size() == widths.size())
             // A chain carries the Z-wave only when its interior was actually thinned AND its
