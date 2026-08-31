@@ -152,10 +152,14 @@ public:
     // never stops going round.
     //
     // In morph coordinates this is almost free. A ring is (1-t)A + tB at fixed t; the spiral is
-    // the same expression with t advancing continuously, gaining one slot per half revolution on
+    // the same expression with t advancing continuously, gaining one ring per half revolution on
     // each arm. The weave is then a modulation of t rather than a displacement along a normal:
-    // amplitude is half a slot less the bead allowance, and the phase carries a pi per slot, so
-    // the arm and its neighbour one slot away are anti-phase and their excursions kiss.
+    // amplitude is half a RING GAP less the bead allowance, and the phase carries a pi per ring,
+    // so an arm and its neighbour one ring away are anti-phase and their excursions kiss.
+    //
+    // "Ring gap" and not "slot" on purpose: in the marched path a slot is one bead spacing, a
+    // fixed distance, and this whole file exists because consecutive marched offsets are not
+    // that distance apart. A ring gap is W(phi)/(n+1) and varies around the wall.
     //
     // `weave` scales the amplitude, `lobes` sets its frequency, `closure_mm` is how close two
     // beads' centres may come. Returns one CLOSED polygon: a double-arm spiral joined at its

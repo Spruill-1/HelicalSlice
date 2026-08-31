@@ -830,15 +830,23 @@ bool CsRingField::morph_spiral(size_t n, double lobes, double weave, double clos
     if (! this->morph_pair(A, B, best, fail))
         return false;
     if (n < 3) {
-        if (fail) *fail = "continuous shell ring field: too few slots for a spiral";
+        if (fail) *fail = "continuous shell ring field: too few rings for a spiral";
         return false;
     }
     const size_t N = A.size();
     const double denom = double(n + 1);
 
-    // The point at slot v and azimuth index i, with the weave folded in as a modulation of the
-    // slot itself. Amplitude is half a slot less what a bead needs, so two arms one slot apart
-    // just touch; the pi per slot in the phase is what puts them in anti-phase to do it.
+    // The point at RING INDEX v and azimuth index i, with the weave folded in as a modulation of
+    // the index itself. v runs 0 at the outer boundary to n+1 at the bore, so one unit of v is
+    // one ring gap - W(phi)/(n+1) millimetres, which VARIES around the wall.
+    //
+    // Deliberately not called a slot. In the marched path a slot is one bead spacing, a fixed
+    // distance, and the entire reason for this file is that consecutive marched offsets are not
+    // that distance apart. Reusing the word for a dimensionless index would put both meanings in
+    // one codebase.
+    //
+    // Amplitude is half a ring gap less what a bead needs, so two arms one gap apart just touch;
+    // the pi per unit of v in the phase is what puts them in anti-phase to do it.
     // The return type is spelled out on purpose. With `auto`, Eigen deduces the type of
     // `(1-t)*a + t*b` as an expression TEMPLATE holding references to `a` and `b` - which are
     // locals of this lambda and are destroyed on the way out. The caller then evaluates a
@@ -847,9 +855,9 @@ bool CsRingField::morph_spiral(size_t n, double lobes, double weave, double clos
         const Vec2d a = A[i % N], b = B[(i + best) % N];
         const double W = (a - b).norm() * SCALING_FACTOR;          // mm across the wall here
         const double gap = W / denom;
-        // Half a slot less what a bead needs, and never more than 0.45: at exactly half a slot
-        // two anti-phase arms would meet at a point, and the clamp is what keeps a positive gap
-        // between them everywhere so the spiral cannot close on itself.
+        // Half a ring gap less what a bead needs, and never more than 0.45 of a gap: at exactly
+        // half, two anti-phase arms would meet at a point, and the clamp is what keeps a positive
+        // distance between them everywhere so the spiral cannot close on itself.
         const double amp = (gap > 1e-9)
             ? std::min(0.45, weave * std::max(0.0, 0.5 - closure_mm / gap)) : 0.0;
         const double phi = double(i % N) / double(N);
@@ -858,17 +866,17 @@ bool CsRingField::morph_spiral(size_t n, double lobes, double weave, double clos
         return (1.0 - t) * a + t * b;
     };
 
-    // Arm A takes the odd slots, arm B the even ones, each gaining two slots per revolution, so
-    // together they cover every slot once. Walk A inward, U-turn one slot at the bore, walk B
-    // back out; its far end lands one slot from A's start, which closes the loop.
+    // Arm A takes the odd ring indices, arm B the even ones, each gaining two per revolution, so
+    // together they cover every ring once. Walk A inward, U-turn one ring at the bore, walk B
+    // back out; its far end lands one ring from A's start, which closes the loop.
     // Each arm runs a WHOLE number of revolutions, so both finish at the same azimuth and the
-    // U-turn between them is the one slot that separates them. Letting the arms simply run until
+    // U-turn between them is the one ring that separates them. Letting the arms simply run until
     // they reach the bore leaves them half a revolution apart, and the U-turn becomes a chord
     // straight across the middle - which the self-intersection guard duly caught.
     const size_t rev_a = (n >= 1) ? (n - 1) / 2 : 0;
     const size_t rev_b = (n >= 2) ? (n - 2) / 2 : 0;
     if (rev_a == 0 || rev_b == 0) {
-        if (fail) *fail = "continuous shell ring field: too few slots for two spiral arms";
+        if (fail) *fail = "continuous shell ring field: too few rings for two spiral arms";
         return false;
     }
     std::vector<Vec2d> arm_a, arm_b;
@@ -889,8 +897,8 @@ bool CsRingField::morph_spiral(size_t n, double lobes, double weave, double clos
     // NO self-intersection test here, and that is deliberate. The arms are MEANT to touch -
     // that is what a weld is - and a polygon touching itself comes back from union_ex as several
     // pieces, so the test that guards the ring family rejects every spiral that is working. What
-    // keeps the arms apart is arithmetic instead: they sit one slot apart in anti-phase, so
-    // their separation is 1 - 2*amp slots and amp is clamped below 0.45. The correspondence
+    // keeps the arms apart is arithmetic instead: they sit one ring apart in anti-phase, so
+    // their separation is 1 - 2*amp ring gaps and amp is clamped below 0.45. The correspondence
     // underneath has already been checked by the ring family, which does fold detectably and is
     // computed first.
     return true;
