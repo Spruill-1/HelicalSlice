@@ -102,6 +102,21 @@ def parse(path, want_objects=None):
             "objects": objs, "runs": runs, "travels": travels}
 
 
+def shrink(sets):
+    """Round the payload down to what the page can actually show.
+
+    Coordinates carry six significant figures out of the G-code and the page draws them a few
+    hundred pixels wide, so the last three are bytes nobody sees. 0.01 mm is a fortieth of a
+    bead. A nine-panel, four-variant page came to 16.6 MB and the publish limit is 16."""
+    for st in sets:
+        for r in st["runs"]:
+            r["p"] = [round(v, 2) for v in r["p"]]
+            r["w"] = [round(v, 3) for v in r["w"]]
+        for t in st["travels"]:
+            t["p"] = [round(v, 2) for v in t["p"]]
+    return sets
+
+
 def select(data, zlo, zhi, lo_layer, hi_layer):
     if lo_layer is not None:
         keep = lambda r: lo_layer <= r["l"] <= hi_layer
@@ -224,6 +239,12 @@ canvas{display:block; width:100%; height:100%; cursor:crosshair}
     <div class="scale"><span id="s0"></span><span id="s1"></span></div>
   </div>
 
+  <div class="grp" id="vargrp" hidden>
+    <div class="lbl" id="varlbl">Variant</div>
+    <div class="pair"><span id="varname"></span><b id="varval"></b></div>
+    <input type="range" id="var" min="0" max="0" value="0" step="1">
+  </div>
+
   <div class="grp" id="notegrp" hidden>
     <div class="lbl" id="notelbl">Measured</div>
     <pre class="note" id="note"></pre>
@@ -285,8 +306,22 @@ let cmode = 'width';
 function colFor(wd, t){ return cmode === 'width' ? ramp(wd) : layerCol(t); }
 function mix(a,b,t){ return `rgb(${Math.round(a[0]+(b[0]-a[0])*t)},${Math.round(a[1]+(b[1]-a[1])*t)},${Math.round(a[2]+(b[2]-a[2])*t)})`; }
 
-const SETS = D.sets;
-const ALLRUNS = SETS.flatMap(s=>s.runs);
+// One variant is live at a time; the layer range, the view and the colour mode all survive
+// switching, so stepping the slider is a true before/after on the same geometry.
+const VARIANTS = D.variants || null;
+let vi = 0;
+if (VARIANTS){
+  let best = 0;
+  VARIANTS.forEach((v, i) => {
+    if (Math.abs(v.value - D.variant_default) < Math.abs(VARIANTS[best].value - D.variant_default))
+      best = i;
+  });
+  vi = best;
+}
+let SETS = VARIANTS ? VARIANTS[vi].sets : D.sets;
+// Layers come from EVERY variant, so the layer slider does not change under the variant
+// slider - two controls that move each other are two controls nobody can reason about.
+const ALLRUNS = (VARIANTS ? VARIANTS.flatMap(v=>v.sets) : SETS).flatMap(s=>s.runs);
 const layers = [...new Set(ALLRUNS.map(r=>r.l))].sort((a,b)=>a-b);
 const objOn = new Map(D.objects.map(o=>[o,true]));
 let loI = 0, hiI = Math.max(0, layers.length-1);
@@ -320,6 +355,18 @@ el('ml').addEventListener('click', ()=>setMode('layer'));
 // Joined on the python side: a newline escape has to survive a raw string, a JSON dump and
 // an HTML template, and it did not.
 if (D.notes){ el('notegrp').hidden = false; el('note').textContent = D.notes; }
+if (VARIANTS){
+  el('vargrp').hidden = false;
+  el('varlbl').textContent = D.variant_label || 'Variant';
+  el('varname').textContent = D.variant_label || '';
+  const vs = el('var');
+  vs.max = VARIANTS.length - 1; vs.value = vi;
+  const showVar = ()=>{ el('varval').textContent = VARIANTS[vi].value + '%'; };
+  vs.addEventListener('input', ()=>{
+    vi = +vs.value; SETS = VARIANTS[vi].sets; showVar(); draw();
+  });
+  showVar();
+}
 
 const objBox = el('objs');
 for (const o of D.objects){
@@ -495,7 +542,16 @@ boot();
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("file", nargs="+")
+    ap.add_argument("file", nargs="*")
+    # A VARIANT is the same panels sliced at a different value of one knob. Comparing four
+    # weld settings by putting them side by side costs four panels for one shape; as a slider
+    # it costs none, and the eye compares a shape against ITSELF between settings, which is
+    # the comparison that matters.
+    ap.add_argument("--variant", action="append", nargs="+", metavar=("VALUE", "FILE"),
+                    default=[], help="a knob value followed by one file per panel; repeatable")
+    ap.add_argument("--variant-label", default="", help="what the variant slider is measuring")
+    ap.add_argument("--variant-default", type=float, default=None,
+                    help="which variant value to open on")
     ap.add_argument("--z", nargs=2, type=float, metavar=("LO", "HI"))
     ap.add_argument("--layers", nargs=2, type=int, metavar=("A", "B"))
     ap.add_argument("--object", action="append")
@@ -504,6 +560,46 @@ def main():
                     help="a line of measured context to print in the sidebar; repeatable")
     a = ap.parse_args()
 
+    def load(files):
+        out, first = [], None
+        for f in files:
+            d = parse(f, a.object)
+            d = select(d, a.z[0] if a.z else None, a.z[1] if a.z else None,
+                       a.layers[0] if a.layers else None, a.layers[1] if a.layers else None)
+            if not d["runs"]:
+                sys.exit(f"no extrusion in that range for {f} - widen --z or check --object")
+            first = first or d
+            out.append({"label": os.path.basename(f).replace(".gcode.3mf", "").split("@")[0],
+                        "runs": d["runs"], "travels": d["travels"]})
+        return out, first
+
+    if a.variant:
+        groups, base = [], None
+        for grp in a.variant:
+            val, files = float(grp[0]), grp[1:]
+            sets, first = load(files)
+            base = base or first
+            groups.append({"value": val, "sets": shrink(sets)})
+        n = {len(g["sets"]) for g in groups}
+        if len(n) != 1:
+            sys.exit(f"every --variant needs the same number of files, got {sorted(n)}")
+        data = {k: base[k] for k in ("layer_height", "nozzle", "nominal", "floor", "objects")}
+        data["variants"] = groups
+        data["sets"] = groups[0]["sets"]
+        data["variant_label"] = a.variant_label
+        data["variant_default"] = (a.variant_default if a.variant_default is not None
+                                   else groups[0]["value"])
+        data["notes"] = chr(10).join(a.note)
+        data["title"] = f"{len(groups[0]['sets'])} shapes"
+        out = a.out or "variants.view.html"
+        with open(out, "w", encoding="utf-8") as f:
+            f.write(HTML.replace("__DATA__", json.dumps(data, separators=(",", ":"))))
+        print(f"{out}  ({len(groups)} variants x {len(groups[0]['sets'])} panels, "
+              f"{os.path.getsize(out)/1e6:.1f} MB)")
+        return
+
+    if not a.file:
+        sys.exit("give at least one file, or use --variant")
     sets = []
     base = None
     for f in a.file:
@@ -516,7 +612,7 @@ def main():
         sets.append({"label": os.path.basename(f).replace(".gcode.3mf", ""),
                      "runs": d["runs"], "travels": d["travels"]})
     data = {k: base[k] for k in ("layer_height", "nozzle", "nominal", "floor", "objects")}
-    data["sets"] = sets
+    data["sets"] = shrink(sets)
     data["notes"] = chr(10).join(a.note)
     data["title"] = " vs ".join(s["label"] for s in sets) if len(sets) > 1                     else os.path.basename(a.file[0])
 
