@@ -3728,3 +3728,38 @@ And the morph makes it nearly free. A morph ring is `p = (1-t)A(phi) + t*B(phi)`
 the same expression with t advancing continuously, `t(phi)`, gaining 1/(n+1) per revolution.
 The original Phase B plan needed per-angle bead tables and a wedge-closure argument to get this
 out of marched chains - in morph coordinates it is one line.
+
+### The double-arm spiral is the wrong direction, and the rays say why
+
+It halves the junctions and takes within-ring turning from 20.2 to 6.5 degrees, which is what
+the picture was asking for. It also stops covering the wall.
+
+Casting 180 rays from the bore centre through a layer and counting where the path crosses:
+
+| | crossings per ray, min / med / max | widest radial gap p50 / p95 / max |
+|---|---|---|
+| closed rings | 11 / 11 / 13 | 1.64 / 2.40 / 2.74 mm |
+| double-arm spiral | **7** / 9 / 11 | 2.24 / 3.55 / **3.61 mm** |
+
+The count VARIES with azimuth, by four crossings. Each arm starts and ends at a fixed azimuth,
+so half a revolution away the lattice has pulled a full ring away from BOTH surfaces - and
+because the arms wind, that shortfall is itself a spiral, which is how the worst void cell went
+from 23 to 72 mm2 and the path lost 17%.
+
+The widest radial gap of 3.61 mm is the number that matters. It is not the same measurement as
+the untied-void width that has predicted the peels - that one is taken at an untied azimuth
+across layers - but it is the same kind of quantity, and 2.251 mm held while 3.013 parted. A
+lattice that opens a 3.6 mm radial gap at some azimuths is not a lattice that should be printed
+before that is understood.
+
+The campaign already knew this in general: the shipped `continuous_shell_interior_spiral`
+option carries a strength warning saying a helical thread can unwind and that printed tubes
+delaminate radially far more easily than closed rings do. This measurement is that warning with
+a number on it.
+
+**The junctions are the price of coverage.** A ring at constant radius covers its azimuth
+completely and must hop to the next; a spiral never hops and never quite covers. So the
+direction is not to remove the junctions but to SMOOTH them - migrate between rings over an arc
+instead of a radial jump. `continuous_shell_junction_ramp` is exactly that knob and already
+exists, applying to the plan-driven spiral arm; pointing it at the morph rings' transitions is
+the untried piece.
