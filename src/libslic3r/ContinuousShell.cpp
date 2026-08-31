@@ -2609,8 +2609,19 @@ for (size_t j = 0; j < NR; ++j) {
         // measure is the same as the one it can. Copying it across is not a guess at an absent
         // neighbour; it is the property the ring family guarantees. Where BOTH are absent the
         // ring is alone in its chain and stays put, which is right.
-        if (io.empty() && !ii.empty()) g_out = g_in;
-        if (ii.empty() && !io.empty()) g_in = g_out;
+        // INTERPOLATED CHAINS ONLY, and the test that caught this says why. On the marched
+        // path a chain ends where the wall PINCHES, and what sits beyond that end is another
+        // chain's rings - the printed eccentric read the whole depth of that pocket as a gap
+        // and flung two rings 2.53 mm into material that was already there. Copying the gap
+        // across would hand that bound straight back.
+        //
+        // An interpolated chain does not end at a pinch. It ends where the level-set family
+        // BRANCHES, and what lies beyond that end is the parent ring, one gap away by
+        // construction - which is the thing being copied.
+        if (smooth_phase) {
+            if (io.empty() && !ii.empty()) g_out = g_in;
+            if (ii.empty() && !io.empty()) g_in = g_out;
+        }
         const double len = out.norm();
         if (len < 1e-9) { moved[i] = me[i]; continue; }
         out /= len;

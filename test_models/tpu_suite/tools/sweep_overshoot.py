@@ -101,7 +101,15 @@ def weld_fraction(segs, bead):
     return 100.0 * L[hit].sum() / L.sum()
 
 
-def void_cells(segs):
+def void_cells(segs, n_bores=1):
+    """Widest bore, then the widest LATTICE void, excluding `n_bores` of them.
+
+    n_bores defaults to 1 because every object in the suite had one. The multibore has three,
+    and this detector reported its second and third bores as 5 mm lattice voids - the fourth
+    time in this campaign a bore has been counted as a void, and the first time the count
+    rather than the identification was what went wrong. Pass the number the section actually
+    has.
+    """
     if not segs:
         return 0.0, 0.0
     xs = [s[0] for s in segs] + [s[2] for s in segs]
@@ -131,12 +139,13 @@ def void_cells(segs):
     # the largest inscribed circle. Report it separately rather than letting it masquerade as
     # the lattice's worst cell - a 5 mm bore beside 0.8 mm cells is not a finding.
     widest = np.array([dist[lab == (i + 1)].max() * 2.0 for i in range(n)])
-    bore = int(np.argmax(widest))
-    others = [i for i in range(n) if i != bore]
+    order = list(np.argsort(-widest))
+    bores, others = order[:max(0, n_bores)], order[max(0, n_bores):]
     if not others:
-        return float(widest[bore]), 0.0, 0.0
-    j = max(others, key=lambda i: widest[i])
-    return float(widest[bore]), float(sizes[j]), float(widest[j])
+        return (float(widest[bores[0]]) if bores else 0.0), 0.0, 0.0
+    j = others[0]
+    return ((float(widest[bores[0]]) if bores else 0.0),
+            float(sizes[j]), float(widest[j]))
 
 
 def main():
