@@ -2324,8 +2324,30 @@ if (phase_fn != nullptr && *phase_fn) {
                 L += (P[(i + 1) % P.size()] - P[i]).cast<double>().norm();
             return L;
         };
+        // THE INNERMOST RING IS THE WRONG ANCHOR WHEN IT IS A BORE.
+        //
+        // Setting the wavelength from perim(innermost)/k is right when that ring is small: a
+        // section with no bore closes onto a medial axis, so the innermost ring is tiny, lam
+        // comes out short, and the schedule doubles its way out to a fine texture. A section
+        // WITH a bore has its innermost lattice ring on the bore, which is long, so lam comes
+        // out long and nothing doubles. Measured across the shape set at weave 50%: no bore
+        // gives 12 to 24 lobes at a 2.4-3.3 mm wavelength, a square with a bore gives 3 lobes
+        // at 17 mm, and a crescent with a bore gives ONE lobe at 42 mm - which is not a weave,
+        // it is a single undulation, and it reads on the page as a plain concentric ring.
+        //
+        // CS_WEAVE_LAM sets the target wavelength in mm outright, so the foam keeps one texture
+        // whatever the section is, and the octave schedule still doubles outward from it so the
+        // hills stay welded. 0 keeps the shipped anchoring.
+        static const double lam_mm = [] {
+            const char *s = std::getenv("CS_WEAVE_LAM");
+            return s ? std::atof(s) : 0.0;
+        }();
         double k = std::max(2.0, woven.lobes), off = 0.0;
-        const double lam = perim(lat.back()) / k;      // the innermost ring sets the wavelength
+        double lam = perim(lat.back()) / k;            // the innermost ring sets the wavelength
+        if (lam_mm > 0.0) {
+            lam = lam_mm / SCALING_FACTOR;
+            k = std::max(2.0, std::round(perim(lat.back()) / lam));
+        }
         for (size_t n = lat.size(); n-- > 0; ) {
             const size_t j = lat[n];
             while (lam > 1e-9 && perim(j) / k > 2.0 * lam) {
