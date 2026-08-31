@@ -172,6 +172,14 @@ button{
   background:var(--panel-2); color:var(--ink-2); border:1px solid var(--line);
 }
 button:hover{color:var(--ink); border-color:var(--accent-dim)}
+.seg{display:flex; gap:1px; background:var(--line); border:1px solid var(--line);
+  border-radius:var(--r); overflow:hidden}
+.seg button{flex:1; border:0; border-radius:0; background:var(--panel-2)}
+.seg button[aria-pressed=true]{background:var(--accent-dim); color:var(--ink)}
+.note{font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11px; line-height:1.5;
+  color:var(--ink-2); font-variant-numeric:tabular-nums; white-space:pre; overflow-x:auto;
+  margin:0}
+.note b{color:var(--ink); font-weight:600}
 button:focus-visible, input:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
 
 /* the ramp legend: the floor is a hard mark, because it is a hard threshold */
@@ -207,9 +215,18 @@ canvas{display:block; width:100%; height:100%; cursor:crosshair}
   <h1>Bead Width Inspector<span id="src"></span></h1>
 
   <div class="grp">
-    <div class="lbl">Extrusion width</div>
+    <div class="lbl">Colour by</div>
+    <div class="seg">
+      <button id="mw" aria-pressed="true">width</button>
+      <button id="ml" aria-pressed="false">layer</button>
+    </div>
     <div class="ramp" id="ramp"><div class="mark" id="rampmark"></div></div>
     <div class="scale"><span id="s0"></span><span id="s1"></span></div>
+  </div>
+
+  <div class="grp" id="notegrp" hidden>
+    <div class="lbl" id="notelbl">Measured</div>
+    <pre class="note" id="note"></pre>
   </div>
 
   <div class="grp">
@@ -255,6 +272,17 @@ function ramp(w){
   const t = Math.max(0, Math.min(1, (w - FLOOR) / Math.max(1e-6, HI - FLOOR)));
   return mix([244,185,66], [169,233,251], t);
 }
+// Colouring by LAYER is what makes a between-layer effect visible at all: a rotation from
+// one layer to the next is invisible when every layer is the same colour, and it is the
+// picture the swirl knob has to be judged on. Deliberately not the width family - violet to
+// pale is ordered, and nobody will read it as a bead width.
+function layerCol(t){
+  t = Math.max(0, Math.min(1, t));
+  return t < 0.5 ? mix([108,75,224], [72,199,232], t*2)
+                 : mix([72,199,232], [234,246,251], (t-0.5)*2);
+}
+let cmode = 'width';
+function colFor(wd, t){ return cmode === 'width' ? ramp(wd) : layerCol(t); }
 function mix(a,b,t){ return `rgb(${Math.round(a[0]+(b[0]-a[0])*t)},${Math.round(a[1]+(b[1]-a[1])*t)},${Math.round(a[2]+(b[2]-a[2])*t)})`; }
 
 const SETS = D.sets;
@@ -266,11 +294,32 @@ let view = {s:1, x:0, y:0}, drag = null;
 
 const el = id => document.getElementById(id);
 el('src').textContent = D.title || '';
-el('s0').textContent = LO.toFixed(2)+' mm';
-el('s1').textContent = HI.toFixed(2)+' mm';
-{ const g = []; for(let i=0;i<=24;i++){ const w = LO + (HI-LO)*i/24; g.push(ramp(w)+' '+(i/24*100)+'%'); }
+function legend(){
+  const g = [];
+  for (let i=0;i<=24;i++){
+    const t = i/24;
+    g.push((cmode==='width' ? ramp(LO+(HI-LO)*t) : layerCol(t)) + ' ' + (t*100) + '%');
+  }
   el('ramp').style.background = 'linear-gradient(90deg,'+g.join(',')+')';
-  el('rampmark').style.left = ((FLOOR-LO)/(HI-LO)*100)+'%'; }
+  el('rampmark').style.display = cmode==='width' ? 'block' : 'none';
+  el('rampmark').style.left = ((FLOOR-LO)/(HI-LO)*100)+'%';
+  el('s0').textContent = cmode==='width' ? LO.toFixed(2)+' mm' : 'layer '+layers[loI];
+  el('s1').textContent = cmode==='width' ? HI.toFixed(2)+' mm' : 'layer '+layers[hiI];
+}
+function setMode(m){
+  cmode = m;
+  el('mw').setAttribute('aria-pressed', String(m==='width'));
+  el('ml').setAttribute('aria-pressed', String(m==='layer'));
+  // Fade is an age cue, and in layer mode the colour already is one. Two of them at once just
+  // makes the early layers hard to see.
+  el('fade').disabled = (m==='layer');
+  legend(); draw();
+}
+el('mw').addEventListener('click', ()=>setMode('width'));
+el('ml').addEventListener('click', ()=>setMode('layer'));
+// Joined on the python side: a newline escape has to survive a raw string, a JSON dump and
+// an HTML template, and it did not.
+if (D.notes){ el('notegrp').hidden = false; el('note').textContent = D.notes; }
 
 const objBox = el('objs');
 for (const o of D.objects){
@@ -290,8 +339,8 @@ for (const o of D.objects){
 }
 const loS = el('lo'), hiS = el('hi');
 loS.max = hiS.max = Math.max(0, layers.length-1); hiS.value = hiI;
-loS.addEventListener('input', ()=>{ loI = Math.min(+loS.value, hiI); loS.value = loI; draw(); });
-hiS.addEventListener('input', ()=>{ hiI = Math.max(+hiS.value, loI); hiS.value = hiI; draw(); });
+loS.addEventListener('input', ()=>{ loI = Math.min(+loS.value, hiI); loS.value = loI; legend(); draw(); });
+hiS.addEventListener('input', ()=>{ hiI = Math.max(+hiS.value, loI); hiS.value = hiI; legend(); draw(); });
 for (const id of ['tr','only','fade']) el(id).addEventListener('change', draw);
 el('fit').addEventListener('click', ()=>{ fit(); draw(); });
 
@@ -353,7 +402,7 @@ function draw(){
       if (!visible(r)) continue;
       const li = layers.indexOf(r.l);
       const age = hiI>loI ? (li-loI)/(hiI-loI) : 1;
-      const alpha = fade ? 0.25 + 0.75*age : 1;
+      const alpha = (fade && cmode==='width') ? 0.25 + 0.75*age : 1;
       for (let i=0;i+3<r.p.length;i+=2){
         const wd = r.w[i/2+1] ?? r.w[r.w.length-1];
         const a = T(r.p[i],r.p[i+1],k), b = T(r.p[i+2],r.p[i+3],k);
@@ -362,7 +411,7 @@ function draw(){
                     wmin = Math.min(wmin,wd); wmax = Math.max(wmax,wd); }
         if (onlySub && wd >= FLOOR) continue;
         ctx.globalAlpha = alpha;
-        ctx.strokeStyle = ramp(wd);
+        ctx.strokeStyle = colFor(wd, age);
         ctx.lineWidth = Math.max(0.7, wd*view.s);
         ctx.beginPath(); ctx.moveTo(a[0],a[1]); ctx.lineTo(b[0],b[1]); ctx.stroke();
       }
@@ -423,7 +472,7 @@ cv.addEventListener('pointermove', e=>{
 });
 cv.addEventListener('pointerleave', ()=> probe.style.display='none');
 
-function boot(){ resize(); fit(); draw(); }
+function boot(){ resize(); fit(); legend(); draw(); }
 addEventListener('resize', ()=>{ resize(); draw(); });
 function sync(){ el('lofrom').textContent = layers[loI] ?? '–'; el('loto').textContent = layers[hiI] ?? '–'; }
 const _draw = draw; draw = function(){ sync(); _draw(); };
@@ -440,6 +489,8 @@ def main():
     ap.add_argument("--layers", nargs=2, type=int, metavar=("A", "B"))
     ap.add_argument("--object", action="append")
     ap.add_argument("--out")
+    ap.add_argument("--note", action="append", default=[],
+                    help="a line of measured context to print in the sidebar; repeatable")
     a = ap.parse_args()
 
     sets = []
@@ -455,6 +506,7 @@ def main():
                      "runs": d["runs"], "travels": d["travels"]})
     data = {k: base[k] for k in ("layer_height", "nozzle", "nominal", "floor", "objects")}
     data["sets"] = sets
+    data["notes"] = chr(10).join(a.note)
     data["title"] = " vs ".join(s["label"] for s in sets) if len(sets) > 1                     else os.path.basename(a.file[0])
 
     out = a.out or os.path.splitext(os.path.splitext(a.file[0])[0])[0] + ".view.html"
