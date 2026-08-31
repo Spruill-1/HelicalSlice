@@ -407,27 +407,36 @@ function visible(r){
   const i = layers.indexOf(r.l);
   return i >= loI && i <= hiI;
 }
+// Across every panel AND every variant: the cell has to hold the largest shape, and the
+// layout must not shift when the variant slider moves.
 function bounds(){
   let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;
-  for (const r of SETS[0].runs){ if(!objOn.get(r.o)) continue;
+  const all = (VARIANTS ? VARIANTS.flatMap(v=>v.sets) : SETS).flatMap(s=>s.runs);
+  for (const r of all){ if(!objOn.get(r.o)) continue;
     for (let i=0;i<r.p.length;i+=2){ x0=Math.min(x0,r.p[i]); x1=Math.max(x1,r.p[i]);
                                      y0=Math.min(y0,r.p[i+1]); y1=Math.max(y1,r.p[i+1]); } }
   if (x0>x1) return {x0:0,y0:0,x1:1,y1:1};
   return {x0,y0,x1,y1};
 }
+function grid(n){ const c = Math.ceil(Math.sqrt(n)); return [c, Math.ceil(n / c)]; }
 function fit(){
   const b = bounds(), w = cv.width/devicePixelRatio, h = cv.height/devicePixelRatio;
-  const n = SETS.length;
-  const s = 0.88 * Math.min(w/Math.max((b.x1-b.x0)*(n*1.12), 1e-6), h/Math.max(b.y1-b.y0,1e-6));
-  view.s = s; bx = (b.x0+b.x1)/2; PW = (b.x1-b.x0)*s*1.12;
-  view.x = w/2 - PW*(n-1)/2;
-  view.y = h/2 + s*(b.y0+b.y1)/2;
+  const [cols, rows] = grid(SETS.length);
+  COLS = cols;
+  const s = 0.92 * Math.min(w / Math.max((b.x1-b.x0) * 1.12 * cols, 1e-6),
+                            h / Math.max((b.y1-b.y0) * 1.12 * rows, 1e-6));
+  view.s = s; bx = (b.x0+b.x1)/2;
+  PW = (b.x1-b.x0)*s*1.12; PH = (b.y1-b.y0)*s*1.12;
+  view.x = w/2 - PW*(cols-1)/2;
+  view.y = h/2 + s*(b.y0+b.y1)/2 - PH*(rows-1)/2;
 }
-// Every set is drawn on the SAME transform, offset by one panel width, so the two pictures are
-// directly comparable rather than each fitted to itself. `bx` and `PW` are cached per draw:
-// deriving the panel width from bounds() inside the transform made it O(points x points).
-let bx = 0, PW = 0;
-const T = (x,y,k) => [view.x + (x - bx)*view.s + k*PW, view.y - y*view.s];
+// Every set is drawn on the SAME transform, offset into a grid cell, so the panels are directly
+// comparable rather than each fitted to itself - a row of nine is a strip nobody can see at
+// once. `bx`, `PW` and `PH` are cached per draw: deriving the cell size from bounds() inside
+// the transform made it O(points x points).
+let bx = 0, PW = 0, PH = 0, COLS = 1;
+const T = (x,y,k) => [view.x + (x - bx)*view.s + (k % COLS)*PW,
+                      view.y - y*view.s + Math.floor(k / COLS)*PH];
 
 function resize(){
   const r = cv.getBoundingClientRect(), d = devicePixelRatio||1;
@@ -436,7 +445,9 @@ function resize(){
 }
 function draw(){
   const w = cv.width/devicePixelRatio, h = cv.height/devicePixelRatio;
-  { const b = bounds(); PW = (b.x1-b.x0)*view.s*1.12; }
+  { const b = bounds();
+    PW = (b.x1-b.x0)*view.s*1.12; PH = (b.y1-b.y0)*view.s*1.12;
+    COLS = grid(SETS.length)[0]; }
   ctx.clearRect(0,0,w,h);
   ctx.fillStyle = getComputedStyle(document.body).backgroundColor;
   ctx.fillRect(0,0,w,h);
@@ -508,14 +519,15 @@ cv.addEventListener('pointermove', e=>{
   const r = cv.getBoundingClientRect(), mx = e.clientX-r.left, my = e.clientY-r.top;
   const wx = (mx-view.x)/view.s, wy = (view.y-my)/view.s;
   let best=null, bd=Infinity;
-  // Screen x = view.x + (X - bx)*s + k*PW, so the world point under the cursor in panel k is
-  // wx - k*PW/s + bx.
+  // Screen x = view.x + (X - bx)*s + col*PW and screen y = view.y - Y*s + row*PH, so the world
+  // point under the cursor in panel k inverts both.
   SETS.forEach((S,k)=>{
-    const cx = wx - k*PW/view.s + bx;
+    const cx = wx - (k % COLS)*PW/view.s + bx;
+    const cy = wy + Math.floor(k / COLS)*PH/view.s;
     for (const run of S.runs){
       if (!visible(run)) continue;
       for (let i=0;i+1<run.p.length;i+=2){
-        const d = (run.p[i]-cx)**2 + (run.p[i+1]-wy)**2;
+        const d = (run.p[i]-cx)**2 + (run.p[i+1]-cy)**2;
         if (d<bd){ bd=d; best={run, k:i/2, set:S}; }
       }
     }
@@ -583,7 +595,13 @@ def main():
         n = {len(g["sets"]) for g in groups}
         if len(n) != 1:
             sys.exit(f"every --variant needs the same number of files, got {sorted(n)}")
-        data = {k: base[k] for k in ("layer_height", "nozzle", "nominal", "floor", "objects")}
+        # EVERY file's objects, not the first one's. Each shape is sliced on its own, so each
+        # file names a different object; taking the list from the first file left `objOn`
+        # without an entry for the other eight, `visible()` read undefined, and eight of nine
+        # panels drew nothing at all while the sidebar offered one checkbox.
+        data = {k: base[k] for k in ("layer_height", "nozzle", "nominal", "floor")}
+        data["objects"] = sorted({o for g in groups for st in g["sets"]
+                                    for o in {r["o"] for r in st["runs"]}})
         data["variants"] = groups
         data["sets"] = groups[0]["sets"]
         data["variant_label"] = a.variant_label
@@ -611,7 +629,9 @@ def main():
         base = base or d
         sets.append({"label": os.path.basename(f).replace(".gcode.3mf", ""),
                      "runs": d["runs"], "travels": d["travels"]})
-    data = {k: base[k] for k in ("layer_height", "nozzle", "nominal", "floor", "objects")}
+    data = {k: base[k] for k in ("layer_height", "nozzle", "nominal", "floor")}
+    # Same union as the variant path: files that name different objects each need an entry.
+    data["objects"] = sorted({r["o"] for st in sets for r in st["runs"]})
     data["sets"] = shrink(sets)
     data["notes"] = chr(10).join(a.note)
     data["title"] = " vs ".join(s["label"] for s in sets) if len(sets) > 1                     else os.path.basename(a.file[0])
