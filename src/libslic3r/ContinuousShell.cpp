@@ -1626,6 +1626,11 @@ struct ContourChain {
     // Set instead of `plan` when the widths come from a measured field rather than a bead plan.
     std::shared_ptr<CsWidthFn> width_fn;
     std::shared_ptr<CsPhaseFn> phase_fn;
+    // Which loops the weave treats as lattice, parallel to `loops`. Carried so the ring dump can
+    // report it: whether a boundary loop is IN the lattice is otherwise only visible as whether
+    // it happened to move, and those are not the same question - a ring can be tagged and still
+    // sit still because its cap came out zero.
+    std::vector<char> lat;
     // The plan SLOT each loop came from, parallel to `loops`. Non-empty exactly when `plan`
     // is set. Position in `loops` used to BE the slot index, which is why sparse infill and
     // adaptive beading could not coexist: decimation drops rings, and every surviving ring
@@ -2138,10 +2143,33 @@ const size_t NR = cc.loops.size();
 // Every average improves and the worst channel nearly doubles, which is the trade
 // that matters the wrong way round: a peel needs one continuous void, not a good
 // average.
+//
+// THE SURFACE CLAUSE IS OFF FOR INTERPOLATED RINGS, and the two reasons above for keeping it
+// are both weaker than they were when it was measured.
+//
+// The wall's innermost loop and the bore's outermost loop are already tagged as the outermost
+// and innermost rings of the lattice - the assembly says so - and the level-set field's own
+// boundaries land on them. But this clause pinned them, because each has a surface on its far
+// side, so the first ring that could actually move was a full lattice gap inside the wall:
+// measured, 0.768 mm of nominal air between the wall loop and the first weaving ring, and the
+// same 0.742 mm at the bore. The foam did not reach either surface except where a hill happened
+// to swing that far.
+//
+// What the pin was protecting against is a void at a FIXED radius, which is the kind that
+// stacks up the wall. Two things built since make that argument weaker: the excursion is now
+// symmetric, so a ring beside an immovable neighbour oscillates about its nominal radius
+// instead of only backing away from it, and continuous_shell_swirl turns the whole pattern
+// layer to layer, so a void cannot sit at one azimuth for long enough to stack. Both of those
+// are measurable, so this is measured rather than asserted - CS_PIN_SURFACE=1 restores it.
+static const bool pin_surface = [] {
+    const char *s = std::getenv("CS_PIN_SURFACE");
+    return s != nullptr && std::atoi(s) != 0;
+}();
 std::vector<char> pinned(NR, 0);
 for (size_t j = 0; j < NR; ++j) {
     if (!kept_infill[j]) continue;
-    if ((j > 0 && !kept_infill[j - 1]) || (j + 1 < NR && !kept_infill[j + 1]))
+    if ((pin_surface || !smooth_phase) &&
+        ((j > 0 && !kept_infill[j - 1]) || (j + 1 < NR && !kept_infill[j + 1])))
         pinned[j] = 1;
     // A pocket face is NOT a printed surface, so under the face-only rule it is
     // not pinned either - see above. Kept, so the boundary has something to weld
@@ -2229,6 +2257,21 @@ const double layer_phase = double(layer_index) * woven.dphase;
 // The rings are read from a snapshot so a ring already displaced this layer does
 // not shift the gaps its neighbour is about to measure.
 const Polygons before = cc.loops;
+if (std::getenv("CS_DUMPCAPS")) {
+    if (FILE *f = std::fopen("cs_caps.txt", "a")) {
+        std::fprintf(f, "ENTRY NR %zu kept", cc.loops.size());
+        for (size_t q = 0; q < kept_infill.size(); ++q)
+            std::fprintf(f, " %d", int(kept_infill[q]));
+        std::fprintf(f, " pinned");
+        for (size_t q = 0; q < pinned.size(); ++q)
+            std::fprintf(f, " %d", int(pinned[q]));
+        std::fprintf(f, " pts");
+        for (const Polygon &pg : cc.loops)
+            std::fprintf(f, " %zu", pg.points.size());
+        std::fprintf(f, "%c", 10);
+        std::fclose(f);
+    }
+}
 
 // PHASE IS A FIELD ACROSS THE WALL, not a per-ring function of its own length.
 //
@@ -2514,6 +2557,7 @@ for (size_t j = 0; j < NR; ++j) {
     // pairs, which is the ring-to-ring junctions and not noise. What the weave adds - p99 5 to
     // 15 degrees - is simply the curvature a lobe of this wavelength and amplitude requires.
     Points moved(me.size());
+    std::vector<double> caps_out(me.size(), 0.0), caps_in(me.size(), 0.0);
     for (size_t i = 0; i < me.size(); ++i) {
         const Vec2d here = me[i].cast<double>();
         Vec2d out(0., 0.);
@@ -2563,11 +2607,29 @@ for (size_t j = 0; j < NR; ++j) {
         // under them turn, so the rings are now as smooth as the curves they are built from.
         // It costs nothing that is measured: weld 19.9% to 19.8%, and the widest lattice void
         // 2.04 to 1.62 mm.
+        caps_out[i] = cap_out; caps_in[i] = cap_in;
         const double push = blend == 2 ? e * std::min(cap_out, cap_in)
                           : blend      ? std::clamp(e * (mid + half * e), -cap_in, cap_out)
                                        : e * (e >= 0.0 ? cap_out : cap_in);
         const Vec2d q = here + out * push;
         moved[i] = Point(coord_t(std::llround(q.x())), coord_t(std::llround(q.y())));
+    }
+    // Whether a tagged ring actually MOVES is a different question from whether it is tagged,
+    // and the two have already been confused once here. CS_DUMPCAPS answers it directly.
+    if (const char *dc = std::getenv("CS_DUMPCAPS")) {
+        (void)dc;
+        double mo = 0.0, mi = 0.0, mp = 0.0;
+        for (size_t i = 0; i < me.size(); ++i)
+            mp = std::max(mp, (moved[i].cast<double>() - me[i].cast<double>()).norm());
+        for (size_t i = 0; i < caps_out.size(); ++i) {
+            mo = std::max(mo, caps_out[i]);
+            mi = std::max(mi, caps_in[i]);
+        }
+        if (FILE *f = std::fopen("cs_caps.txt", "a"))
+            std::fprintf(f, "RING %zu LAT %d capout %.4f capin %.4f moved %.4f%c",
+                         j, int(kept_infill[j]), mo * SCALING_FACTOR,
+                         mi * SCALING_FACTOR, mp * SCALING_FACTOR, 10),
+            std::fclose(f);
     }
     cc.loops[j].points = std::move(moved);
 }
@@ -3368,6 +3430,7 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
                 // out is the near-zero segments that read as travel moves in a mode that has
                 // none. Measured on the eccentric, moving to one bead halves the extrusion below
                 // 0.20 mm, 0.81% of path to 0.45%.
+                b.cc.lat = b.lat;
                 apply_weave(b.cc, b.lat, pinned, woven, spacing, layer_index,
                             double(flow.scaled_width()) / double(spacing), /*smooth_phase=*/true,
                             b.cc.phase_fn.get());
@@ -4098,8 +4161,9 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
                 for (size_t ci = 0; ci < chains.size(); ++ci) {
                     const ContourChain &c = chains[ci];
                     for (size_t j = 0; j < c.loops.size(); ++j) {
-                        std::fprintf(f, "CHAIN %zu RING %zu BORE %d PINCH %d N %zu",
+                        std::fprintf(f, "CHAIN %zu RING %zu BORE %d PINCH %d LAT %d N %zu",
                                      ci, j, c.has_bore ? 1 : 0, c.outer_pinch ? 1 : 0,
+                                     j < c.lat.size() ? int(c.lat[j]) : -1,
                                      c.loops[j].points.size());
                         for (const Point &p : c.loops[j].points)
                             std::fprintf(f, " %.4f %.4f", unscale<double>(p.x()), unscale<double>(p.y()));
