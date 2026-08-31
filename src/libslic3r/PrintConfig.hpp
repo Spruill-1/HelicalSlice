@@ -1243,6 +1243,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                continuous_shell_scarf_length))
     ((ConfigOptionBool,                 continuous_shell_adaptive_beading))
     ((ConfigOptionBool,                 continuous_shell_interpolated_rings))
+    ((ConfigOptionFloat,                continuous_shell_swirl))
     ((ConfigOptionBool,                 continuous_shell_interior_spiral))
     ((ConfigOptionBool,                 continuous_shell_interior_serpentine))
     ((ConfigOptionPercent,              continuous_shell_junction_ramp))

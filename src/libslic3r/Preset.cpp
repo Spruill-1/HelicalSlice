@@ -1042,6 +1042,7 @@ static std::vector<std::string> s_Preset_print_options{
     "continuous_shell_scarf_length",
     "continuous_shell_adaptive_beading",
     "continuous_shell_interpolated_rings",
+    "continuous_shell_swirl",
     "continuous_shell_interior_spiral",
     "continuous_shell_interior_serpentine",
     "continuous_shell_junction_ramp",

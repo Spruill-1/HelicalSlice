@@ -44,6 +44,9 @@ struct WovenInfill {
     // above 50% lands on stride 2 and prints identically. Ring placement that decimates nothing
     // can honour the fraction itself.
     double density     = 0.0;
+    // Turns of the whole interior per layer - lattice and joins together. See
+    // continuous_shell_swirl. Zero keeps the old, separate dphase/seam-step behaviour.
+    double swirl       = 0.0;
     double lobes       = 6.0;       // angular lobe count of the weave
     double weave       = 0.0;       // 0 = plain concentric, 1 = full weave (scales amp/zamp)
     double dphase      = 0.9;       // per-layer phase advance (rad)
@@ -72,6 +75,7 @@ WovenInfill woven_infill_params(const PrintRegionConfig *config)
         return w;                  // 0% or >=100% => keep the interior fully solid
     w.enabled     = true;
     w.density     = density;
+    w.swirl       = config->continuous_shell_swirl.value / 360.0;
     w.stride      = std::max<size_t>(2, size_t(std::llround(1.0 / std::clamp(density, 0.05, 0.99))));
     w.shell_loops = std::max<size_t>(1, size_t(config->wall_loops.value));
     // Weave FREQUENCY knob: it sets the lobe count (spatial frequency) of the weave, NOT its amplitude.
@@ -2333,9 +2337,28 @@ for (size_t j = 0; j < NR; ++j) {
     // to stop rings j and j+2 lining their welds into radial spokes, and lining the welds up is
     // exactly what the octave schedule is for. Whether the spokes come back is a question for a
     // plate, and the Z precession already turns any spoke into a helix.
-    const double ring_phase = (ring_k[j] > 0.0)
-                            ? layer_phase
-                            : layer_phase + double(infill_ring) * (M_PI + drift);
+    // Shifting the pattern by d turns of PHI means phi -> phi - d, and basephase is 2*pi*k*phi,
+    // so the phase shift is -2*pi*k*d - proportional to that ring's own lobe count. Shifting by
+    // the same phase on every ring instead (which is what layer_phase does) turns each octave
+    // band by a different angle, because a band with twice the lobes needs twice the phase for
+    // the same angle: measured on P3_ecc between layers 24 and 25, the rings turn -8.8, -7.8,
+    // -6.8, -5.2, -13.2, -11.5, -3.8 degrees. Holding phi is what keeps a hill over the hill it
+    // welds to.
+    //
+    // It does NOT come out as an equal number of degrees per ring, and the knob is documented in
+    // those terms rather than as a rigid rotation. phi is the TRANSPORTED azimuth - seeded as
+    // arc length on the outer boundary and carried inward - so equal steps in phi are equal
+    // steps in arc length, and arc length per degree shrinks toward a bore. At 15 deg/layer the
+    // same rings turn +14.5, +13.5, +12.8, +12.0, +7.5, +6.2, +3.2: the knob's value at the
+    // outer lattice, decaying to about a quarter of it at the bore. Normalising by each ring's
+    // own d(theta)/d(phi) would equalise the degrees, and would pull the welds apart doing it,
+    // which is the one thing the octave schedule exists to prevent.
+    const double ring_phase =
+        (ring_k[j] > 0.0)
+            ? (woven.swirl != 0.0
+                   ? -2.0 * M_PI * ring_k[j] * woven.swirl * double(layer_index)
+                   : layer_phase)
+            : layer_phase + double(infill_ring) * (M_PI + drift);
     ++infill_ring;
     const Points &me = before[j].points;
     if (me.size() < 8) continue;
@@ -3850,9 +3873,14 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
                                ? std::clamp(config->continuous_shell_junction_ramp.value / 100.0, 0.05, 1.0) : 1.0;
     double cs_seam_theta = 0.0;
     if (config != nullptr) {
+        // The 0.02 base is a seam-JITTER scale - it exists to stop a column forming on the outer
+        // surface, and at its 100% default it moves the joins 1.15 degrees a layer. The swirl is
+        // added on top in plain radians so the joins turn by exactly the angle the lattice does.
         const double step_rad   = 0.02 * (config->continuous_shell_seam_step.value / 100.0);
         const double jitter_rad = 0.10 * (config->continuous_shell_seam_jitter.value / 100.0);
-        cs_seam_theta = double(layer_index) * step_rad + jitter_rad * seam_jitter_walk(layer_index);
+        const double swirl_rad  = config->continuous_shell_swirl.value * M_PI / 180.0;
+        cs_seam_theta = double(layer_index) * (step_rad + swirl_rad)
+                      + jitter_rad * seam_jitter_walk(layer_index);
     }
     // A forced-solid layer is no longer a reason for the plan to be off, so the only remaining
     // one at this point is the option itself.
@@ -3888,7 +3916,13 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     //    step at 100%, which random-walks to a wide spread over a tall print.
     constexpr double base_seam_step_rad   = 0.02;
     constexpr double base_seam_jitter_rad = 0.10;
-    const double seam_step_rad   = base_seam_step_rad * step_ratio;
+    // The SWIRL is added here, not only to cs_seam_theta. cs_seam_theta feeds the adaptive
+    // plan's spiral anchor; what actually rotates the ring-to-ring joins is the step passed to
+    // spiralize_rings, so putting the swirl in one and not the other moved nothing - measured,
+    // the joins kept turning at the old 1.4 deg/layer with the knob at 15.
+    const double swirl_rad_per_layer = (config != nullptr)
+                                     ? config->continuous_shell_swirl.value * M_PI / 180.0 : 0.0;
+    const double seam_step_rad   = base_seam_step_rad * step_ratio + swirl_rad_per_layer;
     const double seam_jitter_rad = base_seam_jitter_rad * jitter_ratio;
     const double ring_spacing    = double(flow.scaled_spacing());
 

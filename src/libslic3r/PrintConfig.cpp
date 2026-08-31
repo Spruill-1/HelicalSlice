@@ -6228,6 +6228,28 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionPercent(30));
 
+    def = this->add("continuous_shell_swirl", coFloat);
+    def->label = L("Continuous shell swirl");
+    def->category = L("Strength");
+    def->tooltip = L("Degrees the woven interior turns from one layer to the next, joins included. "
+                     "The joins and the outer lattice both turn by about this much, so the joins "
+                     "travel with the pattern instead of drifting through it and no join stacks "
+                     "into a column. Rings nearer a bore turn less - down to roughly a quarter of "
+                     "it at the bore - because the weave is spaced along the path rather than by "
+                     "angle, and holding that spacing is what keeps the lattice welded to itself. "
+                     "Surfaces do not turn at all. At 0.25 mm layers, 7.5 degrees is one full turn "
+                     "over a 12 mm part and 15 is two.\n\n"
+                     "This supersedes the per-layer weave shift for interpolated rings: that knob "
+                     "advances the weave's PHASE, so its rotation depends on the lobe count, while the "
+                     "seam step advances the join azimuth on a scale meant for seam jitter. Measured, "
+                     "the two differed by about 26x and neither produced a visible turn. 0 keeps the "
+                     "old behaviour.");
+    def->sidetext = L("degrees per layer");
+    def->min = 0;
+    def->max = 90;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(0));
+
     def = this->add("spiral_starting_flow_ratio", coFloat);
     def->label = L("Spiral starting flow ratio");
     // xgettext:no-c-format, no-boost-format
