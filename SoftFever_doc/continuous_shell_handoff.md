@@ -3347,3 +3347,32 @@ direction is not to remove the junctions but to SMOOTH them - migrate between ri
 instead of a radial jump. `continuous_shell_junction_ramp` is exactly that knob and already
 exists, applying to the plan-driven spiral arm; pointing it at the morph rings' transitions is
 the untried piece.
+
+### Nothing is swirling, and the two precessions are independent
+
+The original framing was a foam of bubbles whose join points skew with Z so the whole thing
+swirls. Measured on consecutive layers of P3_ecc, closed morph rings, three lobes:
+
+| | per layer | over a 48-layer part |
+|---|---|---|
+| ring joins | 1.4 - 1.5 deg | about 70 deg |
+| weave pattern | 0 - 3 deg, no clear trend | under 150 deg |
+
+Neither is a swirl, and worse, they are driven by SEPARATE knobs that do not agree:
+
+  join azimuth   `cs_seam_theta = layer * 0.02 * (seam_step/100)` rad
+                 100% (the default) = 1.15 deg/layer; the 2000% maximum = 22.9 deg/layer
+  weave phase    `dphase = clamp(weave_shift/100, 0, 2) * pi` rad of PHASE per layer,
+                 which is dphase / (2*pi*k) of a turn - at k = 3 lobes, 100% is 60 deg/layer
+
+So the two rotate at rates that differ by a factor of about 26 at their defaults. The joins do
+not travel WITH the pattern, they drift through it - which is the opposite of the intent, where
+the join points are skewed precisely so the bubbles and their joins turn together.
+
+The 0.02 base on the seam step is a seam-JITTER scale, meant to stop a seam column forming on
+the outer surface. It was never a swirl rate, and it is being asked to be one.
+
+The fix that matches the framing is to drive the join azimuth from the SAME per-layer phase
+that rotates the weave, so they precess together by construction rather than by two knobs that
+happen to disagree - and to pick a rate that completes a turn or more over a part's height
+rather than a tenth of one.
