@@ -1244,6 +1244,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                 continuous_shell_adaptive_beading))
     ((ConfigOptionBool,                 continuous_shell_interpolated_rings))
     ((ConfigOptionFloat,                continuous_shell_swirl))
+    ((ConfigOptionPercent,              continuous_shell_weld_strength))
     ((ConfigOptionBool,                 continuous_shell_interior_spiral))
     ((ConfigOptionBool,                 continuous_shell_interior_serpentine))
     ((ConfigOptionPercent,              continuous_shell_junction_ramp))

@@ -6250,6 +6250,25 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(0));
 
+    def = this->add("continuous_shell_weld_strength", coPercent);
+    def->label = L("Continuous shell weld strength");
+    def->category = L("Strength");
+    // xgettext:no-c-format, no-boost-format
+    def->tooltip = L("How far a lattice hill drives into the trough facing it, as a percentage of "
+                     "a bead width. At 0 the weave stops exactly one bead short, so the two beads "
+                     "touch along a line and share no material - the weld is a tangency, and a "
+                     "tangency is what peels. Raising this eats into that allowance, so the two "
+                     "rings merge over a width, and that width is what has to be torn to separate "
+                     "them.\n\n"
+                     "It is bounded well below 100%: at 100% the two centrelines would coincide "
+                     "rather than merge, which is a doubled bead the flow cap then has to thin "
+                     "away. Only applies to interpolated rings with the weave on.");
+    def->sidetext = L("%");
+    def->min = 0;
+    def->max = 75;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(0));
+
     def = this->add("spiral_starting_flow_ratio", coFloat);
     def->label = L("Spiral starting flow ratio");
     // xgettext:no-c-format, no-boost-format

@@ -339,8 +339,19 @@ for (const o of D.objects){
 }
 const loS = el('lo'), hiS = el('hi');
 loS.max = hiS.max = Math.max(0, layers.length-1); hiS.value = hiI;
-loS.addEventListener('input', ()=>{ loI = Math.min(+loS.value, hiI); loS.value = loI; legend(); draw(); });
-hiS.addEventListener('input', ()=>{ hiI = Math.max(+hiS.value, loI); hiS.value = hiI; legend(); draw(); });
+// Once the two ends meet, the pair reads as ONE slice, and pushing either end then drags the
+// other with it. That turns the range control into a single-layer stepper without adding a
+// third widget: close the range, then walk it up or down a layer at a time.
+loS.addEventListener('input', ()=>{
+  const v = +loS.value;
+  if (loI === hiI && v > hiI){ hiI = Math.min(v, +hiS.max); hiS.value = hiI; }
+  loI = Math.min(v, hiI); loS.value = loI; legend(); draw();
+});
+hiS.addEventListener('input', ()=>{
+  const v = +hiS.value;
+  if (hiI === loI && v < loI){ loI = Math.max(v, 0); loS.value = loI; }
+  hiI = Math.max(v, loI); hiS.value = hiI; legend(); draw();
+});
 for (const id of ['tr','only','fade']) el(id).addEventListener('change', draw);
 el('fit').addEventListener('click', ()=>{ fit(); draw(); });
 

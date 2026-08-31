@@ -711,6 +711,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
                     "continuous_shell_connector_spread", "continuous_shell_seam_coast",
                     "continuous_shell_scarf_length", "continuous_shell_adaptive_beading",
                     "continuous_shell_interpolated_rings", "continuous_shell_swirl",
+                    "continuous_shell_weld_strength",
                     "continuous_shell_interior_spiral",
                     "continuous_shell_interior_serpentine",
                     "continuous_shell_junction_ramp",

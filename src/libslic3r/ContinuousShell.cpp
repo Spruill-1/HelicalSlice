@@ -47,6 +47,10 @@ struct WovenInfill {
     // Turns of the whole interior per layer - lattice and joins together. See
     // continuous_shell_swirl. Zero keeps the old, separate dphase/seam-step behaviour.
     double swirl       = 0.0;
+    // How far a hill drives INTO the trough facing it, as a fraction of a bead width. The cap
+    // leaves one bead between the two centrelines at 0, so the beads just touch and the weld is
+    // a tangency; raising it eats into that allowance. See continuous_shell_weld_strength.
+    double weld        = 0.0;
     double lobes       = 6.0;       // angular lobe count of the weave
     double weave       = 0.0;       // 0 = plain concentric, 1 = full weave (scales amp/zamp)
     double dphase      = 0.9;       // per-layer phase advance (rad)
@@ -76,6 +80,7 @@ WovenInfill woven_infill_params(const PrintRegionConfig *config)
     w.enabled     = true;
     w.density     = density;
     w.swirl       = config->continuous_shell_swirl.value / 360.0;
+    w.weld        = std::clamp(config->continuous_shell_weld_strength.value / 100.0, 0.0, 0.95);
     w.stride      = std::max<size_t>(2, size_t(std::llround(1.0 / std::clamp(density, 0.05, 0.99))));
     w.shell_loops = std::max<size_t>(1, size_t(config->wall_loops.value));
     // Weave FREQUENCY knob: it sets the lobe count (spatial frequency) of the weave, NOT its amplitude.
@@ -2196,7 +2201,19 @@ for (size_t j = 0; j < NR; ++j) {
 // Passed in rather than fixed, because changing it for the marched path would move output that
 // two peel tests have already validated. The interpolated path passes one bead width.
 const char  *_cl = std::getenv("CS_CLOSURE");
-const double closure = _cl ? std::atof(_cl) : closure_in;
+const double closure_raw = _cl ? std::atof(_cl) : closure_in;
+
+// THE WELD IS A TANGENCY UNTIL THIS KNOB IS TURNED UP.
+//
+// `closure` is the gap the cap refuses to close, in spacings, and the interpolated path passes
+// one bead width. So at full swing a hill stops exactly one bead from the trough facing it: the
+// two beads touch along a line and share no material. Shrinking the allowance by a fraction of
+// a bead drives the hill that far INTO the trough, which is a weld with width rather than a
+// tangency - and width is what has to be torn to separate the two rings.
+//
+// It cannot reach zero. The rings would then be coincident there rather than merged, which is a
+// doubled bead the volumetric cap has to thin, so the fraction is clamped well below 1.
+const double closure = closure_raw * (1.0 - std::clamp(woven.weld, 0.0, 0.95));
 
 // Sweepable: `e = clamp(overshoot * sin(phase), -1, 1)`, so 1.0 is a PURE SINUSOID that never
 // clamps and 8 is very nearly a square wave. The value is the shape of the weave, not its size.
