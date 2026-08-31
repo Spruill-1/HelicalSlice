@@ -2007,6 +2007,42 @@ coord_t vanish_depth(const ExPolygons &shape, coord_t hi)
     return lo + (hi - lo) / 2;
 }
 
+// A RING IS DRAWN WITH THE POINTS IT HAS, and a lobe needs enough of them to be a curve.
+//
+// k lobes on a ring of N points gets N/k points per lobe. Below about eight the sinusoid stops
+// being a curve and becomes a zigzag; below four it aliases outright and what comes out has no
+// relation to the wave that went in. Measured on the shape set with the wavelength anchored at
+// 2.5 mm: the square's ring 5 runs 124 points against 16 lobes, 7.8 per lobe, and the
+// multibore's ring 1 runs 80 points over a 97.5 mm perimeter against 12 lobes - 6.7 per lobe,
+// and a point every 1.2 mm on a 0.45 mm bead. Those are the rings that came out as squiggles.
+//
+// Sampling is not the ring's own property to defend: it arrives from the level-set extraction,
+// which spaces points by arc length, and from the source mesh's tessellation, which on a
+// flat-sided section can be very coarse. So the ring is refined here, before the weave reads
+// it. Inserting points ON existing edges cannot move the geometry - the polygon is identical,
+// it simply has somewhere to put the wave.
+static void densify(Polygon &poly, double max_seg)
+{
+    const size_t n = poly.points.size();
+    if (n < 3 || max_seg <= 0.0)
+        return;
+    Points out;
+    out.reserve(n * 2);
+    for (size_t i = 0; i < n; ++i) {
+        const Point &a = poly.points[i];
+        const Point &b = poly.points[(i + 1) % n];
+        out.push_back(a);
+        const double len = (b - a).cast<double>().norm();
+        const size_t add = size_t(std::floor(len / max_seg));
+        for (size_t q = 1; q <= add; ++q) {
+            const double t = double(q) / double(add + 1);
+            out.push_back(Point(coord_t(std::llround(double(a.x()) + t * double(b.x() - a.x()))),
+                                coord_t(std::llround(double(a.y()) + t * double(b.y() - a.y())))));
+        }
+    }
+    poly.points = std::move(out);
+}
+
 // THE GAP IS TO THE NEIGHBOUR'S PATH, NOT TO WHICHEVER OF ITS VERTICES IS NEAREST.
 //
 // A neighbour carrying fewer points than this ring quantises the gap into a staircase, and both
@@ -2256,7 +2292,7 @@ const double layer_phase = double(layer_index) * woven.dphase;
 
 // The rings are read from a snapshot so a ring already displaced this layer does
 // not shift the gaps its neighbour is about to measure.
-const Polygons before = cc.loops;
+
 if (std::getenv("CS_DUMPCAPS")) {
     if (FILE *f = std::fopen("cs_caps.txt", "a")) {
         std::fprintf(f, "ENTRY NR %zu kept", cc.loops.size());
@@ -2360,6 +2396,20 @@ if (phase_fn != nullptr && *phase_fn) {
         }
     }
 }
+
+// Refine before the snapshot, so the gap measurements and the correspondence see the same
+// points the weave will displace. Twelve per lobe: eight is where a lobe stops looking like a
+// curve, and the margin costs only points.
+if (smooth_phase) {
+    for (size_t j = 0; j < NR; ++j) {
+        if (!kept_infill[j] || ring_k[j] <= 0.0 || cc.loops[j].points.size() < 8)
+            continue;
+        const double per = cc.loops[j].length();
+        densify(cc.loops[j], per / (ring_k[j] * 12.0));
+    }
+}
+
+const Polygons before = cc.loops;
 
 std::vector<std::vector<double>> basephase(NR);
 for (size_t j = 0; j < NR; ++j) {
