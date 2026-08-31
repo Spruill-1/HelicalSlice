@@ -1997,6 +1997,35 @@ coord_t vanish_depth(const ExPolygons &shape, coord_t hi)
     return lo + (hi - lo) / 2;
 }
 
+// THE GAP IS TO THE NEIGHBOUR'S PATH, NOT TO WHICHEVER OF ITS VERTICES IS NEAREST.
+//
+// A neighbour carrying fewer points than this ring quantises the gap into a staircase, and both
+// the cap and the displacement direction step with it. Measured on P3_ecc layer 24: ring 2 has
+// 410 points and faces a 205-point skin loop, and its gap jumps 0.0578 mm between adjacent
+// points where the distance to the polyline moves 0.0084 - 6.9x rougher, on the one ring that
+// also swings twice as far as the rings inside it because the skin it faces is pinned.
+static Vec2d closest_on_ring(const Points &P, size_t k, const Vec2d &q)
+{
+    const size_t n = P.size();
+    if (n < 2)
+        return P[k].cast<double>();
+    Vec2d best = P[k].cast<double>();
+    double bd = (best - q).squaredNorm();
+    const size_t prev = (k + n - 1) % n, next = (k + 1) % n;
+    const Vec2d ends[2][2] = {{P[prev].cast<double>(), best}, {best, P[next].cast<double>()}};
+    for (const auto &e : ends) {
+        const Vec2d ab = e[1] - e[0];
+        const double L2 = ab.squaredNorm();
+        if (L2 < 1e-18)
+            continue;
+        const Vec2d c = e[0] + std::clamp((q - e[0]).dot(ab) / L2, 0.0, 1.0) * ab;
+        const double d2 = (c - q).squaredNorm();
+        if (d2 < bd) { bd = d2; best = c; }
+    }
+    return best;
+}
+
+
 // THE WEAVE, extracted verbatim from apply_woven_infill's decimation branch so that a ring
 // stack built any other way can use it too. It needs nothing from the sparsifier but the
 // rings and two flags per ring: whether the ring is interior lattice (rather than a surface
@@ -2255,8 +2284,27 @@ for (size_t j = 0; j < NR; ++j) {
     const Points &pts = before[j].points;
     basephase[j].assign(pts.size(), 0.0);
     if (ring_k[j] > 0.0) {
+        // THE PHASE IS THE RING'S OWN PARAMETER. There is nothing to filter.
+        //
+        // A ring here is a level set plus A*sin(phase) along its normal. The level set is smooth
+        // (it turns at most 3.4 degrees, measured) and A varies slowly, so the result is smooth
+        // BY CONSTRUCTION - unless the phase is rough. Reading the transported azimuth out of
+        // its raster per point made it rough: phi carries grid noise, basephase multiplies that
+        // noise by k, and the rings came out turning up to 127 degrees. Filtering it afterwards
+        // is treating the symptom.
+        //
+        // The rings of a morph family already share a parametrisation - each is sampled at the
+        // same normalised arc length between the same two boundaries, which is why they all
+        // carry the same point count - so index i on one ring faces index i on the next.
+        // Measured on P3_ecc layer 24: the nearest point on the ring outside sits at a median
+        // offset of exactly 0, drifting 4 to 9 points in 410. So i/n is the correspondence, it
+        // is an exact ramp, and it costs a divide.
+        //
+        // phase_fn is still what the marched path and the spiral anchor use; it is only wrong as
+        // a per-point phase for rings that already know their own parameter.
+        const double n = double(pts.size());
         for (size_t i = 0; i < pts.size(); ++i)
-            basephase[j][i] = 2.0 * M_PI * ring_k[j] * (*phase_fn)(pts[i]) + ring_off[j];
+            basephase[j][i] = 2.0 * M_PI * ring_k[j] * (double(i) / n) + ring_off[j];
         continue;
     }
     if (pts.empty()) continue;
@@ -2418,6 +2466,24 @@ for (size_t j = 0; j < NR; ++j) {
     // gap cap counts SLOTS, and a slot is a fixed distance only where consecutive
     // offsets are parallel - see the handoff.
     const double reach = (CS_MAX_GAP_SLOTS + 0.5) * double(spacing);
+    // BOTH CORRECTIONS BELOW ARE FOR THE INTERPOLATED PATH ONLY, which is what `smooth_phase`
+    // marks. The marched path carries the same defects and keeps them: its geometry is what two
+    // peel tests validated, and it is the path being retired. This is the same line the
+    // inherited-phase smoother already draws.
+    //
+    // A/B without a rebuild, in the style of CS_OVERSHOOT. CS_POLY_GAP=0 measures the gap to the
+    // neighbour's vertices as before; CS_WEAVE_BLEND picks 0 the shipped hard switch, 1 the cap
+    // blended in the drive, 2 one amplitude for both directions.
+    static const bool poly_gap_opt = [] {
+        const char *s = std::getenv("CS_POLY_GAP");
+        return s == nullptr || std::atoi(s) != 0;
+    }();
+    static const int blend_opt = [] {
+        const char *s = std::getenv("CS_WEAVE_BLEND");
+        return s ? std::atoi(s) : 2;
+    }();
+    const bool poly_gap = poly_gap_opt && smooth_phase;
+    const int  blend    = smooth_phase ? blend_opt : 0;
 
     // The envelope and the direction stay POINTWISE, and a band-limited version was tried and
     // reverted. Rebuilding the amplitude as a truncated Fourier series in the azimuth, and
@@ -2436,12 +2502,14 @@ for (size_t j = 0; j < NR; ++j) {
         Vec2d out(0., 0.);
         double g_out = 0.0, g_in = 0.0;
         if (!io.empty()) {
-            const Vec2d d = before[j - 1].points[io[i]].cast<double>() - here;
+            const Vec2d d = (poly_gap ? closest_on_ring(before[j - 1].points, io[i], here)
+                                      : before[j - 1].points[io[i]].cast<double>()) - here;
             const double g = d.norm();
             if (g > 1e-9) { g_out = std::min(g, reach); out += d / g; }
         }
         if (!ii.empty()) {
-            const Vec2d d = here - before[j + 1].points[ii[i]].cast<double>();
+            const Vec2d d = here - (poly_gap ? closest_on_ring(before[j + 1].points, ii[i], here)
+                                             : before[j + 1].points[ii[i]].cast<double>());
             const double g = d.norm();
             if (g > 1e-9) { g_in = std::min(g, reach); out += d / g; }
         }
@@ -2454,7 +2522,34 @@ for (size_t j = 0; j < NR; ++j) {
         const double cap_in  = std::max(0.0, woven.weave * sh_in  * (g_in  - closure * double(spacing)));
         const double e = std::clamp(
             overshoot * std::sin(basephase[j][i] + ring_phase), -1.0, 1.0);
-        const Vec2d q = here + out * (e * (e >= 0.0 ? cap_out : cap_in));
+        // A hard switch between the two caps at every zero crossing of the drive is a slope
+        // break in the ring, and the break is as big as |cap_out - cap_in|. On a ring whose
+        // neighbour is a pinned surface that difference is the whole point - it may swing across
+        // the entire gap where a ring between two movable neighbours takes half - so exactly
+        // those rings come out creased, and no amount of phase smoothing touches it: 24 and 36
+        // degrees against 3 to 7 for the rings between them.
+        //
+        // Blending the cap linearly in the drive removes the break. disp = e*(m + d*e) is
+        // analytic in the phase and still reaches exactly +cap_out and -cap_in at the extremes,
+        // which is where the excursion is actually claimed, so no reach is given up. The clamp
+        // guards the one case the blend can overshoot a cap, cap_in more than three times
+        // cap_out; sh differs by 2x at most, so it does not normally engage.
+        const double mid = 0.5 * (cap_out + cap_in), half = 0.5 * (cap_out - cap_in);
+        // 2, THE DEFAULT, keeps the drive a pure sinusoid by giving both directions the same
+        // amplitude. A ring beside a pinned surface then no longer reaches across the whole gap
+        // - mean excursion 0.526 to 0.408 mm - and it is still the right trade, because the
+        // asymmetry was never free: swinging twice as far on one side means the cap switch at
+        // every zero crossing is a slope break twice as big, and those two rings were the ones
+        // that came out creased. Measured on P3_ecc layer 24, worst turn over the lattice:
+        // 127.2 degrees as shipped, 28.8 with the phase fixed, 16.7 with the gap taken to the
+        // neighbour's path, 11.2 with the cap blended, 3.5 here - which is what the level sets
+        // under them turn, so the rings are now as smooth as the curves they are built from.
+        // It costs nothing that is measured: weld 19.9% to 19.8%, and the widest lattice void
+        // 2.04 to 1.62 mm.
+        const double push = blend == 2 ? e * std::min(cap_out, cap_in)
+                          : blend      ? std::clamp(e * (mid + half * e), -cap_in, cap_out)
+                                       : e * (e >= 0.0 ? cap_out : cap_in);
+        const Vec2d q = here + out * push;
         moved[i] = Point(coord_t(std::llround(q.x())), coord_t(std::llround(q.y())));
     }
     cc.loops[j].points = std::move(moved);
