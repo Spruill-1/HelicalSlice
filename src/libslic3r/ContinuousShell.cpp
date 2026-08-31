@@ -2596,6 +2596,21 @@ for (size_t j = 0; j < NR; ++j) {
             const double g = d.norm();
             if (g > 1e-9) { g_in = std::min(g, reach); out += d / g; }
         }
+        // A CHAIN END HAS NO NEIGHBOUR ON ONE SIDE, so that gap measures 0 and its cap comes
+        // out max(0, -closure) = 0. The asymmetric law hid this, because it only ever used the
+        // far cap on one half of the sine; a symmetric excursion takes min(cap_out, cap_in) and
+        // freezes the ring outright. Measured on the multibore, whose three branch chains are
+        // three rings each: the first ring of every chain and the last of the trunk sat at
+        // exactly 0.00 mm while their neighbours moved 0.31 to 0.52, and 13 of 23 rings never
+        // moved at all.
+        //
+        // The level sets are evenly spaced BY CONSTRUCTION - that is the whole reason for
+        // building rings this way rather than by offsetting - so the gap a chain end cannot
+        // measure is the same as the one it can. Copying it across is not a guess at an absent
+        // neighbour; it is the property the ring family guarantees. Where BOTH are absent the
+        // ring is alone in its chain and stays put, which is right.
+        if (io.empty() && !ii.empty()) g_out = g_in;
+        if (ii.empty() && !io.empty()) g_in = g_out;
         const double len = out.norm();
         if (len < 1e-9) { moved[i] = me[i]; continue; }
         out /= len;
