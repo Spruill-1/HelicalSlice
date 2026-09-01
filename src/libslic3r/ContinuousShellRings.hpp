@@ -69,6 +69,16 @@ public:
     bool build(const ExPolygon &interior, double grid_pitch_mm, std::string *fail,
                const Points &sites = {});
 
+    // Close the family onto the medial axis AS WELL as the bores: d_in becomes the minimum
+    // of the two sources, so the extent is the local half-thickness even where a region's
+    // thin parts sit far from its bores. u stays continuous - min over sources is the same
+    // property the virtual sites rest on. Set BEFORE build, and the flag survives rebuilds.
+    // The caller keeps this field only when the measured collapse share improves: on a
+    // region whose bores already carry the thickness, the closure halves every wall-to-bore
+    // corridor instead of relieving anything, so it has to earn its keep per region.
+    void set_close_medial(bool v) { m_close_medial = v; }
+    bool close_medial() const { return m_close_medial; }
+
     bool   valid() const { return m_valid; }
     size_t n_bores() const { return m_n_bores; }
 
@@ -202,6 +212,7 @@ private:
     std::vector<float>  m_phi_c, m_phi_s;  // the azimuth field as cos/sin, so its seam averages
     ExPolygon           m_region;
     size_t              m_n_bores = 0;
+    bool                m_close_medial = false; // d_in = min(bores, medial axis); see setter
     std::vector<size_t> m_bore_of_line;    // line index in the bore distancer -> bore index
     Vec2d               m_centroid{0., 0.};// inner target when there is no bore or site, scaled
     Points              m_sites;           // virtual bores, scaled

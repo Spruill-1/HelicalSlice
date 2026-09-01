@@ -3311,7 +3311,11 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
     // open past that distance, which is the peel risk this campaign has measured twice. It is a
     // trade, not a fix, and it is here to be measured against the cells.
     const char *pct_env = std::getenv("CS_INTERP_PCT");
-    const double count_pct = pct_env ? std::clamp(std::atof(pct_env), 0.05, 1.0) : 1.0;
+    double count_pct = pct_env ? std::clamp(std::atof(pct_env), 0.05, 1.0) : 1.0;
+    static const bool medial_close_opt = [] {
+        const char *s = std::getenv("CS_MEDIAL_CLOSE");
+        return s == nullptr || std::atoi(s) != 0;
+    }();
 
     auto fld = std::make_shared<CsRingField>();
     CsRingField &field = *fld;
@@ -3319,6 +3323,7 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
     Points sites;
     size_t n = 0;
     double prev_share = 1.0;
+    bool medial_tried = false, medial_kept = false, pct_tried = false;
     double grid_mm = 0.5 * double(spacing) * SCALING_FACTOR;
     for (;;) {
         if (!field.build(interior, grid_mm, &why, sites)) {
@@ -3343,6 +3348,77 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
                                       : field.fraction_narrower_than(double(w_floor) * double(n + 1));
         if (share <= 0.02)
             break;                                 // rung 1 carries this much without help
+        // RUNG 2.5: close the family onto the medial axis. The count answers to the widest
+        // extent, so a bored region whose thin parts sit far from its bores crowds them at
+        // ANY count - the crescent-with-bore printed 42% of itself at the plan floor because
+        // its horn-to-bore extent spans 21.6x against a 3.5x printable budget, while the SAME
+        // horns with no bore print at nominal width, because a bore-less field closes onto
+        // the medial axis and extent becomes the local half-thickness. So give a crowding
+        // bored region the same closure - d_in = min(bore, skeleton), u stays continuous -
+        // but make it EARN its keep: on a region whose bores already carry the thickness the
+        // closure halves every wall-to-bore corridor instead (the multibore's strips crowd
+        // 2x under it, worked through on the replica), so the field is kept only when the
+        // measured collapse share strictly improves, and reverted with a note when it does
+        // not. CS_MEDIAL_CLOSE=0 disables the trial.
+        if (!medial_tried && interior.holes.size() > 0 && medial_close_opt) {
+            medial_tried = true;
+            field.set_close_medial(true);
+            std::string why2;
+            bool kept = false;
+            if (field.build(interior, grid_mm, &why2, sites)) {
+                const size_t n2 = field.ring_count_for_max_gap(pitch_mm, 1.0);
+                const double share2 = (n2 == 0) ? 1.0
+                    : field.fraction_narrower_than(double(w_floor) * double(n2 + 1));
+                if (n2 > 0 && share2 < share) {
+                    kept = true;
+                    char msg[200];
+                    std::snprintf(msg, sizeof(msg),
+                        "continuous shell: closed the ring family onto the medial axis - "
+                        "collapse share %.0f%% -> %.0f%% at %zu rings",
+                        100.0 * share, 100.0 * share2, n2);
+                    add_note(degrade_note, msg);
+                    medial_kept = true;
+                    // Percentile counts INVERT on a medial-closed region (measured on the
+                    // crescent: 2.4% -> 10.2% sub-floor, with the new thinning in the WIDEST
+                    // zone) - the deep limb starves before the thin parts gain.
+                    count_pct = 1.0;
+                }
+            }
+            if (kept)
+                continue;      // re-enter with the medial field: recount, re-share, then sites
+            field.set_close_medial(false);
+            if (!field.build(interior, grid_mm, &why, sites)) {
+                add_note(degrade_note, "interpolated rings declined: " + why);
+                return {};
+            }
+            n = field.ring_count_for_max_gap(pitch_mm, count_pct);
+            add_note(degrade_note, "continuous shell: medial closure declined - "
+                                   "the collapse share would not improve");
+        }
+        // RUNG 2.75: answer the count to a percentile of the extent. The one-count trade the
+        // CS_INTERP_PCT sweeps measured: on the multibore the 85th percentile takes sub-floor
+        // from 19.6% to 4.7% and the widest void to 1.84 mm - inside the 2.251 mm a peel has
+        // held, which is why the acceptance also checks the resulting widest gap against that
+        // line. Bored, non-medial regions only (see the inversion above), and only when the
+        // collapse share actually improves.
+        if (!pct_tried && !medial_kept && interior.holes.size() > 0 && pct_env == nullptr) {
+            pct_tried = true;
+            const size_t np = field.ring_count_for_max_gap(pitch_mm, 0.85);
+            const double sharep = (np == 0) ? 1.0
+                : field.fraction_narrower_than(double(w_floor) * double(np + 1));
+            const double widest_gap = (np == 0) ? 1e9
+                : field.extent_percentile(1.0) / double(np + 1);
+            if (np > 0 && sharep < share && widest_gap <= 2.2) {
+                char msg[220];
+                std::snprintf(msg, sizeof(msg),
+                    "continuous shell: ring count answered to the 85th percentile of the "
+                    "extent - collapse share %.0f%% -> %.0f%% at %zu rings, widest gap %.2f mm",
+                    100.0 * share, 100.0 * sharep, np, widest_gap);
+                add_note(degrade_note, msg);
+                count_pct = 0.85;
+                continue;      // re-enter: recount at the new percentile, re-share, then sites
+            }
+        }
         // A site has to EARN its rebuild. Spending the whole budget every time was the first
         // version, and on a crescent it bought a ring count of 9 instead of 11 while the wall
         // still collapsed over 6% of itself - the tips of a crescent are thin enough that no
@@ -3457,7 +3533,7 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
     // solved by re-beading the two turns nearest each surface; that is not built here.
     Polygon spiral;
     bool has_spiral = false;
-    if (interior.holes.size() == 1 && n >= 3 && woven.weave > 0.0 &&
+    if (interior.holes.size() == 1 && n >= 3 && woven.weave > 0.0 && !field.close_medial() &&
         (std::getenv("CS_SPIRAL") && std::atoi(std::getenv("CS_SPIRAL")) != 0)) {
         std::string swhy;
         has_spiral = field.morph_spiral(n, std::max(2.0, woven.lobes), woven.weave,
@@ -3470,9 +3546,13 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
 
     CsRingFamily fam;
     std::string morph_why;
-    const bool morphed = interior.holes.size() == 1 && field.morph_family(n, fam, &morph_why);
+    // A medial-closed field is NOT the outer-to-bore interpolation the morph computes - the
+    // morph would place rings the closed count law never measured. Level sets follow the
+    // field wherever it came from, so they carry the closure.
+    const bool morphed = interior.holes.size() == 1 && !field.close_medial()
+                      && field.morph_family(n, fam, &morph_why);
     if (! morphed) {
-        if (interior.holes.size() == 1 && n > 0)
+        if (interior.holes.size() == 1 && n > 0 && !field.close_medial())
             add_note(degrade_note, "interpolated rings fell back to level sets: " + morph_why);
         if (!field.family(n, fam, &why)) {
             add_note(degrade_note, "interpolated rings declined: " + why);
@@ -3568,6 +3648,7 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
     // Each chain that ends on a bore gets that bore's skin, innermost-in-the-material first so
     // the stack stays monotone across the wall. Which bore is the one its innermost ring is
     // labelled with - that label IS the cell.
+    std::vector<char> hole_attached(peel.back().holes.size(), 0);
     for (Build &b : done) {
         if (!attach_skin || b.last == nullptr || peel.back().holes.empty())
             continue;
@@ -3584,6 +3665,33 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
             b.lat.push_back(k + 1 == sl ? 1 : 0);
         }
         b.cc.has_bore = true;
+        hole_attached[h] = 1;
+    }
+    // A hole no chain ended on would silently lose its WALL. A family may legitimately stop
+    // short of a bore - a medial-closed family hugs the skeleton, and its innermost rings can
+    // be labelled "not decisively any bore's" - but the skin is not the lattice's to drop:
+    // any unattached hole gets its own skin-only chain, and the note says so either way.
+    if (attach_skin) {
+        for (size_t h = 0; h < hole_attached.size(); ++h) {
+            if (hole_attached[h])
+                continue;
+            if (sl >= 2) {
+                Build b;
+                for (size_t k = sl; k-- > 0; ) {
+                    b.cc.loops.push_back(peel[k].holes[h]);
+                    b.lat.push_back(0);
+                }
+                b.cc.has_bore = true;
+                done.push_back(std::move(b));
+                add_note(degrade_note, "continuous shell: a bore's skin was not reached by the "
+                                       "ring family - printed as its own stack, unwelded to the "
+                                       "lattice");
+            } else {
+                add_note(degrade_note, "continuous shell: a bore's skin was not reached by the "
+                                       "ring family, and a single wall loop cannot stand alone - "
+                                       "bore wall DROPPED this layer");
+            }
+        }
     }
 
     std::vector<ContourChain> out;

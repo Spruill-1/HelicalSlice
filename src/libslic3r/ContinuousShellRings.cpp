@@ -130,7 +130,7 @@ bool CsRingField::build(const ExPolygon &interior, double grid_pitch_mm, std::st
     // how many rings fit - and it degenerates to the centroid for a disc, where the medial axis
     // IS the centre. Sites cannot substitute: no point placement bounds the extent's maximum
     // without collapsing its minimum, because the extent at a site is just d_out there.
-    if (m_n_bores == 0 && m_sites.empty()) {
+    if ((m_n_bores == 0 && m_sites.empty()) || m_close_medial) {
         // max_width filters the axis by the LOCAL WIDTH it stands for, so it has to admit the
         // whole region: bounded at a couple of millimetres - the value the sub-bead fallback
         // uses, for its own quite different purpose - it rejects every part of a wall thicker
@@ -247,7 +247,10 @@ bool CsRingField::build(const ExPolygon &interior, double grid_pitch_mm, std::st
                     if (float(d_out) > deepest_rows[r].first)
                         deepest_rows[r] = { float(d_out), ps };
                     double d_in = m_n_bores > 0
-                        ? std::abs(double(m_impl->sdf_bores.signed_distance_bilinear(ps)))
+                        ? std::min(std::abs(double(m_impl->sdf_bores.signed_distance_bilinear(ps))),
+                                   m_close_medial && !m_impl->medial.get_lines().empty()
+                                       ? m_impl->medial.distance_from_lines<false>(ps)
+                                       : std::numeric_limits<double>::max())
                         : (!m_impl->medial.get_lines().empty()
                                ? m_impl->medial.distance_from_lines<false>(ps)
                                : (m_sites.empty() ? (p - m_centroid).norm()
@@ -413,6 +416,10 @@ void CsRingField::sample_inside(const Vec2d &p, double &u, double &extent, int &
         d_in = d;
         if (li < m_bore_of_line.size())
             bore = int(m_bore_of_line[li]);
+        if (m_close_medial && !m_impl->medial.get_lines().empty()) {
+            const double dm = m_impl->medial.distance_from_lines<false>(ps);
+            if (dm < d_in) { d_in = dm; bore = -1; }   // the skeleton's, not any bore's
+        }
     } else if (!m_impl->medial.get_lines().empty()) {
         d_in = m_impl->medial.distance_from_lines<false>(ps);
     } else if (m_sites.empty()) {
@@ -450,6 +457,11 @@ bool CsRingField::refine(Vec2d &p, double t, double &extent, int &bore) const
             // membership test would refuse to answer and hand back "no bore".
             if (li < m_bore_of_line.size())
                 bore = int(m_bore_of_line[li]);
+            if (m_close_medial && !m_impl->medial.get_lines().empty()) {
+                const auto [dm, lm, pm] = m_impl->medial.distance_from_lines_extra<false>(ps);
+                (void) lm;
+                if (dm < d_in) { d_in = dm; pin = pm; bore = -1; }
+            }
         } else if (!m_impl->medial.get_lines().empty()) {
             const auto [d, li, pi] = m_impl->medial.distance_from_lines_extra<false>(ps);
             (void) li;
@@ -519,7 +531,12 @@ bool CsRingField::bisect(Vec2d &p, double t, double &extent, int &bore) const
     if (m_n_bores > 0) {
         const auto [d, li, pi] = m_impl->bores.distance_from_lines_extra<false>(ps);
         (void) li;
-        pin = pi; best = d;
+        // Under medial closure the axis stands earlier in this chain and holds when it is
+        // nearer; without it the medial lines are empty for a bored region and the bore
+        // wins unconditionally, exactly as before.
+        if (!(m_close_medial && !m_impl->medial.get_lines().empty()) || d < best) {
+            pin = pi; best = d;
+        }
     }
     for (const Point &s : m_sites) {
         const double d = (p - s.cast<double>()).norm();
