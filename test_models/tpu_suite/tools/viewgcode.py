@@ -97,8 +97,12 @@ def parse(path, want_objects=None):
         runs = [r for r in runs if r["o"] in want_objects]
         travels = [t for t in travels if t["o"] in want_objects]
         objs = [o for o in objs if o in want_objects]
+    # The width this page derives from E is the Flow SPACING, not the plan width: area/h =
+    # width - h*(1-pi/4), i.e. 0.0537 low at these settings. The floor must live in the same
+    # units or every bead PLANNED exactly at the 0.34 floor reads as sub-floor - which painted
+    # a third of the bored crescent red for material that is actually 2-4x OVERFILLED.
     return {"layer_height": lh, "nozzle": nozzle, "nominal": nominal,
-            "floor": round(max(0.30, 0.85 * nozzle), 3),
+            "floor": round(max(0.30, 0.85 * nozzle) - (1 - math.pi / 4) * lh, 4),
             "objects": objs, "runs": runs, "travels": travels}
 
 

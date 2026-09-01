@@ -1656,6 +1656,11 @@ struct ContourChain {
     // Set instead of `plan` when the widths come from a measured field rather than a bead plan.
     std::shared_ptr<CsWidthFn> width_fn;
     std::shared_ptr<CsPhaseFn> phase_fn;
+    // Local extent W(p) in mm. The weave ramps itself to zero where W is under ~two beads:
+    // there the "wall" is a hairpin whose two flanks are THIS ring, a gap the cap law cannot
+    // see (it measures to radial neighbours only), and the crescent's limbs came out
+    // sawtoothed with their flanks pinched to 0.095 mm.
+    std::shared_ptr<CsWidthFn> extent_fn;
     // Which loops the weave treats as lattice, parallel to `loops`. Carried so the ring dump can
     // report it: whether a boundary loop is IN the lattice is otherwise only visible as whether
     // it happened to move, and those are not the same question - a ring can be tagged and still
@@ -2786,8 +2791,17 @@ for (size_t j = 0; j < NR; ++j) {
         out /= len;
         const double sh_out = (j > 0 && kept_infill[j - 1] && !pinned[j - 1]) ? 0.5 : 1.0;
         const double sh_in  = (j + 1 < NR && kept_infill[j + 1] && !pinned[j + 1]) ? 0.5 : 1.0;
-        const double cap_out = std::max(0.0, woven.weave * sh_out * (g_out - closure * double(spacing)));
-        const double cap_in  = std::max(0.0, woven.weave * sh_in  * (g_in  - closure * double(spacing)));
+        // Hairpin guard (interpolated path; extent_fn is null elsewhere): below two spacings
+        // of local extent, any excursion is a collision with this ring's own other flank -
+        // ramp the amplitude to zero over the third spacing so it has no on/off seam.
+        double hairpin = 1.0;
+        if (cc.extent_fn && *cc.extent_fn) {
+            const double W_mm  = double((*cc.extent_fn)(me[i]));
+            const double sp_mm = double(spacing) * SCALING_FACTOR;
+            hairpin = std::clamp((W_mm - 2.0 * sp_mm) / sp_mm, 0.0, 1.0);
+        }
+        const double cap_out = hairpin * std::max(0.0, woven.weave * sh_out * (g_out - closure * double(spacing)));
+        const double cap_in  = hairpin * std::max(0.0, woven.weave * sh_in  * (g_in  - closure * double(spacing)));
         const double e = std::clamp(
             overshoot * std::sin(basephase[j][i] + ring_phase), -1.0, 1.0);
         // A hard switch between the two caps at every zero crossing of the drive is a slope
@@ -3774,6 +3788,8 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
 
         b.cc.width_fn = width_fn;
         b.cc.phase_fn = phase_fn;
+        b.cc.extent_fn = (n > 0) ? std::make_shared<CsWidthFn>(
+            [fld](const Point &p) { return float(fld->extent_at(p.cast<double>())); }) : nullptr;
         b.cc.interpolated = true;
         if (n > 0) {
             b.cc.woven_infill = true;              // tag [shell | infill | shell] downstream
@@ -3794,13 +3810,28 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
         out.push_back(std::move(b.cc));
     }
     if (dropped > 0) {
-        // A ring the tree could not stack is lattice material that will not print. It used to
-        // vanish here without a word; the review found a whole class of them (a two-sided
-        // closed field) that would have, so the count is said every time it is non-zero.
-        char msg[160];
+        // A ring the tree could not stack is lattice material that will not print. Counting
+        // them was the first honest step; the crescent then measured what a partial family
+        // COSTS: its one dropped layer filled 8% of the pocket its neighbours fill to 50% - a
+        // one-layer ~100 mm2 lens void mid-part, sandwiched between two different lattices.
+        // A family the tree cannot stack WHOLE is declined whole - but ONLY where a fallback
+        // exists: the marcher takes one bore or none, and declining a multi-bore layer killed
+        // the whole slice (the multibore failed on all four welds the day this said `return`
+        // unconditionally). With several bores the partial family prints, and the DROPPED
+        // count stays loud.
+        if (interior.holes.size() <= 1) {
+            char msg[200];
+            std::snprintf(msg, sizeof(msg),
+                "interpolated rings declined: %zu ring%s could not be stacked into any chain - "
+                "the marcher takes this layer", dropped, dropped == 1 ? "" : "s");
+            add_note(degrade_note, msg);
+            return {};
+        }
+        char msg[200];
         std::snprintf(msg, sizeof(msg),
             "continuous shell: %zu interpolated ring%s could not be stacked into any chain and "
-            "%s DROPPED", dropped, dropped == 1 ? "" : "s", dropped == 1 ? "was" : "were");
+            "%s DROPPED - no marcher fallback for a multi-bore layer",
+            dropped, dropped == 1 ? "" : "s", dropped == 1 ? "was" : "were");
         add_note(degrade_note, msg);
     }
     if (out.empty()) {
@@ -4620,7 +4651,8 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     // bead inside the wall, along the wall (through the waist), and back in. Rails
     // sit at 1.5 bead-widths so the connector rides on buried beads, not the surface.
     Polygons rails;
-    if ((subs.size() > 1 || geo_tour) && !merged.empty()) {
+    if ((subs.size() > 1 || geo_tour
+         || (chains.size() == 1 && chains.front().interpolated)) && !merged.empty()) {
         // Densify the rails (Clipper offsets keep only corner vertices): the connector
         // enters/leaves at the NEAREST VERTEX, and with corner-only rails that approach
         // segment can cut across a nearby notch corner. At ~1 mm spacing the nearest
@@ -4928,7 +4960,16 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
             return false;
         }
     }
-    if (subs.size() > 1 && spiral.points.size() >= 2) {
+    // A single INTERPOLATED chain also closes its tour when its two ends are far apart. The
+    // crescent-with-bore is one annular chain whose entry gets positionally re-anchored
+    // mid-limb, so its layer ended ~11 mm from its start and - travels stripped - the
+    // inter-layer join extruded 12.6 mm straight across the concave notch, every layer.
+    // Marched single chains keep the old gate: their fences are byte-for-byte.
+    const bool close_single = subs.size() == 1 && chains.size() == 1 && chains.front().interpolated
+                           && spiral.points.size() >= 2
+                           && (spiral.points.back() - spiral.points.front()).cast<double>().norm()
+                                  > 2.0 * ring_spacing;
+    if ((subs.size() > 1 || close_single) && spiral.points.size() >= 2) {
         // Close the stitched tour back to its start. Single-chain layers keep their
         // inter-LAYER join short via reverse_path parity, but a stitched tour ends
         // deep inside its last lobe - with travels stripped, the NEXT layer's first
