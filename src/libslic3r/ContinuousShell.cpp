@@ -4936,6 +4936,21 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         return false;
     }
 
+    // Path dump: the assembled layer polyline BEFORE flow assignment and export. This is the
+    // divider instrument between "spiralize made it" and "the exporter made it" - the notch
+    // hunt needed exactly this cut, with clean rings above it and notched gcode below.
+    if (const char *dp = std::getenv("CS_DUMPPATH")) {
+        if (layer_index == size_t(std::atoi(dp))) {
+            if (FILE *f = std::fopen("cs_path.txt", "a")) {
+                std::fprintf(f, "PATH layer %zu N %zu", layer_index, spiral.points.size());
+                for (const Point &p : spiral.points)
+                    std::fprintf(f, " %.4f %.4f", unscale<double>(p.x()), unscale<double>(p.y()));
+                std::fputc(10, f);
+                std::fclose(f);
+            }
+        }
+    }
+
     // Per-point flow multiplier combining two independent effects, both default 1.0 (off):
     //  * internal over-extrusion densifies provably-buried beads to close voids, and
     //  * seam coast (A3) thins the flow across the surface<->interior handoffs (the seam

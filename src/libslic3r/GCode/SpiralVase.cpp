@@ -258,6 +258,28 @@ std::string SpiralVase::process_layer(const std::string &gcode, bool last_layer)
                                     SpiralVase::SpiralPoint target = first_continuous_segment ?
                                         last_point :
                                         SpiralVaseHelpers::add(SpiralVaseHelpers::scale(nearestp, 1 - factor), SpiralVaseHelpers::scale(p, factor));
+                                    // Continuous shell: the nearest-point pairing has a whole
+                                    // LATTICE to choose from, and where a weaving ring passes a
+                                    // neighbour ring of the previous layer this blend dragged
+                                    // beads a full gap sideways - measured on the cone as
+                                    // full-flow notches up to 0.8 mm deep at the phase-crossing
+                                    // azimuths, made entirely here (the assembled path upstream
+                                    // is clean). Capping the SEARCH radius instead traded them
+                                    // for on/off kinks at the engage boundary, so the cap is on
+                                    // the PULL itself: the reference stays (taper-following and
+                                    // seam blending keep working), the correction saturates at
+                                    // about a fifth of a bead, and the weave's per-layer phase
+                                    // precession survives the export instead of being blended
+                                    // away. The layer-join first segment is exempt - reaching
+                                    // the previous layer's end is its whole job.
+                                    if (continuous_shell_mode && !first_continuous_segment) {
+                                        constexpr float pull_cap = 0.1f; // mm
+                                        const float px = target.x - p.x, py = target.y - p.y;
+                                        const float plen = std::sqrt(px * px + py * py);
+                                        if (plen > pull_cap)
+                                            target = SpiralVase::SpiralPoint(p.x + px * (pull_cap / plen),
+                                                                             p.y + py * (pull_cap / plen));
+                                    }
 
                                     // Remove tiny movement
                                     // We need to figure out the distance of this new line!
