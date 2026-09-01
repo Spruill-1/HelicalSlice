@@ -1033,7 +1033,19 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
         std::vector<Point> pts = resample_closed(oriented, ring_samples(oriented, surface_ring));
         if (pts.empty())
             return {};
-        anchor_to_angle(pts, ring_angle[ri]);
+        if (ri == 0 && entry_hint != nullptr) {
+            // The hint is a vertex of this very ring, so anchor ring 0 POSITIONALLY: on a
+            // concave chain the azimuth about the centre can pick the wrong crossing of the
+            // ray, and the cascade for ring 1 onward already starts from the hint's angle.
+            size_t best = 0; double bd = std::numeric_limits<double>::max();
+            for (size_t k = 0; k < pts.size(); ++k) {
+                const double d = (pts[k] - *entry_hint).cast<double>().squaredNorm();
+                if (d < bd) { bd = d; best = k; }
+            }
+            if (best > 0) std::rotate(pts.begin(), pts.begin() + best, pts.end());
+        } else {
+            anchor_to_angle(pts, ring_angle[ri]);
+        }
         grid.push_back(std::move(pts));
     }
 
@@ -1617,6 +1629,7 @@ bool march_bands(ExPolygon band, coord_t spacing, bool has_hole,
 struct ContourChain {
     Polygons loops;
     bool     has_bore = false;
+    bool     interpolated = false;   // built from level sets by cs_interior_chains, not marched
     // True when this chain's OUTER end is where a previous chain pinched out, not a real face
     // of the object. A wall of varying thickness closes on its thin azimuth first, and the
     // marching hands the remainder on as a new chain - so that chain's outermost rings sit in
@@ -2689,17 +2702,17 @@ for (size_t j = 0; j < NR; ++j) {
     // moved 0.2839 - and the anchor-to-first-lattice-ring interface floored at 0.340 mm while
     // every deeper interface reached the 0.112 mm closure floor. The one interface that bonds
     // the foam to the shell got tangency grade by arithmetic; sh already halves the
-    // neighbour's cap expecting the anchor to come the other half, which min() forbids. The
-    // analytic blend reaches each side's full cap, so the anchor spends its whole
-    // lattice-side cap on the half-cycle away from the surface: resliced, the interface floor
-    // drops 0.340 -> 0.111 mm and the surface side is unchanged. Interior rings keep blend 2
-    // - the asymmetry was never free (creasing) - and XOR, not OR: a lone ring between two
-    // surfaces has nowhere to spend an asymmetric cap. Chain-end rings are untouched: their
-    // absent neighbour is another chain's material with an unaligned phase, and min() is the
-    // bound that keeps them out of it.
+    // neighbour's cap expecting the anchor to come the other half, which min() forbids. An
+    // anchor therefore gets a ONE-SIDED law (3, below) that reaches exactly cap_out toward the
+    // surface and -cap_in toward the lattice: resliced, the interface floor drops 0.340 ->
+    // 0.111 mm and the surface side is unchanged. Interior rings keep blend 2 - the asymmetry
+    // was never free (creasing) - and XOR, not OR: a lone ring between two surfaces has
+    // nowhere to spend an asymmetric cap. Chain-end rings are untouched: their absent
+    // neighbour is another chain's material with an unaligned phase, and min() is the bound
+    // that keeps them out of it.
     const bool out_surf = j > 0 && !kept_infill[j - 1];
     const bool in_surf  = j + 1 < NR && !kept_infill[j + 1];
-    const int  ring_blend = (anchor_blend && blend == 2 && (out_surf != in_surf)) ? 1 : blend;
+    const int  ring_blend = (anchor_blend && blend == 2 && (out_surf != in_surf)) ? 3 : blend;
 
     // The envelope and the direction stay POINTWISE, and a band-limited version was tried and
     // reverted. Rebuilding the amplitude as a truncated Fourier series in the azimuth, and
@@ -2790,7 +2803,20 @@ for (size_t j = 0; j < NR; ++j) {
         // It costs nothing that is measured: weld 19.9% to 19.8%, and the widest lattice void
         // 2.04 to 1.62 mm.
         caps_out[i] = cap_out; caps_in[i] = cap_in;
-        const double push = ring_blend == 2 ? e * std::min(cap_out, cap_in)
+        // 3, THE ANCHOR: one-sided, and on the PURE sinusoid. The anchor is the outermost
+        // lattice ring (or the bore's), so it carries the most lobes, and under the saturating
+        // drive every lobe is two ramps. The first cut let it swing its full lattice-side cap
+        // on that drive and put 12% of its points past 45 degrees (p95 13 -> 52 on the cone;
+        // the whole layer's p95 10 -> 41) - the ring the eye reads first came out creased,
+        // which is the one regression the wavelength work had just bought back. So its drive
+        // is sin itself, offset so the hills graze the surface at exactly cap_out and the
+        // troughs meet the lattice at exactly -cap_in: analytic, no clamp, no step. The
+        // contact is at points rather than over arcs - the trade the saturating drive exists
+        // to avoid on interior rings - and at the shell that buys the outer perimeter's
+        // smoothness, the higher-priced surface.
+        const double push = ring_blend == 3 ? 0.5 * (cap_out - cap_in)
+                                              + 0.5 * (cap_out + cap_in) * std::sin(basephase[j][i] + ring_phase)
+                          : ring_blend == 2 ? e * std::min(cap_out, cap_in)
                           : ring_blend      ? std::clamp(e * (mid + half * e), -cap_in, cap_out)
                                             : e * (e >= 0.0 ? cap_out : cap_in);
         const Vec2d q = here + out * push;
@@ -3272,6 +3298,9 @@ std::vector<ContourChain> cs_interior_chains(const ExPolygon &interior,
     // where it meant 3. Placing rings rather than removing them, the bound is simply honoured:
     // ask for one more ring and every gap in the region is under it.
     const double max_gap_mm = CS_MAX_GAP_SLOTS * sp_mm;
+    // What the weave can still CLOSE: its cap law clamps the measured gap at this reach (see
+    // apply_weave), so two rings farther apart than it cannot weld at all.
+    const double reach_mm   = (CS_MAX_GAP_SLOTS + 0.5) * sp_mm;
     const double want_mm    = sp_mm / woven.density;
     const double pitch_mm   = std::min(want_mm, max_gap_mm);
 
@@ -3312,9 +3341,15 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
     // trade, not a fix, and it is here to be measured against the cells.
     const char *pct_env = std::getenv("CS_INTERP_PCT");
     double count_pct = pct_env ? std::clamp(std::atof(pct_env), 0.05, 1.0) : 1.0;
+    // OPT-IN (CS_MEDIAL_CLOSE=1). The review of this rung found that a KEPT closed field is not
+    // yet representable downstream: above the u-valley between the axis and a bore the level
+    // sets nest same-level loops (an axis band and a bore band), the chain tree assumes
+    // siblings are disjoint, and every ring it cannot place became a one-loop Build that was
+    // dropped without a word. Both trial shapes declined the rung on the share test, so it has
+    // never fired in a slice; it stays wired for when the tree can stack a two-sided closure.
     static const bool medial_close_opt = [] {
         const char *s = std::getenv("CS_MEDIAL_CLOSE");
-        return s == nullptr || std::atoi(s) != 0;
+        return s != nullptr && std::atoi(s) != 0;
     }();
 
     auto fld = std::make_shared<CsRingField>();
@@ -3324,13 +3359,14 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
     size_t n = 0;
     double prev_share = 1.0;
     bool medial_tried = false, medial_kept = false, pct_tried = false;
+    double count_gap_mm = pitch_mm;                // rung 2.75 may relax this to the weave reach
     double grid_mm = 0.5 * double(spacing) * SCALING_FACTOR;
     for (;;) {
         if (!field.build(interior, grid_mm, &why, sites)) {
             add_note(degrade_note, "interpolated rings declined: " + why);
             return {};
         }
-        n = field.ring_count_for_max_gap(pitch_mm, count_pct);
+        n = field.ring_count_for_max_gap(count_gap_mm, count_pct);
         if (n > 0) {
             // The raster only has to keep neighbouring level sets apart, so it starts at half a
             // bead and is rebuilt finer only if the count it implies asks for it.
@@ -3341,7 +3377,7 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
                     add_note(degrade_note, "interpolated rings declined: " + why);
                     return {};
                 }
-                n = field.ring_count_for_max_gap(pitch_mm, count_pct);
+                n = field.ring_count_for_max_gap(count_gap_mm, count_pct);
             }
         }
         const double share = (n == 0) ? 0.0
@@ -3359,7 +3395,7 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
         // closure halves every wall-to-bore corridor instead (the multibore's strips crowd
         // 2x under it, worked through on the replica), so the field is kept only when the
         // measured collapse share strictly improves, and reverted with a note when it does
-        // not. CS_MEDIAL_CLOSE=0 disables the trial.
+        // not. OPT-IN via CS_MEDIAL_CLOSE=1 - see medial_close_opt for why it is not yet on.
         if (!medial_tried && interior.holes.size() > 0 && medial_close_opt) {
             medial_tried = true;
             field.set_close_medial(true);
@@ -3391,32 +3427,36 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
                 add_note(degrade_note, "interpolated rings declined: " + why);
                 return {};
             }
-            n = field.ring_count_for_max_gap(pitch_mm, count_pct);
+            n = field.ring_count_for_max_gap(count_gap_mm, count_pct);
             add_note(degrade_note, "continuous shell: medial closure declined - "
                                    "the collapse share would not improve");
         }
-        // RUNG 2.75: answer the count to a percentile of the extent. The one-count trade the
-        // CS_INTERP_PCT sweeps measured: on the multibore the 85th percentile takes sub-floor
-        // from 19.6% to 4.7% and the widest void to 1.84 mm - inside the 2.251 mm a peel has
-        // held, which is why the acceptance also checks the resulting widest gap against that
-        // line. Bored, non-medial regions only (see the inversion above), and only when the
-        // collapse share actually improves.
+        // RUNG 2.75: answer the count to the WEAVE REACH instead of the density pitch. The
+        // pitch is CS_MAX_GAP_SLOTS = 3 slots, the count a peel set; the weave can still close
+        // a gap of (CS_MAX_GAP_SLOTS + 0.5) slots - that is the clamp in its own cap law - so a
+        // crowding region may open its widest gap to the reach and no interface becomes
+        // unweldable. The first cut of this rung answered to the 85th PERCENTILE and accepted
+        // any widest gap under 2.2 mm; the review caught that 2.2 was the void-CELL peel line,
+        // not the nominal-gap one (4 slots, 1.585 mm, PARTED), and that a gap past the reach
+        // cannot weld at all - a whole unbonded interface the note never named. Bored,
+        // non-medial regions only (see the inversion above), and only when the collapse share
+        // actually improves.
         if (!pct_tried && !medial_kept && interior.holes.size() > 0 && pct_env == nullptr) {
             pct_tried = true;
-            const size_t np = field.ring_count_for_max_gap(pitch_mm, 0.85);
+            const size_t np = field.ring_count_for_max_gap(reach_mm, 1.0);
             const double sharep = (np == 0) ? 1.0
                 : field.fraction_narrower_than(double(w_floor) * double(np + 1));
             const double widest_gap = (np == 0) ? 1e9
                 : field.extent_percentile(1.0) / double(np + 1);
-            if (np > 0 && sharep < share && widest_gap <= 2.2) {
+            if (np > 0 && np < n && sharep < share) {
                 char msg[220];
                 std::snprintf(msg, sizeof(msg),
-                    "continuous shell: ring count answered to the 85th percentile of the "
-                    "extent - collapse share %.0f%% -> %.0f%% at %zu rings, widest gap %.2f mm",
+                    "continuous shell: ring count relaxed from the density pitch to the weave "
+                    "reach - collapse share %.0f%% -> %.0f%% at %zu rings, widest gap %.2f mm",
                     100.0 * share, 100.0 * sharep, np, widest_gap);
                 add_note(degrade_note, msg);
-                count_pct = 0.85;
-                continue;      // re-enter: recount at the new percentile, re-share, then sites
+                count_gap_mm = reach_mm;
+                continue;      // re-enter: recount at the reach, re-share, then sites
             }
         }
         // A site has to EARN its rebuild. Spending the whole budget every time was the first
@@ -3430,7 +3470,7 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
                 add_note(degrade_note, "interpolated rings declined: " + why);
                 return {};
             }
-            n = field.ring_count_for_max_gap(pitch_mm, count_pct);
+            n = field.ring_count_for_max_gap(count_gap_mm, count_pct);
             break;
         }
         if (sites.size() >= CS_MAX_RESECTION_SITES)
@@ -3592,7 +3632,7 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
             // starts at the wall and the ring behind it is free to weave.
             for (size_t j = 0; j < sl; ++j) {
                 b.cc.loops.push_back(peel[j].contour);
-                b.lat.push_back(j + 1 == sl ? 1 : 0);
+                b.lat.push_back(sl >= 2 && j + 1 == sl ? 1 : 0);   // one loop = the surface itself: never woven
             }
         } else {
             b.cc.outer_pinch = true;
@@ -3652,17 +3692,23 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
     for (Build &b : done) {
         if (!attach_skin || b.last == nullptr || peel.back().holes.empty())
             continue;
-        std::vector<size_t> tally(peel.back().holes.size(), 0);
-        for (const int lab : b.last->bore)
-            if (lab >= 0 && size_t(lab) < tally.size())
-                ++tally[size_t(lab)];
-        const size_t h = size_t(std::max_element(tally.begin(), tally.end()) - tally.begin());
-        if (tally[h] * 2 < b.last->bore.size())
-            continue;                              // not decisively any bore's: a site's cell
+        // A chain owns a bore's skin only if its last ring encloses exactly ONE hole - that
+        // one. The plurality-of-labels test this replaces let a chain that ended by SPLITTING
+        // (its last ring wrapping several bores, most of its points nearest one of them) take
+        // that bore's skin as well as the bore's own chain: the multibore at 10 rings printed
+        // one bore wall TWICE. Containment is the predicate the level walk assigns children
+        // by, so ownership and nesting now agree; a ring enclosing several holes owns none,
+        // and any hole left without an owner falls to the guard below, which says so.
+        size_t owned = 0, h = 0;
+        for (size_t q = 0; q < peel.back().holes.size(); ++q)
+            if (!peel.back().holes[q].points.empty()
+                && b.last->poly.contains(peel.back().holes[q].points.front())) { ++owned; h = q; }
+        if (owned != 1)
+            continue;
         // Mirror at the bore: the OUTERMOST bore loop is the INNERMOST ring of the lattice.
         for (size_t k = sl; k-- > 0; ) {
             b.cc.loops.push_back(peel[k].holes[h]);
-            b.lat.push_back(k + 1 == sl ? 1 : 0);
+            b.lat.push_back(sl >= 2 && k + 1 == sl ? 1 : 0);
         }
         b.cc.has_bore = true;
         hole_attached[h] = 1;
@@ -3695,9 +3741,15 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
     }
 
     std::vector<ContourChain> out;
+    if (attach_skin && sl < 2)
+        add_note(degrade_note, "continuous shell: a single wall loop cannot anchor the lattice - "
+                               "the surface stays unwoven and the first level set is the anchor");
+    size_t dropped = 0;
     for (Build &b : done) {
-        if (b.cc.loops.size() < 2)
-            continue;                              // a lone ring is not a stack
+        if (b.cc.loops.size() < 2) {
+            ++dropped;                             // a lone ring is not a stack - counted, below
+            continue;
+        }
 
         // The weave is parametrised by arc length and does not care, but the Z wave downstream
         // is still an angle about the section centroid, and `star_ok` is what stops it being
@@ -3710,6 +3762,7 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
 
         b.cc.width_fn = width_fn;
         b.cc.phase_fn = phase_fn;
+        b.cc.interpolated = true;
         if (n > 0) {
             b.cc.woven_infill = true;              // tag [shell | infill | shell] downstream
             if (woven.weave > 0.0) {
@@ -3727,6 +3780,16 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
             }
         }
         out.push_back(std::move(b.cc));
+    }
+    if (dropped > 0) {
+        // A ring the tree could not stack is lattice material that will not print. It used to
+        // vanish here without a word; the review found a whole class of them (a two-sided
+        // closed field) that would have, so the count is said every time it is non-zero.
+        char msg[160];
+        std::snprintf(msg, sizeof(msg),
+            "continuous shell: %zu interpolated ring%s could not be stacked into any chain and "
+            "%s DROPPED", dropped, dropped == 1 ? "" : "s", dropped == 1 ? "was" : "were");
+        add_note(degrade_note, msg);
     }
     if (out.empty()) {
         add_note(degrade_note, "interpolated rings declined: nothing left to print after the skin");
@@ -4478,7 +4541,11 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         const char *s = std::getenv("CS_HANDOFF");
         return s == nullptr || std::atoi(s) != 0;
     }();
-    const bool geo_tour = interpolated && handoff_opt && chains.size() > 1;
+    // Gated on what actually built THIS layer's chains, not on the option: an interpolated
+    // layer that declined to the marcher must keep the marcher's stitcher.
+    const bool geo_tour = handoff_opt && chains.size() > 1
+                       && std::all_of(chains.begin(), chains.end(),
+                                      [](const ContourChain &c) { return c.interpolated; });
     auto spiralize_one = [&](const ContourChain &chain, bool rev, const Point *hint) -> Sub {
         Sub s;
         std::vector<char> flags;
