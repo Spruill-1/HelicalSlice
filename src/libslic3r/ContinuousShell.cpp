@@ -2371,19 +2371,54 @@ if (phase_fn != nullptr && *phase_fn) {
         // at 17 mm, and a crescent with a bore gives ONE lobe at 42 mm - which is not a weave,
         // it is a single undulation, and it reads on the page as a plain concentric ring.
         //
-        // CS_WEAVE_LAM sets the target wavelength in mm outright, so the foam keeps one texture
-        // whatever the section is, and the octave schedule still doubles outward from it so the
-        // hills stay welded. 0 keeps the shipped anchoring.
+        // A FIXED WAVELENGTH IS ALSO WRONG, because the amplitude is not free to choose.
+        //
+        // The excursion is sized by the GAP - a hill has to cross most of it to reach the trough
+        // facing it - so amplitude and wavelength are two ends of one quantity. Pin the
+        // wavelength and a wide gap gives a wave whose slope is 2*pi*A/lam: at F8's weld-75
+        // amplitude of 0.5 mm against a 2.5 mm wavelength that is 1.26, or 51 degrees off
+        // tangential, which is a zigzag rather than a lobe and is exactly what came out.
+        //
+        // So the wavelength is taken from the family's own spacing. Measured on F8 at weld 75,
+        // sweeping it against a 1.13 mm ring gap:
+        //
+        //     lam    turn p50   over 45 deg   bonded   sub-floor
+        //     2.5       6.4         13.7%      38.2%      1.86%
+        //     4.0       2.8          9.7%      39.8%      1.74%
+        //     6.0       2.2          8.4%      49.2%      1.04%
+        //     9.0       1.6          5.9%      46.7%      0.26%
+        //
+        // Every column improves with a longer wave, and bonded fraction peaks around five to
+        // eight gaps - far enough for the hill to arrive at a shallow angle instead of stabbing
+        // at its neighbour. Six is the default. CS_WEAVE_LAM still forces an absolute
+        // wavelength in mm for A/B, and CS_WEAVE_LAM_GAPS changes the multiple.
         static const double lam_mm = [] {
             const char *s = std::getenv("CS_WEAVE_LAM");
             return s ? std::atof(s) : 0.0;
+        }();
+        static const double lam_gaps = [] {
+            const char *s = std::getenv("CS_WEAVE_LAM_GAPS");
+            return s ? std::atof(s) : 6.0;
         }();
         double k = std::max(2.0, woven.lobes), off = 0.0;
         double lam = perim(lat.back()) / k;            // the innermost ring sets the wavelength
         if (lam_mm > 0.0) {
             lam = lam_mm / SCALING_FACTOR;
-            k = std::max(2.0, std::round(perim(lat.back()) / lam));
+        } else if (lam_gaps > 0.0 && lat.size() > 1) {
+            // The family's own spacing, measured rather than derived: a median over the
+            // neighbour pairs, so one crowded place cannot set the texture for the whole
+            // section.
+            std::vector<double> gaps;
+            gaps.reserve(lat.size());
+            for (size_t a = 0; a + 1 < lat.size(); ++a)
+                gaps.push_back(ring_gap(cc.loops[lat[a]], cc.loops[lat[a + 1]]));
+            std::sort(gaps.begin(), gaps.end());
+            const double g = gaps[gaps.size() / 2];
+            if (g > 1e-9)
+                lam = lam_gaps * g;
         }
+        if (lam > 1e-9)
+            k = std::max(2.0, std::round(perim(lat.back()) / lam));
         for (size_t n = lat.size(); n-- > 0; ) {
             const size_t j = lat[n];
             while (lam > 1e-9 && perim(j) / k > 2.0 * lam) {
