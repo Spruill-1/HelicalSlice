@@ -880,7 +880,14 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
                          // Which plan SLOT each ring came from. Identity while nothing has been
                          // decimated; after sparse infill drops rings it is the only thing that
                          // still ties a surviving ring to its own per-angle widths.
-                         const std::vector<size_t> *ring_slot = nullptr)
+                         const std::vector<size_t> *ring_slot = nullptr,
+                         // Geometry-anchored entry (inter-chain hand-offs): rotate the whole
+                         // anchor cascade so ring 0's cut lands at this point's azimuth - the
+                         // corridor where this chain actually faces its predecessor in the
+                         // stitched tour. A POINT, not an angle, so the azimuth is computed
+                         // about the same centre the anchors use and no frame mismatch can
+                         // creep in between caller and cascade.
+                         const Point *entry_hint = nullptr)
 {
     Polyline spiral;
     if (rings_in.empty())
@@ -931,8 +938,18 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
     // random part accumulates, so a high jitter scatters the seam around the whole part
     // rather than leaving one coherent helical line. jitter=0 -> a clean helix. Layer 0
     // anchors at angle 0.
-    const double seam_theta = double(layer_index) * seam_step_rad
-                            + seam_jitter_rad * seam_jitter_walk(layer_index);
+    double seam_theta = double(layer_index) * seam_step_rad
+                      + seam_jitter_rad * seam_jitter_walk(layer_index);
+    // The entry hint replaces the seam angle wholesale rather than offsetting it: the caller
+    // computed the hint FROM per-layer geometry (the running tail of the tour, which itself
+    // precesses with the trunk's seam), so the anti-stacking duty the precession carries is
+    // already inside the hint. The cascade below rotates rigidly with seam_theta, so the
+    // in-chain Fermat hop sizes are unchanged; only where the chain starts moves.
+    if (entry_hint != nullptr) {
+        const Vec2d d = entry_hint->cast<double>() - centre;
+        if (d.squaredNorm() > 1.0)
+            seam_theta = std::atan2(d.y(), d.x());
+    }
 
     // Per-ring cut rotation: rotate each successive contour's seam a little so the
     // Fermat connectors and the innermost U-turn spiral inward instead of stacking into
@@ -2437,7 +2454,16 @@ if (phase_fn != nullptr && *phase_fn) {
 // curve, and the margin costs only points.
 if (smooth_phase) {
     for (size_t j = 0; j < NR; ++j) {
-        if (!kept_infill[j] || ring_k[j] <= 0.0 || cc.loops[j].points.size() < 8)
+        if (!kept_infill[j] || ring_k[j] <= 0.0)
+            continue;
+        // A polygonal ANCHOR under 8 points was skipped here, and the < 8 weave guard below
+        // then froze it outright: the square's 4-point anchor never appeared in cs_caps.txt
+        // across 42 layers, its lattice never came within 0.446 mm of the wall pair, and the
+        // wall bond hung entirely on the once-per-layer seam ramp. Needing points is not a
+        // reason to skip inserting them. Scoped to anchors: a sub-8-point ring deep in the
+        // lattice is a collapsed core sliver, and freezing those is what the gate is for.
+        const bool anchor = (j > 0 && !kept_infill[j - 1]) || (j + 1 < NR && !kept_infill[j + 1]);
+        if (cc.loops[j].points.size() < 8 && !anchor)
             continue;
         const double per = cc.loops[j].length();
         densify(cc.loops[j], per / (ring_k[j] * 12.0));
@@ -2649,8 +2675,31 @@ for (size_t j = 0; j < NR; ++j) {
         const char *s = std::getenv("CS_WEAVE_BLEND");
         return s ? std::atoi(s) : 2;
     }();
+    // CS_ANCHOR_BLEND=0 reverts the anchors to the symmetric law for A/B (see ring_blend below).
+    static const bool anchor_blend = [] {
+        const char *s = std::getenv("CS_ANCHOR_BLEND");
+        return s == nullptr || std::atoi(s) != 0;
+    }();
     const bool poly_gap = poly_gap_opt && smooth_phase;
     const int  blend    = smooth_phase ? blend_opt : 0;
+    // THE ANCHOR GETS THE ASYMMETRIC LAW. The anchor ring (the innermost wall loop, and the
+    // outermost bore loop on an annulus) already tiles flank-to-flank against its surface
+    // neighbour, but under blend 2 its push is e*min(cap_out, cap_in) and the surface-side
+    // cap rules BOTH directions: measured on the cone at weld 75, capout 0.2839 / capin 0.53,
+    // moved 0.2839 - and the anchor-to-first-lattice-ring interface floored at 0.340 mm while
+    // every deeper interface reached the 0.112 mm closure floor. The one interface that bonds
+    // the foam to the shell got tangency grade by arithmetic; sh already halves the
+    // neighbour's cap expecting the anchor to come the other half, which min() forbids. The
+    // analytic blend reaches each side's full cap, so the anchor spends its whole
+    // lattice-side cap on the half-cycle away from the surface: resliced, the interface floor
+    // drops 0.340 -> 0.111 mm and the surface side is unchanged. Interior rings keep blend 2
+    // - the asymmetry was never free (creasing) - and XOR, not OR: a lone ring between two
+    // surfaces has nowhere to spend an asymmetric cap. Chain-end rings are untouched: their
+    // absent neighbour is another chain's material with an unaligned phase, and min() is the
+    // bound that keeps them out of it.
+    const bool out_surf = j > 0 && !kept_infill[j - 1];
+    const bool in_surf  = j + 1 < NR && !kept_infill[j + 1];
+    const int  ring_blend = (anchor_blend && blend == 2 && (out_surf != in_surf)) ? 1 : blend;
 
     // The envelope and the direction stay POINTWISE, and a band-limited version was tried and
     // reverted. Rebuilding the amplitude as a truncated Fourier series in the azimuth, and
@@ -2741,9 +2790,9 @@ for (size_t j = 0; j < NR; ++j) {
         // It costs nothing that is measured: weld 19.9% to 19.8%, and the widest lattice void
         // 2.04 to 1.62 mm.
         caps_out[i] = cap_out; caps_in[i] = cap_in;
-        const double push = blend == 2 ? e * std::min(cap_out, cap_in)
-                          : blend      ? std::clamp(e * (mid + half * e), -cap_in, cap_out)
-                                       : e * (e >= 0.0 ? cap_out : cap_in);
+        const double push = ring_blend == 2 ? e * std::min(cap_out, cap_in)
+                          : ring_blend      ? std::clamp(e * (mid + half * e), -cap_in, cap_out)
+                                            : e * (e >= 0.0 ? cap_out : cap_in);
         const Vec2d q = here + out * push;
         moved[i] = Point(coord_t(std::llround(q.x())), coord_t(std::llround(q.y())));
     }
@@ -4308,25 +4357,48 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         }
     }
     const bool reverse_chains = chains.size() > 1 ? false : reverse_path;
-    for (const ContourChain &chain : chains) {
+    // GEOMETRY-ANCHORED HAND-OFFS, interpolated path only (CS_HANDOFF=0 reverts for A/B).
+    // Measured on the multibore: five connectors a layer, 39.4 mm/layer at half flow, while
+    // 24 of the 28 chain-pair types pass within 0-1.4 mm of each other - because every
+    // chain's endpoints were frozen by its own seam anchor BEFORE the stitcher ran, and the
+    // stitcher could only choose which frozen endpoint to hop to. Here the tour is decided
+    // from ring geometry and each non-trunk chain's cascade is rotated so it enters at the
+    // corridor where it actually faces its predecessor. The trunk keeps its precessing
+    // surface seam untouched, so the one-closed-uncut-outer-ring invariant and the seam A/B
+    // history stand. Marched multi-chain layers keep the old greedy stitcher.
+    static const bool handoff_opt = [] {
+        const char *s = std::getenv("CS_HANDOFF");
+        return s == nullptr || std::atoi(s) != 0;
+    }();
+    const bool geo_tour = interpolated && handoff_opt && chains.size() > 1;
+    auto spiralize_one = [&](const ContourChain &chain, bool rev, const Point *hint) -> Sub {
+        Sub s;
         std::vector<char> flags;
         std::vector<coord_t> zoff;
         std::vector<float> widths;
-        Polyline sub = spiralize_rings(chain.loops, reverse_chains, seam_step_rad, seam_jitter_rad,
+        Polyline sub = spiralize_rings(chain.loops, rev, seam_step_rad, seam_jitter_rad,
                                        ring_spacing, layer_index, chain.has_bore, &flags, interlock_amp, &zoff,
                                        connector_spread, chain.woven_infill ? woven.shell_loops : 0,
                                        &merged.front(), &chain.ring_widths, &widths, flow.width(),
                                        scarf_len, scarf_floor, chain.plan.get(), cs_layer_h_scaled,
                                        chain.width_fn.get(),
-                                       chain.ring_slot.empty() ? nullptr : &chain.ring_slot);
+                                       chain.ring_slot.empty() ? nullptr : &chain.ring_slot,
+                                       hint);
         if (sub.points.size() >= 2 && sub.points.size() == flags.size() && sub.points.size() == zoff.size()
             && sub.points.size() == widths.size())
             // A chain carries the Z-wave only when its interior was actually thinned AND its
             // rings passed the star-shape gate (angular phase is meaningless on a folded chain).
-            subs.push_back({ std::move(sub), std::move(flags), std::move(zoff), std::move(widths),
-                             chain.woven_infill && chain.star_ok });
-    }
-    if (subs.empty()) {
+            s = Sub{ std::move(sub), std::move(flags), std::move(zoff), std::move(widths),
+                     chain.woven_infill && chain.star_ok };
+        return s;
+    };
+    if (!geo_tour)
+        for (const ContourChain &chain : chains) {
+            Sub s = spiralize_one(chain, reverse_chains, nullptr);
+            if (s.pl.points.size() >= 2)
+                subs.push_back(std::move(s));
+        }
+    if (subs.empty() && !geo_tour) {
         if (reason != nullptr)
             *reason = "Continuous shell mode could not construct a continuous spiral path.";
         return false;
@@ -4361,7 +4433,7 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     // bead inside the wall, along the wall (through the waist), and back in. Rails
     // sit at 1.5 bead-widths so the connector rides on buried beads, not the surface.
     Polygons rails;
-    if (subs.size() > 1 && !merged.empty()) {
+    if ((subs.size() > 1 || geo_tour) && !merged.empty()) {
         // Densify the rails (Clipper offsets keep only corner vertices): the connector
         // enters/leaves at the NEAREST VERTEX, and with corner-only rails that approach
         // segment can cut across a nearby notch corner. At ~1 mm spacing the nearest
@@ -4420,34 +4492,234 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         return arc;
     };
 
-    std::vector<char> used(subs.size(), 0);
-    append_sub(subs[0], false);   // start on the outermost chain (layer starts at a surface)
-    used[0] = 1;
-    for (size_t n = 1; n < subs.size(); ++n) {
-        const Point tail = spiral.points.back();
-        size_t best = 0; bool best_rev = false; double best_d = std::numeric_limits<double>::max();
-        for (size_t i = 0; i < subs.size(); ++i) {
-            if (used[i]) continue;
-            const double ds = (subs[i].pl.points.front() - tail).cast<double>().squaredNorm();
-            const double de = (subs[i].pl.points.back()  - tail).cast<double>().squaredNorm();
-            if (ds < best_d) { best_d = ds; best = i; best_rev = false; }
-            if (de < best_d) { best_d = de; best = i; best_rev = true; }
+    if (!geo_tour) {
+        std::vector<char> used(subs.size(), 0);
+        append_sub(subs[0], false);   // start on the outermost chain (layer starts at a surface)
+        used[0] = 1;
+        for (size_t n = 1; n < subs.size(); ++n) {
+            const Point tail = spiral.points.back();
+            size_t best = 0; bool best_rev = false; double best_d = std::numeric_limits<double>::max();
+            for (size_t i = 0; i < subs.size(); ++i) {
+                if (used[i]) continue;
+                const double ds = (subs[i].pl.points.front() - tail).cast<double>().squaredNorm();
+                const double de = (subs[i].pl.points.back()  - tail).cast<double>().squaredNorm();
+                if (ds < best_d) { best_d = ds; best = i; best_rev = false; }
+                if (de < best_d) { best_d = de; best = i; best_rev = true; }
+            }
+            const Point head = best_rev ? subs[best].pl.points.back() : subs[best].pl.points.front();
+            const Polyline arc = route_connector(tail, head);
+            for (const Point &rp : arc.points) {
+                spiral.points.push_back(rp);
+                internal.push_back(1);          // rails are buried by construction
+                interlock_z.push_back(0);
+                connector.push_back(1);
+                weavable.push_back(0);
+                pt_width.push_back(flow.width());
+            }
+            const size_t head_idx = spiral.points.size();
+            append_sub(subs[best], best_rev);
+            if (head_idx < connector.size())
+                connector[head_idx] = 1;        // thin the final hop segment onto the chain head
+            used[best] = 1;
         }
-        const Point head = best_rev ? subs[best].pl.points.back() : subs[best].pl.points.front();
-        const Polyline arc = route_connector(tail, head);
-        for (const Point &rp : arc.points) {
-            spiral.points.push_back(rp);
-            internal.push_back(1);          // rails are buried by construction
-            interlock_z.push_back(0);
-            connector.push_back(1);
-            weavable.push_back(0);
-            pt_width.push_back(flow.width());
+    } else {
+        // The trunk is the chain carrying the outer skin - identified by area, because the
+        // level walk fills `done` in the order chains END, which usually but not provably
+        // puts the trunk first. The layer must start on the outer surface.
+        size_t trunk = 0;
+        double trunk_area = -1.0;
+        for (size_t i = 0; i < chains.size(); ++i) {
+            if (chains[i].loops.empty()) continue;
+            const double a = std::abs(chains[i].loops.front().area());
+            if (a > trunk_area) { trunk_area = a; trunk = i; }
         }
-        const size_t head_idx = spiral.points.size();
-        append_sub(subs[best], best_rev);
-        if (head_idx < connector.size())
-            connector[head_idx] = 1;        // thin the final hop segment onto the chain head
-        used[best] = 1;
+        std::vector<char> cused(chains.size(), 0);
+        cused[trunk] = 1;
+        {
+            Sub ts = spiralize_one(chains[trunk], false, nullptr);
+            if (ts.pl.points.size() >= 2) {
+                subs.push_back(std::move(ts));
+                append_sub(subs.back(), false);
+            }
+        }
+        // JOINT tour: order and entry azimuths are optimized together against the CHAINED
+        // cost. The first cut of this code picked each chain greedily by distance from the
+        // running tail and anchored its entry there - and bought 18%, not the 5x the
+        // corridor census promised, because a Fermat chain EXITS beside its entry: an entry
+        // anchored toward the predecessor leaves the exit facing backward, and the next hop
+        // pays the full azimuthal separation anyway. So: sample candidate entries around
+        // each chain's outermost ring, model each candidate's exit (ring 1 beside it for an
+        // annular chain, the innermost ring for a solid one), and pick order and entries by
+        // dynamic programming over the true hop chain - INCLUDING the closing leg back to
+        // the trunk's start, whose 12-37 mm wall-hugging detours were the largest connector
+        // family of all.
+        struct Cand { Point entry; Point exit; };
+        std::vector<size_t> rest;
+        for (size_t i = 0; i < chains.size(); ++i)
+            if (!cused[i] && !chains[i].loops.empty() && !chains[i].loops.front().points.empty())
+                rest.push_back(i);
+        std::vector<std::vector<Cand>> cands(chains.size());
+        for (size_t i : rest) {
+            const ContourChain &c = chains[i];
+            const Points &ep = c.loops.front().points;
+            const Polygon &exit_ring = (c.has_bore && c.loops.size() >= 2) ? c.loops[1]
+                                                                          : c.loops.back();
+            const size_t stride = std::max<size_t>(1, ep.size() / 48);
+            for (size_t k = 0; k < ep.size(); k += stride) {
+                Cand cd;
+                cd.entry = ep[k];
+                size_t bx = 0; double bd = std::numeric_limits<double>::max();
+                for (size_t q = 0; q < exit_ring.points.size(); ++q) {
+                    const double d = (exit_ring.points[q] - cd.entry).cast<double>().squaredNorm();
+                    if (d < bd) { bd = d; bx = q; }
+                }
+                cd.exit = exit_ring.points.empty() ? cd.entry : exit_ring.points[bx];
+                cands[i].push_back(cd);
+            }
+        }
+        std::vector<size_t> order = rest;
+        std::vector<Point>  entries(chains.size());
+        if (!rest.empty() && !spiral.points.empty()) {
+            const Vec2d T0 = spiral.points.back().cast<double>();
+            const Vec2d H0 = spiral.points.front().cast<double>();
+            auto chain_cost = [&](const std::vector<size_t> &ord, std::vector<size_t> *pick) -> double {
+                // DP over candidate entries along the fixed order; the state is which
+                // candidate the previous chain took, so every hop is priced from the exit
+                // it actually leaves, not from a pairwise nearest approach.
+                std::vector<std::vector<double>> cost(ord.size());
+                std::vector<std::vector<size_t>> from(ord.size());
+                for (size_t k = 0; k < ord.size(); ++k) {
+                    const std::vector<Cand> &cs = cands[ord[k]];
+                    cost[k].assign(cs.size(), std::numeric_limits<double>::max());
+                    from[k].assign(cs.size(), 0);
+                    for (size_t c = 0; c < cs.size(); ++c) {
+                        const Vec2d e = cs[c].entry.cast<double>();
+                        if (k == 0) {
+                            cost[k][c] = (e - T0).norm();
+                        } else {
+                            for (size_t p = 0; p < cands[ord[k-1]].size(); ++p) {
+                                const double d = cost[k-1][p]
+                                    + (e - cands[ord[k-1]][p].exit.cast<double>()).norm();
+                                if (d < cost[k][c]) { cost[k][c] = d; from[k][c] = p; }
+                            }
+                        }
+                    }
+                }
+                double best = std::numeric_limits<double>::max();
+                size_t bc = 0;
+                const size_t L = ord.size() - 1;
+                for (size_t c = 0; c < cands[ord[L]].size(); ++c) {
+                    const double d = cost[L][c] + (cands[ord[L]][c].exit.cast<double>() - H0).norm();
+                    if (d < best) { best = d; bc = c; }
+                }
+                if (pick) {
+                    pick->assign(ord.size(), 0);
+                    (*pick)[L] = bc;
+                    for (size_t k = L; k > 0; --k) (*pick)[k-1] = from[k][(*pick)[k]];
+                }
+                return best;
+            };
+            std::vector<size_t> best_order = rest;
+            std::vector<size_t> best_pick;
+            if (rest.size() <= 7) {
+                std::vector<size_t> perm = rest;
+                std::sort(perm.begin(), perm.end());
+                double best = std::numeric_limits<double>::max();
+                do {
+                    std::vector<size_t> pick;
+                    const double d = chain_cost(perm, &pick);
+                    if (d < best) { best = d; best_order = perm; best_pick = std::move(pick); }
+                } while (std::next_permutation(perm.begin(), perm.end()));
+            } else {
+                chain_cost(best_order, &best_pick);
+                add_note(degrade_note, "continuous shell: more than 7 branch chains - "
+                                       "hand-off tour order kept greedy, entries still optimized");
+            }
+            order = best_order;
+            // Anti-stacking wander: among candidates whose chained cost stays within one
+            // spacing of the chosen one (fixed neighbours), precess by the golden ratio per
+            // layer. A corridor too tight to wander in stays a stacked full-flow rib -
+            // deliberate, and the print gate judges it.
+            const double frac = std::fmod(double(layer_index) * 0.6180339887498949, 1.0);
+            Vec2d prev_exit = T0;
+            for (size_t k = 0; k < order.size(); ++k) {
+                const std::vector<Cand> &cs = cands[order[k]];
+                const size_t chosen = best_pick.empty() ? 0 : best_pick[k];
+                const Vec2d next_e = (k + 1 < order.size())
+                    ? cands[order[k+1]][best_pick.empty() ? 0 : best_pick[k+1]].entry.cast<double>()
+                    : H0;
+                auto via = [&](size_t c) {
+                    return (cs[c].entry.cast<double>() - prev_exit).norm()
+                         + (next_e - cs[c].exit.cast<double>()).norm();
+                };
+                const double base = via(chosen);
+                std::vector<size_t> band;
+                for (size_t c = 0; c < cs.size(); ++c)
+                    if (via(c) <= base + double(ring_spacing)) band.push_back(c);
+                const size_t use = band.empty() ? chosen
+                                                : band[size_t(frac * double(band.size())) % band.size()];
+                entries[order[k]] = cs[use].entry;
+                prev_exit = cs[use].exit.cast<double>();
+            }
+        }
+        bool rode_rail = false;
+        static const bool dump_tour = std::getenv("CS_DUMPTOUR") != nullptr;
+        for (size_t k = 0; k < order.size() && !spiral.points.empty(); ++k) {
+            const ContourChain &c = chains[order[k]];
+            cused[order[k]] = 1;
+            const Point tail = spiral.points.back();
+            Sub s = spiralize_one(c, false, &entries[order[k]]);
+            if (s.pl.points.size() < 2) continue;
+            const Point head = s.pl.points.front();
+            const Polyline arc = route_connector(tail, head);
+            if (dump_tour) {
+                if (FILE *f = std::fopen("cs_tour.txt", "a"))
+                    std::fprintf(f, "TOUR layer %zu leg %zu chain %zu planned-entry %.3f %.3f "
+                                    "actual-head %.3f %.3f tail %.3f %.3f hop %.3f miss %.3f rail %d%c",
+                                 layer_index, k, order[k],
+                                 unscale<double>(entries[order[k]].x()), unscale<double>(entries[order[k]].y()),
+                                 unscale<double>(head.x()), unscale<double>(head.y()),
+                                 unscale<double>(tail.x()), unscale<double>(tail.y()),
+                                 (head - tail).cast<double>().norm() * SCALING_FACTOR,
+                                 (head - entries[order[k]]).cast<double>().norm() * SCALING_FACTOR,
+                                 int(!arc.points.empty()), 10),
+                    std::fclose(f);
+            }
+            for (const Point &rp : arc.points) {
+                spiral.points.push_back(rp);
+                internal.push_back(1);          // rails are buried by construction
+                interlock_z.push_back(0);
+                connector.push_back(1);
+                weavable.push_back(0);
+                pt_width.push_back(flow.width());
+            }
+            const size_t head_idx = spiral.points.size();
+            subs.push_back(std::move(s));
+            append_sub(subs.back(), false);
+            // Flow honesty. The unconditional halving was a double-fill guard for connectors
+            // that ride the rail over printed wall track, applied to every landing alike -
+            // so even a hop between touching chains printed at 0.198 mm effective, a faux
+            // travel by the campaign's own line. A short straight hop through the gap
+            // between two chains is a real welding bead: full flow when it is at least most
+            // of a bead long (below that the chains already touch, and half flow stays
+            // volumetrically honest) and no longer than a bounded gap crossing (beyond that
+            // it crosses territory whose contents this code cannot see, and the guard
+            // stands).
+            const double hop = (head - tail).cast<double>().norm();
+            const bool real_bead = arc.points.empty()
+                                && hop >= 0.75 * ring_spacing && hop <= 3.0 * ring_spacing;
+            if (head_idx < connector.size() && !real_bead)
+                connector[head_idx] = 1;
+            rode_rail |= !arc.points.empty();
+        }
+        if (rode_rail)
+            add_note(degrade_note, "continuous shell: an inter-chain hand-off left its corridor "
+                                   "and rode the wall rail at half flow");
+        if (subs.empty()) {
+            if (reason != nullptr)
+                *reason = "Continuous shell mode could not construct a continuous spiral path.";
+            return false;
+        }
     }
     if (subs.size() > 1 && spiral.points.size() >= 2) {
         // Close the stitched tour back to its start. Single-chain layers keep their
