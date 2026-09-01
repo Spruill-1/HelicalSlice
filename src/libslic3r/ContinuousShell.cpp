@@ -2311,8 +2311,16 @@ const double closure = closure_raw * (1.0 - std::clamp(woven.weld, 0.0, 0.95));
 
 // Sweepable: `e = clamp(overshoot * sin(phase), -1, 1)`, so 1.0 is a PURE SINUSOID that never
 // clamps and 8 is very nearly a square wave. The value is the shape of the weave, not its size.
+// THE INTERPOLATED PATH DRIVES ON THE PURE SINUSOID. Every inspector page this campaign judged
+// "smooth" was sliced with CS_OVERSHOOT=1.0 while the code default stayed 8; the first page
+// built without the env var came out creased on every ring (F8 gcode p95 turn 10.4 -> 38.4
+// degrees, 1.7% -> 4.2% of joints past 45), and the anchor law took the blame for a day before
+// an A/B on the knob alone put it back (11.2 / 2.6%). A square drive makes every lobe two
+// ramps; the user's doctrine is rings that are smooth by construction - sinusoidally perturbed,
+// non-intersecting - and the level-set family is where that promise is kept. The marched path
+// keeps 8: its arc welds are peel-validated and its fences are byte-for-byte.
 const char  *_ov = std::getenv("CS_OVERSHOOT");
-const double overshoot   = _ov ? std::max(1.0, std::atof(_ov)) : 8.0;
+const double overshoot   = _ov ? std::max(1.0, std::atof(_ov)) : (smooth_phase ? 1.0 : 8.0);
 const double drift_slots = 2.0;
 size_t n_infill = 0;
 for (const char c : kept_infill) n_infill += (c != 0) ? 1 : 0;
