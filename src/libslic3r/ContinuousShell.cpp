@@ -2428,15 +2428,19 @@ if (phase_fn != nullptr && *phase_fn) {
         //
         // Every column improves with a longer wave, and bonded fraction peaks around five to
         // eight gaps - far enough for the hill to arrive at a shallow angle instead of stabbing
-        // at its neighbour. Six is the default. CS_WEAVE_LAM still forces an absolute
-        // wavelength in mm for A/B, and CS_WEAVE_LAM_GAPS changes the multiple.
+        // at its neighbour. NINE is the default: re-swept at weld 25 after the drive and export
+        // fixes, 9 beat 6 on gcode p95 turn across the rough shapes (hex 21.3 -> 15.8, cone
+        // 12.8 -> 8.2, pyramid 34.5 -> 19.5 degrees) with sub-floor untouched and, per the
+        // weld-75 sweep above, no bonded cost. Twelve buys only another degree or two and its
+        // bonded fraction is unmeasured, so it stays an experiment. CS_WEAVE_LAM still forces
+        // an absolute wavelength in mm for A/B, and CS_WEAVE_LAM_GAPS changes the multiple.
         static const double lam_mm = [] {
             const char *s = std::getenv("CS_WEAVE_LAM");
             return s ? std::atof(s) : 0.0;
         }();
         static const double lam_gaps = [] {
             const char *s = std::getenv("CS_WEAVE_LAM_GAPS");
-            return s ? std::atof(s) : 6.0;
+            return s ? std::atof(s) : 9.0;
         }();
         double k = std::max(2.0, woven.lobes), off = 0.0;
         double lam = perim(lat.back()) / k;            // the innermost ring sets the wavelength
@@ -4641,6 +4645,26 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         direct.points = { from, to };
         if (merged.front().contains(direct))
             return {};                                    // straight hop stays in material
+        // A hop whose only AIR is over a bore may cross it as a short half-flow bridge
+        // instead of detouring the long way round on the rail - the user's call, made for
+        // the multibore, whose one genuinely distant chain pair sits on opposite sides of
+        // a bore and paid a 7-17 mm rail arc for a 4 mm crossing. Bounded: the hop must
+        // stay inside the OUTER contour (never through the world), and the unsupported
+        // span is capped at 4 mm - what TPU bridges without sagging into a functional
+        // channel. CS_BORE_CHORD=0 reverts to rail-only routing.
+        static const bool bore_chord = [] {
+            const char *s = std::getenv("CS_BORE_CHORD");
+            return s == nullptr || std::atoi(s) != 0;
+        }();
+        if (bore_chord && !merged.front().holes.empty()
+            && ExPolygon(merged.front().contour).contains(direct)) {
+            double air = 0.0;
+            for (const Polygon &h : merged.front().holes)
+                for (const Polyline &pl : intersection_pl(Polylines{ direct }, Polygons{ h }))
+                    air += pl.length();
+            if (air > 0.0 && air <= scale_(4.0))
+                return {};                                // bridge the bore, straight
+        }
         if (rails.empty())
             return {};
         // Pick the rail with the closest approach to both endpoints.
