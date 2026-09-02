@@ -3811,9 +3811,28 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
         add_note(degrade_note, "continuous shell: a single wall loop cannot anchor the lattice - "
                                "the surface stays unwoven and the first level set is the anchor");
     size_t dropped = 0;
+    size_t lone_kept = 0;
     for (Build &b : done) {
         if (b.cc.loops.size() < 2) {
-            ++dropped;                             // a lone ring is not a stack - counted, below
+            // A lone ring is not a stack - but it IS a closed level set around real material:
+            // the walk starts a fresh Build when a family splits (a crescent tip pinching off,
+            // a lobe between bores), and discarding the singleton used to cost the crescent a
+            // WHOLE layer to the marcher ("1 ring could not be stacked"). Keep it as its own
+            // one-loop chain: unwoven (no partner to weave against), stitched to the tour by
+            // the same connectors every extra chain rides. Only a ring with no printable area
+            // at all is still dropped.
+            if (b.cc.loops.size() == 1 && std::abs(b.cc.loops.front().area())
+                    > double(spacing) * double(spacing)) {
+                b.cc.width_fn  = width_fn;
+                b.cc.phase_fn  = phase_fn;
+                b.cc.extent_fn = (n > 0) ? std::make_shared<CsWidthFn>(
+                    [fld](const Point &p) { return float(fld->extent_at(p.cast<double>())); }) : nullptr;
+                b.cc.interpolated = true;
+                ++lone_kept;
+                out.push_back(std::move(b.cc));
+                continue;
+            }
+            ++dropped;                             // nothing printable - counted, below
             continue;
         }
 
@@ -3848,6 +3867,14 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
             }
         }
         out.push_back(std::move(b.cc));
+    }
+    if (lone_kept > 0) {
+        char msg[160];
+        std::snprintf(msg, sizeof(msg),
+            "continuous shell: %zu lone level-set ring%s printed as %s own unwoven loop%s",
+            lone_kept, lone_kept == 1 ? "" : "s", lone_kept == 1 ? "its" : "their",
+            lone_kept == 1 ? "" : "s");
+        add_note(degrade_note, msg);
     }
     if (dropped > 0) {
         // A ring the tree could not stack is lattice material that will not print. Counting
@@ -5057,8 +5084,14 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
             rode_rail |= !arc.points.empty();
         }
         if (rode_rail)
-            add_note(degrade_note, "continuous shell: an inter-chain hand-off left its corridor "
-                                   "and rode the wall rail at half flow");
+            // Rail points are flagged connector, so the interpolated path prints them at the
+            // floor width (THE BAN block below); only the marched path still halves them.
+            add_note(degrade_note,
+                     !chains.empty() && chains.front().interpolated
+                         ? "continuous shell: an inter-chain hand-off left its corridor and rode "
+                           "the wall rail at the floor width"
+                         : "continuous shell: an inter-chain hand-off left its corridor and rode "
+                           "the wall rail at half flow");
         if (subs.empty()) {
             if (reason != nullptr)
                 *reason = "Continuous shell mode could not construct a continuous spiral path.";
@@ -5134,11 +5167,19 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     // divider instrument between "spiralize made it" and "the exporter made it" - the notch
     // hunt needed exactly this cut, with clean rings above it and notched gcode below.
     if (const char *dp = std::getenv("CS_DUMPPATH")) {
-        if (layer_index == size_t(std::atoi(dp))) {
+        if (std::atoi(dp) < 0 || layer_index == size_t(std::atoi(dp))) {   // -1: every layer
             if (FILE *f = std::fopen("cs_path.txt", "a")) {
                 std::fprintf(f, "PATH layer %zu N %zu", layer_index, spiral.points.size());
                 for (const Point &p : spiral.points)
                     std::fprintf(f, " %.4f %.4f", unscale<double>(p.x()), unscale<double>(p.y()));
+                std::fputc(10, f);
+                // Width/flag sidecar, same order: the divider between "the plan authored this
+                // width" and "the exporter made it" - the blip hunt needed exactly this cut.
+                std::fprintf(f, "META layer %zu N %zu", layer_index, spiral.points.size());
+                for (size_t i = 0; i < spiral.points.size(); ++i)
+                    std::fprintf(f, " %.3f%c%c", i < pt_width.size() ? pt_width[i] : -1.f,
+                                 i < connector.size() && connector[i] ? 'C' : '.',
+                                 i < internal.size() && internal[i] ? 'I' : '.');
                 std::fputc(10, f);
                 std::fclose(f);
             }
