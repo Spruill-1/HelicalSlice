@@ -670,7 +670,15 @@ bool CsRingField::level_set(double t, std::vector<CsRing> &out, std::string *fai
         // are dropped. A ring that loses a real share of itself that way is not a ring, and
         // saying so is better than emitting a loop with a chord cut across it.
         const size_t bad = std::count(ok.begin(), ok.end(), char(0));
-        if (bad * 50 > ring.size()) {
+        // 8%, not 2%. The plain crescent fails 3-4% of a ring's vertices at its tips - the
+        // tangency where the field legitimately has no gradient - and the old 2% gate declined
+        // 44 of its 48 layers to the marcher, whose medial doublets and centroid-anchored
+        // junction chords ARE the tangle in the middle of the printed crescent. A ring that
+        // drops a few tip vertices comes out blunted by a chord ACROSS ITS OWN TIP, in
+        // material, a bead or two long; a layer declined to the marcher comes out as
+        // overlapping doublet corridors and 5 mm diagonal streaks. The gate still exists for
+        // rings that genuinely disintegrate.
+        if (bad * 12 > ring.size()) {
             if (fail)
                 *fail = "continuous shell ring field: the level set at t=" + std::to_string(t) +
                         " could not be placed - the field has no gradient over " +

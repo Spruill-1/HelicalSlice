@@ -1049,34 +1049,39 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
                 if (d < bd) { bd = d; best = k; }
             }
             if (best > 0) std::rotate(pts.begin(), pts.begin() + best, pts.end());
-        } else if (ri == 0 && seam_guard && layer_index > 0) {
-            // THE SEAM WALKS, IT NEVER TELEPORTS. anchor_to_angle picks the point nearest an
-            // azimuth, and on a concave or bored ring that map jumps branches: the crescent's
-            // seam moved 6.1 mm across its bore between two layers, and the (honest, full-
-            // flow) layer join beaded the void - the doctrine's one absolute, violated by the
-            // seam machinery itself. The walk is replayed from layer 0, deterministically and
-            // statelessly, so every layer agrees on the path taken: each step accepts the
-            // angle-anchored point only when it lies within three spacings of the walk's
-            // position; a jump beyond that is a branch teleport, and the seam simply stays
-            // put for that layer - a paused precession instead of a chord across a hole.
-            auto idx_at_angle = [&](double target) {
-                size_t best = 0; double bd = std::numeric_limits<double>::max();
-                for (size_t k = 0; k < pts.size(); ++k) {
-                    const Vec2d d = pts[k].cast<double>() - centre;
-                    double a = std::atan2(d.y(), d.x()) - target;
-                    a = std::atan2(std::sin(a), std::cos(a));
-                    if (std::abs(a) < bd) { bd = std::abs(a); best = k; }
-                }
-                return best;
-            };
-            size_t use = idx_at_angle(seam_jitter_rad * seam_jitter_walk(0));
-            for (size_t l = 1; l <= layer_index; ++l) {
-                const double th = double(l) * seam_step_rad
-                                + seam_jitter_rad * seam_jitter_walk(l);
-                const size_t cand = idx_at_angle(th);
-                if ((pts[cand] - pts[use]).cast<double>().norm() <= 3.0 * ring_spacing)
-                    use = cand;
+        } else if (ri == 0 && seam_guard) {
+            // THE SEAM WALKS, IT NEVER TELEPORTS - by ARC LENGTH, not by angle. Anchoring by
+            // azimuth jumps branches on a concave or bored ring (the crescent's seam moved
+            // 6.1 mm across its bore in one step and the honest layer join beaded the void),
+            // and the first repair - replaying an angle walk with a jump gate - was
+            // deterministic within a layer but flipped near-threshold decisions BETWEEN
+            // layers' slightly different rings: the bored crescent's seam pinned on a tip
+            // for three layers and then jumped 20.5 mm when one replay diverged; the plain
+            // crescent's flip-flopped tip-to-tip. Arc position has no branches to jump: the
+            // anchor advances seam_step * r_ref of arc per layer from a geometric reference
+            // vertex, continuous on any topology, and on a taper the step shrinks with the
+            // ring's own radius exactly as the angular intent asks.
+            const size_t n = pts.size();
+            std::vector<double> arc(n + 1, 0.0);
+            for (size_t k = 0; k < n; ++k)
+                arc[k + 1] = arc[k] + (pts[(k + 1) % n] - pts[k]).cast<double>().norm();
+            const double perim = std::max(arc[n], 1.0);
+            // Reference: the vertex nearest the bounding box's (max x, max y) corner - a
+            // geometric extremum, stable under the small ring-to-ring changes of a print.
+            coord_t mx = pts[0].x(), my = pts[0].y();
+            for (const Point &p : pts) { mx = std::max(mx, p.x()); my = std::max(my, p.y()); }
+            size_t ref = 0; double bd = std::numeric_limits<double>::max();
+            for (size_t k = 0; k < n; ++k) {
+                const double d = (pts[k] - Point(mx, my)).cast<double>().squaredNorm();
+                if (d < bd) { bd = d; ref = k; }
             }
+            double s = arc[ref]
+                     + (double(layer_index) * seam_step_rad
+                        + seam_jitter_rad * seam_jitter_walk(layer_index)) * r_ref;
+            s = std::fmod(s, perim);
+            if (s < 0.0) s += perim;
+            size_t use = 0;
+            while (use + 1 < n && arc[use + 1] < s) ++use;
             if (use > 0) std::rotate(pts.begin(), pts.begin() + use, pts.end());
         } else {
             anchor_to_angle(pts, ring_angle[ri]);
@@ -4605,7 +4610,25 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
             }
         }
     }
-    const bool reverse_chains = chains.size() > 1 ? false : reverse_path;
+    // A solid chain's per-layer reversal pairs core-end with core-start so the joins stay
+    // tiny - when the core is a POINT. A medial-closed core is a LINE whose two ends are the
+    // part's tips: reversed layers then START at whichever tip the traversal ends on, the
+    // starts alternate tips, and the layer join flies across the crescent's notch no matter
+    // how smoothly the seam itself walks. Detect the line-core by its isoperimetric ratio
+    // (a circle scores 1, a flattened doublet near 0) and never reverse it; the always-on
+    // closing below brings each such layer home instead.
+    bool line_core = false;
+    // Like the seam guard below: judged per PRINT, not per chain, so an interpolated print's
+    // marched-fallback layer obeys the same never-reverse rule as its neighbours instead of
+    // alternating tips against them.
+    if (chains.size() == 1 && (chains.front().interpolated || interpolated) && !chains.front().has_bore
+        && chains.front().loops.size() >= 2) {
+        const Polygon &core = chains.front().loops.back();
+        const double per = core.length();
+        if (per > 1e-6)
+            line_core = (4.0 * M_PI * std::abs(core.area()) / (per * per)) < 0.3;
+    }
+    const bool reverse_chains = chains.size() > 1 ? false : (line_core ? false : reverse_path);
     // GEOMETRY-ANCHORED HAND-OFFS, interpolated path only (CS_HANDOFF=0 reverts for A/B).
     // Measured on the multibore: five connectors a layer, 39.4 mm/layer at half flow, while
     // 24 of the 28 chain-pair types pass within 0-1.4 mm of each other - because every
@@ -4636,7 +4659,14 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
                                        scarf_len, scarf_floor, chain.plan.get(), cs_layer_h_scaled,
                                        chain.width_fn.get(),
                                        chain.ring_slot.empty() ? nullptr : &chain.ring_slot,
-                                       hint, chain.interpolated);
+                                       // The seam guard follows the PRINT, not the chain: a layer
+                                       // that declined to the marcher inside an interpolated print
+                                       // still sits between arc-anchored neighbours, and giving it
+                                       // the old angle anchor let ring 0's seam jump branches - the
+                                       // crescent's one fallback layer entered 17.6mm across the
+                                       // notch from where its neighbour ended. Option-off prints
+                                       // keep the legacy anchor (the fences hold).
+                                       hint, chain.interpolated || interpolated);
         if (sub.points.size() >= 2 && sub.points.size() == flags.size() && sub.points.size() == zoff.size()
             && sub.points.size() == widths.size())
             // A chain carries the Z-wave only when its interior was actually thinned AND its
@@ -4768,6 +4798,27 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
             if (da < 0.0 || db < 0.0) continue;
             const double sum = da + db;
             if (sum < best_sum) { best_sum = sum; best_rail = r; ia = ka; ib = kb; }
+        }
+        if (best_sum >= 1e300) {
+            // No rail offered a CONTAINED approach within the probe budget. Returning "straight"
+            // here was the router's last give-up path, and it minted a 20.5 mm extruding chord
+            // across the crescent's concave notch - open air - on exactly the layers where the
+            // contained probe came up dry. A rail arc with an imperfect approach still runs
+            // through material for almost all of its length; a straight uncontained hop does
+            // not. So fall back to the nearest-vertex approaches rather than to a chord.
+            for (size_t r = 0; r < rails.size(); ++r) {
+                const Points &pts = rails[r].points;
+                if (pts.size() < 3) continue;
+                size_t ka = 0, kb = 0; double da = 1e300, db = 1e300;
+                for (size_t k = 0; k < pts.size(); ++k) {
+                    const double d1 = (pts[k] - from).cast<double>().squaredNorm();
+                    const double d2 = (pts[k] - to).cast<double>().squaredNorm();
+                    if (d1 < da) { da = d1; ka = k; }
+                    if (d2 < db) { db = d2; kb = k; }
+                }
+                const double sum = std::sqrt(da) + std::sqrt(db);
+                if (sum < best_sum) { best_sum = sum; best_rail = r; ia = ka; ib = kb; }
+            }
         }
         if (best_sum >= 1e300 || ia == ib)
             return {};
@@ -5019,15 +5070,34 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     // mid-limb, so its layer ended ~11 mm from its start and - travels stripped - the
     // inter-layer join extruded 12.6 mm straight across the concave notch, every layer.
     // Marched single chains keep the old gate: their fences are byte-for-byte.
-    // ANNULAR singles only: a solid chain ends at its buried core by design, and its layer
-    // joins are handled by the per-layer reversal parity - closing IT drew a floor-width
-    // bead from the core to the outer seam straight through the lattice, every layer, on
-    // every bore-less shape (the orange diagonals the user caught at once).
-    const bool close_single = subs.size() == 1 && chains.size() == 1 && chains.front().interpolated
-                           && chains.front().has_bore
-                           && spiral.points.size() >= 2
-                           && (spiral.points.back() - spiral.points.front()).cast<double>().norm()
-                                  > 2.0 * ring_spacing;
+    // Close a single interpolated chain when its ends are far apart AND leaving them apart
+    // would cost something: always for an annulus (its layer join must land at the seam),
+    // and for a solid chain only when the straight path home CROSSES AIR - the crescent's
+    // medial "core" is a line whose two endpoints are the part's tips, so the parity join
+    // flew 22 mm tip-to-tip across the concave notch the moment the gradient gate let the
+    // interpolated lane take those layers. A compact solid core (the cone, the hexagon)
+    // stays unclosed: its join is short by parity, and closing it anyway drew the
+    // floor-width core-to-seam diagonal the user caught at once.
+    const bool ends_far = spiral.points.size() >= 2
+                       && (spiral.points.back() - spiral.points.front()).cast<double>().norm()
+                              > 2.0 * ring_spacing;
+    bool join_flies = false;
+    if (ends_far && !chains.empty() && !chains.front().has_bore && !merged.empty()) {
+        Polyline home;
+        home.points = { spiral.points.back(), spiral.points.front() };
+        join_flies = !merged.front().contains(home);
+    }
+    // join_flies closes ANY single chain, marched included: the one flight left in the whole
+    // suite was the exit of the crescent's single marched-fallback layer, which had none of
+    // the interpolated closing machinery - and a layer that ends where the next layer cannot
+    // be reached through material is the doctrine's business regardless of which generator
+    // built it. The signature fences are the referee for the marched side: their fixtures
+    // never leave a layer's ends apart across air, so the bytes stand.
+    const bool close_single = subs.size() == 1 && chains.size() == 1
+                           && ends_far
+                           && (join_flies
+                               || (chains.front().interpolated
+                                   && (chains.front().has_bore || line_core)));
     if ((subs.size() > 1 || close_single) && spiral.points.size() >= 2) {
         // Close the stitched tour back to its start. Single-chain layers keep their
         // inter-LAYER join short via reverse_path parity, but a stitched tour ends
