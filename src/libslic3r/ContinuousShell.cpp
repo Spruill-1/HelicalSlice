@@ -5112,13 +5112,26 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
                 if (at_seam[i]) fmul[i] *= coast_mult;
         }
     }
-    // Inter-chain connectors ride along already-printed buried beads (the rail one
-    // bead inside the wall), so they deposit at half flow: enough to stay fused and
-    // continuous, without double-filling the wall they travel over.
+    // THE BAN: every move lays a bead in the printable range. Half of nominal flow reads
+    // 0.198 mm effective - under the campaign's own faux-travel line - and once the
+    // single-chain tour started closing, that halving was minting banned moves on every
+    // layer of every shape. On the interpolated path a connector is therefore never
+    // thinned below range: a short gap hop already prints as a full-width weld bead, and
+    // everything else - rail rides, bore bridges, long contained hops, the closing leg -
+    // is emitted AT THE FLOOR WIDTH, the narrowest honest bead the nozzle extrudes.
+    // The marched path keeps its half-flow rail convention: its fences are byte-for-byte.
     if (connector.size() == fmul.size()) {
-        constexpr double connector_mult = 0.5;
-        for (size_t i = 0; i < fmul.size(); ++i)
-            if (connector[i]) fmul[i] *= connector_mult;
+        const bool interp_layer = !chains.empty() && chains.front().interpolated;
+        if (interp_layer) {
+            const float conn_w = float(std::max(0.30, 0.85 * flow.nozzle_diameter()));
+            if (pt_width.size() == fmul.size())
+                for (size_t i = 0; i < fmul.size(); ++i)
+                    if (connector[i]) pt_width[i] = conn_w;
+        } else {
+            constexpr double connector_mult = 0.5;
+            for (size_t i = 0; i < fmul.size(); ++i)
+                if (connector[i]) fmul[i] *= connector_mult;
+        }
     }
 
     // Emit maximal runs of equal (flow multiplier, bead width) as sub-paths (keyed on the

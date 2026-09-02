@@ -195,12 +195,19 @@ std::string SpiralVase::process_layer(const std::string &gcode, bool last_layer)
     // zero radius no match can ever satisfy dist < radius, so skip the build entirely.
     if (smooth_spiral && previous_layer != NULL && previous_layer->size() >= 2 && max_xy_dist_for_smoothing > EPSILON)
         prev_grid.build(previous_layer, std::max(max_xy_dist_for_smoothing, 1.f));
-    m_reader.parse_buffer(gcode, [&new_gcode, &z, total_layer_length, layer_height, transition_in, &len, &current_layer, &previous_layer, &transition_gcode, transition_out, smooth_spiral, &max_xy_dist_for_smoothing, &last_point, starting_flowrate, finishing_flowrate, min_segment_length, continuous_shell_mode, &prev_grid]
+    m_reader.parse_buffer(gcode, [this, &new_gcode, &z, total_layer_length, layer_height, transition_in, &len, &current_layer, &previous_layer, &transition_gcode, transition_out, smooth_spiral, &max_xy_dist_for_smoothing, &last_point, starting_flowrate, finishing_flowrate, min_segment_length, continuous_shell_mode, &prev_grid]
         (GCodeReader &reader, GCodeReader::GCodeLine line) {
         if (continuous_shell_mode &&
             (line.cmd_is("G0") || line.cmd_is("G1") || line.cmd_is("G2") || line.cmd_is("G3")) &&
             !line.extruding(reader) &&
-            (line.has(X) || line.has(Y) || line.has(Z) || line.has(E))) {
+            (line.has(X) || line.has(Y) || line.has(Z) || line.has(E)) &&
+            // ...except the approach to the FIRST extrusion of the FIRST spiral layer. There
+            // is no shell yet to be continuous with: stripping that travel made the print's
+            // opening move extrude one step's E over the whole approach from the preamble
+            // position - a 9-20 mm segment at an effective width of 0.001-0.03, the last
+            // truly-zero moves the ban audit found. One real travel onto the bed is the
+            // normal way to arrive; continuity begins where the shell does.
+            !(previous_layer == NULL && len == 0.f)) {
             // A continuous shell cannot contain a travel, Z-hop, wipe, or retraction
             // between adjacent contour segments - drop them. Bare feedrate setters
             // ("G1 F...", no axis words) MUST pass through: they carry all in-layer
@@ -222,6 +229,13 @@ std::string SpiralVase::process_layer(const std::string &gcode, bool last_layer)
                 if (line.has_x() || line.has_y()) { // Sometimes lines have X/Y but the move is to the last position
                     if (dist_XY > 0 && line.extruding(reader)) { // Exclude wipe and retract
                         const bool first_continuous_segment = continuous_shell_mode && len == 0.f;
+                        // Nominal flow tracker for the layer-join honesty check. Joins and
+                        // transition-scaled lines are excluded so one dishonest segment cannot
+                        // teach the tracker its own dishonesty.
+                        if (!first_continuous_segment && !transition_in && !transition_out
+                            && dist_XY > EPSILON && line.e() > 0.f)
+                            m_e_per_mm = m_e_per_mm <= 0.f ? line.e() / dist_XY
+                                                           : 0.9f * m_e_per_mm + 0.1f * line.e() / dist_XY;
                         len += dist_XY;
                         float factor = len / total_layer_length;
                         if (transition_in){
@@ -249,14 +263,52 @@ std::string SpiralVase::process_layer(const std::string &gcode, bool last_layer)
                             // Now we also need to try to interpolate X and Y
                             SpiralVase::SpiralPoint p(line.x(), line.y()); // Get current x/y coordinates
                             current_layer->push_back(p);       // Store that point for later use on the next layer
-                            if (previous_layer != NULL) {
+                            if (continuous_shell_mode && first_continuous_segment && previous_layer == NULL) {
+                                // The FIRST processed layer's entry. The layer below it never
+                                // went through this filter, so the reader has no idea where
+                                // the head physically is - last_point is a zero-initialized
+                                // lie, and scaling by it would print a 240 mm blob. This is
+                                // the boundary where continuity BEGINS, the same boundary the
+                                // approach travel below layer 0 crosses: emit the entry as a
+                                // real travel, not as one resample step's E smeared over the
+                                // gap (9-12 mm at an effective width of 0.004 on every shape).
+                                line.set(E, 0.f, 5 /*decimal_digits*/);
+                                last_point = p;
+                            } else if (continuous_shell_mode && first_continuous_segment && previous_layer != NULL) {
+                                // THE LAYER JOIN, MADE HONEST. The upstream writer suppresses
+                                // the approach travel, so this segment arrives with its REAL
+                                // geometry (the whole gap from wherever the head is, wipe
+                                // included) while its E was authored for one resample step -
+                                // 9-13 mm at an effective width of 0.004, the ban's last
+                                // mid-air class, surviving every earlier fix because no
+                                // stripped travel exists in the stream to compare against.
+                                // The tell is the E-per-mm: a fraction of what every
+                                // surrounding bead carries. Re-issue the E at the running
+                                // nominal flow for the segment's true length; the old special
+                                // case (retarget to last_point, measure ~0, CLEAR the line)
+                                // just handed the gap to the next segment unpaid.
+                                // The join line is honest for its PLANNED geometry - the input
+                                // stream still holds the approach travel, the reader tracked
+                                // it, dist_XY is the tiny planned step. It is the STRIP that
+                                // creates the smear: the printer's head stays at the previous
+                                // layer's end, so the segment physically spans the whole gap.
+                                // Scale the E to that physical length, from the one position
+                                // this filter knows to be true - last_point, the previous
+                                // layer's final emitted target.
+                                const float actual = SpiralVaseHelpers::distance(last_point, p);
+                                if (std::getenv("CS_JOINDBG") != nullptr)
+                                    fprintf(stderr, "CS_JOINDBG join: e=%.5f dist=%.3f actual=%.3f last=(%.2f,%.2f) p=(%.2f,%.2f)\n",
+                                            line.e(), dist_XY, actual, last_point.x, last_point.y, p.x, p.y);
+                                if (dist_XY > EPSILON && actual > dist_XY + float(EPSILON))
+                                    line.set(E, line.e() * actual / dist_XY, 5 /*decimal_digits*/);
+                                last_point = p;
+                            } else if (previous_layer != NULL) {
                                 bool        found    = false;
                                 float       dist     = 0;
                                 SpiralVase::SpiralPoint nearestp = prev_grid.nearest(p, found, dist);
                                 if (found && dist < max_xy_dist_for_smoothing) {
                                     // Interpolate between the point on this layer and the point on the previous layer
-                                    SpiralVase::SpiralPoint target = first_continuous_segment ?
-                                        last_point :
+                                    SpiralVase::SpiralPoint target =
                                         SpiralVaseHelpers::add(SpiralVaseHelpers::scale(nearestp, 1 - factor), SpiralVaseHelpers::scale(p, factor));
                                     // Continuous shell: the nearest-point pairing has a whole
                                     // LATTICE to choose from, and where a weaving ring passes a
@@ -270,9 +322,9 @@ std::string SpiralVase::process_layer(const std::string &gcode, bool last_layer)
                                     // seam blending keep working), the correction saturates at
                                     // about a fifth of a bead, and the weave's per-layer phase
                                     // precession survives the export instead of being blended
-                                    // away. The layer-join first segment is exempt - reaching
-                                    // the previous layer's end is its whole job.
-                                    if (continuous_shell_mode && !first_continuous_segment) {
+                                    // away. (The layer-join first segment never reaches here
+                                    // in continuous-shell mode - it has its own branch above.)
+                                    if (continuous_shell_mode) {
                                         constexpr float pull_cap = 0.1f; // mm
                                         const float px = target.x - p.x, py = target.y - p.y;
                                         const float plen = std::sqrt(px * px + py * py);

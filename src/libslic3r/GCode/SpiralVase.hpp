@@ -41,6 +41,12 @@ private:
     const PrintConfig  &m_config;
     GCodeReader 		m_reader;
     float               m_max_xy_smoothing = 0.f;
+    // Running nominal extrusion per mm (EMA over emitted extruding moves). The continuous-shell
+    // layer join arrives with its REAL geometry but an E authored for one resample step - the
+    // upstream writer suppresses the approach travel before this filter ever sees it - so the
+    // only way to recognize the dishonesty is that its E-per-mm is a fraction of what every
+    // surrounding bead carries.
+    float               m_e_per_mm = 0.f;
 
     bool 				m_enabled = false;
     // First spiral vase layer. Layer height has to be ramped up from zero to the target layer height.
