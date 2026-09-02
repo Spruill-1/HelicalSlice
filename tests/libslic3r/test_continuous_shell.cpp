@@ -2890,15 +2890,16 @@ TEST_CASE("Radial serpentine crosses the wall on every topology the marching pro
         REQUIRE(outside == 0);
     }
 
-    SECTION("two bores: refused by the subsystem, and the serpentine does not change that") {
-        // Recorded because it is the obvious question to ask of a wall generator, and the answer
-        // is not the one the name suggests. A section with two bores has THREE faces, so it is
-        // not a linear stack of nested rings, and continuous shell declines it outright - the
-        // marching gives up when a band carries more than one hole. That predates the serpentine
-        // by the whole project. What is asserted here is only that the serpentine does not make
-        // it worse or paper over it: the section is refused identically either way, with the same
-        // reason. Supporting it needs the Voronoi-cell partition that splits such a section into
-        // one-bore cells, each of which IS a linear stack; that is separate work.
+    SECTION("two bores: now built via the marcher's own Voronoi-cell partition") {
+        // This section once recorded a LIMITATION: a two-bore section has three faces, is not a
+        // linear stack of nested rings, and continuous shell declined it outright because the
+        // marching gave up when a band carried more than one hole. That is now fixed at the
+        // source: when march_bands meets a multi-hole band it partitions it into one cell per
+        // bore (the Voronoi cells of the bore centroids, clipped to the band) and marches each,
+        // recursing until every cell holds at most one bore. So the section BUILDS - which is
+        // what a solid cap over a multibore needs, and what let F7_multibore finally take a lid.
+        // The serpentine still does not need to know cells exist: it sees each single-bore cell
+        // as the linear stack it already handles, so on/off build identically.
         Polygon outer = ring_poly(14.0, 0.0, 0.0, 300, true);
         Polygon h1 = ring_poly(3.5, -6.0, 0.0, 160, false);
         Polygon h2 = ring_poly(3.5,  6.0, 0.0, 160, false);
@@ -2921,9 +2922,29 @@ TEST_CASE("Radial serpentine crosses the wall on every topology the marching pro
         const auto on  = attempt(true);
         INFO("serpentine off: built=" << off.first << " reason=" << off.second);
         INFO("serpentine on:  built=" << on.first  << " reason=" << on.second);
-        REQUIRE(off.first == on.first);
+        REQUIRE(off.first == on.first);      // the serpentine changes nothing about the outcome
         REQUIRE(off.second == on.second);
-        REQUIRE_FALSE(on.first);          // the pre-existing refusal, unchanged
+        REQUIRE(on.first);                   // the partition builds it where the old marcher refused
+
+        // Doctrine: the partition cuts the material, never the void. No extruded point may land
+        // inside either bore, and every point stays within the section.
+        PrintRegionConfig cfg;
+        cfg.continuous_shell_infill_density.value = 25;
+        ExtrusionEntityCollection e;
+        const std::vector<ExtrusionPath *> paths = cs_paths(surfaces, flow, cfg, e);
+        REQUIRE(! paths.empty());
+        ExPolygon bore1 = ExPolygon(h1); bore1.contour.make_counter_clockwise();
+        ExPolygon bore2 = ExPolygon(h2); bore2.contour.make_counter_clockwise();
+        size_t in_bore = 0, outside = 0;
+        for (const ExtrusionPath *p : paths)
+            for (const Point3 &q : p->polyline.points) {
+                const Point pt(q.x(), q.y());
+                if (bore1.contour.contains(pt) || bore2.contour.contains(pt)) ++in_bore;
+                if (! two.front().contains(pt)) ++outside;
+            }
+        INFO(in_bore << " points inside a bore, " << outside << " outside the section");
+        REQUIRE(in_bore == 0);
+        REQUIRE(outside == 0);
     }
 
     SECTION("two bores, PARTITIONED into cells: the serpentine needs no knowledge of cells") {

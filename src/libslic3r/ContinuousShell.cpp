@@ -1584,6 +1584,10 @@ inline void add_note(std::string *note, const std::string &msg)
     *note += msg;
 }
 
+// Defined below (near the interpolated re-section machinery); declared here so march_bands can
+// partition a multi-bore band into one single-bore cell per bore.
+ExPolygons cs_voronoi_cells(const ExPolygon &region, const Points &sites);
+
 bool march_bands(ExPolygon band, coord_t spacing, bool has_hole,
                  std::vector<std::vector<ExPolygon>> &chains, std::vector<char> &vanished,
                  std::vector<char> &outer_pinch, size_t &point_count, bool &multi_hole,
@@ -1613,12 +1617,38 @@ bool march_bands(ExPolygon band, coord_t spacing, bool has_hole,
                 return march_bands(band, spacing, false, chains, vanished, outer_pinch,
                                    point_count, multi_hole, /*outer_real=*/false);
             }
-            // Bore split into several holes: not a topology we model. This ABANDONS the material
-            // the chain would have covered from here inward, so it must be said out loud - a
-            // silent version of exactly this cost an eccentric bore 31% of its material with
-            // nothing in the log.
-            multi_hole = true;
-            break;
+            // A band carrying several bores is not a single annular topology, and spiralize_rings
+            // traces a nested stack of ONE outer and ONE bore per level - it cannot path a level
+            // that is one outer loop with N holes. Rather than abandon the material inward of here
+            // (the silent version of this once cost an eccentric bore 31% of its material),
+            // PARTITION the band into one cell per bore - the Voronoi cells of the bore centroids,
+            // clipped to the band - so every cell carries at most one bore, and march each. The
+            // cut between two cells becomes a solid bead, which is exactly what a SOLID cap over a
+            // multibore wants (this is the one path a multi-bore band reaches: the sparse lattice
+            // is the interpolated field's job and declines to here only when solid). A cell that
+            // still holds two close bores re-enters here and splits again; the point/chain caps
+            // bound the recursion. If the partition cannot be formed, keep the old loud note.
+            {
+                Points sites;
+                sites.reserve(band.holes.size());
+                for (const Polygon &h : band.holes)
+                    sites.push_back(h.centroid());
+                const ExPolygons cells = cs_voronoi_cells(band, sites);
+                if (cells.empty()) {
+                    multi_hole = true;
+                    break;
+                }
+                if (! chain.empty()) {
+                    chains.push_back(std::move(chain));
+                    vanished.push_back(0);
+                    outer_pinch.push_back(outer_real ? 0 : 1);
+                }
+                for (const ExPolygon &cell : cells)
+                    if (! march_bands(cell, spacing, ! cell.holes.empty(), chains, vanished,
+                                      outer_pinch, point_count, multi_hole, /*outer_real=*/false))
+                        return false;
+                return true;
+            }
         }
         // A solid region that grows a hole is a topology we do not model.
         if (!has_hole && !band.holes.empty())
@@ -4529,6 +4559,11 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
                                                             adaptive, layer_height, spiral_wanted, junction_ramp, cs_seam_theta,
                                                             &plan_fail, degrade_note, interpolated);
     if (chains.empty()) {
+        if (std::getenv("CS_FAILDBG"))
+            std::fprintf(stderr, "CS_FAILDBG L%zu force_solid=%d interp=%d holes=%zu woven.en=%d stride=%d plan_fail='%s' notes='%s'\n",
+                         layer_index, int(force_solid), int(interpolated), merged.front().holes.size(),
+                         int(woven.enabled), int(woven.stride), plan_fail.c_str(),
+                         degrade_note ? degrade_note->c_str() : "");
         if (reason != nullptr)
             *reason = !plan_fail.empty() ? plan_fail : "Continuous shell mode could not construct a contour spiral.";
         return false;
@@ -4669,11 +4704,15 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         const char *s = std::getenv("CS_HANDOFF");
         return s == nullptr || std::atoi(s) != 0;
     }();
-    // Gated on what actually built THIS layer's chains, not on the option: an interpolated
-    // layer that declined to the marcher must keep the marcher's stitcher.
-    const bool geo_tour = handoff_opt && chains.size() > 1
-                       && std::all_of(chains.begin(), chains.end(),
-                                      [](const ContourChain &c) { return c.interpolated; });
+    // The ordered, entry-hinted tour is what keeps inter-chain hops SHORT and LOCAL, so
+    // route_connector's contained/short-hop path handles them instead of falling back to a
+    // straight chord. The greedy stitcher it replaces picks the nearest end blind to the tour,
+    // and on a multibore that meant hopping between cells on opposite sides of the part - its
+    // connectors chorded 7-25 mm straight across a bore in the SOLID CAP (the doctrine's one
+    // absolute, violated). So any multi-chain layer takes the geo tour, marched cells included;
+    // its cand/exit model reads loops and has_bore, which a marched chain carries too. Was
+    // interpolated-only, which left the newly-partitioned multibore cap on the greedy stitcher.
+    const bool geo_tour = handoff_opt && chains.size() > 1;
     auto spiralize_one = [&](const ContourChain &chain, bool rev, const Point *hint) -> Sub {
         Sub s;
         std::vector<char> flags;
@@ -5289,10 +5328,17 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     // thinned below range: a short gap hop already prints as a full-width weld bead, and
     // everything else - rail rides, bore bridges, long contained hops, the closing leg -
     // is emitted AT THE FLOOR WIDTH, the narrowest honest bead the nozzle extrudes.
-    // The marched path keeps its half-flow rail convention: its fences are byte-for-byte.
+    // A single-chain marched layer keeps its half-flow rail convention - that is what the
+    // signature fences pin, and every fence fixture is one connected region (one chain). But a
+    // marched layer with SEVERAL chains stitches them with inter-chain connectors, and half flow
+    // there mints the same faux-travels the ban exists to forbid: the multibore SOLID CAP, built
+    // by the Voronoi-cell partition, laid ~345 mm of sub-0.20 mm bead per part that way. So any
+    // MULTI-chain layer - interpolated, or marched-and-partitioned - emits its connectors at the
+    // floor width instead. The fences never split into several chains, so they stay byte-for-byte.
     if (connector.size() == fmul.size()) {
-        const bool interp_layer = !chains.empty() && chains.front().interpolated;
-        if (interp_layer) {
+        const bool floor_connectors =
+            (!chains.empty() && chains.front().interpolated) || chains.size() > 1;
+        if (floor_connectors) {
             const float conn_w = float(std::max(0.30, 0.85 * flow.nozzle_diameter()));
             if (pt_width.size() == fmul.size())
                 for (size_t i = 0; i < fmul.size(); ++i)
