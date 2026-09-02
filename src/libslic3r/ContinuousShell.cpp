@@ -887,7 +887,13 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
                          // stitched tour. A POINT, not an angle, so the azimuth is computed
                          // about the same centre the anchors use and no frame mismatch can
                          // creep in between caller and cascade.
-                         const Point *entry_hint = nullptr)
+                         const Point *entry_hint = nullptr,
+                         // Interpolated chains only: guard ring 0's seam against TELEPORTS.
+                         // On a concave or bored section the angle-to-point map jumps
+                         // branches, and one 16-degree seam step moved the crescent's anchor
+                         // 6 mm straight across its bore - the layer join then beaded the
+                         // void. See the replay walk at the anchor site.
+                         bool seam_guard = false)
 {
     Polyline spiral;
     if (rings_in.empty())
@@ -1043,6 +1049,35 @@ Polyline spiralize_rings(const Polygons &rings_in, bool reverse, double seam_ste
                 if (d < bd) { bd = d; best = k; }
             }
             if (best > 0) std::rotate(pts.begin(), pts.begin() + best, pts.end());
+        } else if (ri == 0 && seam_guard && layer_index > 0) {
+            // THE SEAM WALKS, IT NEVER TELEPORTS. anchor_to_angle picks the point nearest an
+            // azimuth, and on a concave or bored ring that map jumps branches: the crescent's
+            // seam moved 6.1 mm across its bore between two layers, and the (honest, full-
+            // flow) layer join beaded the void - the doctrine's one absolute, violated by the
+            // seam machinery itself. The walk is replayed from layer 0, deterministically and
+            // statelessly, so every layer agrees on the path taken: each step accepts the
+            // angle-anchored point only when it lies within three spacings of the walk's
+            // position; a jump beyond that is a branch teleport, and the seam simply stays
+            // put for that layer - a paused precession instead of a chord across a hole.
+            auto idx_at_angle = [&](double target) {
+                size_t best = 0; double bd = std::numeric_limits<double>::max();
+                for (size_t k = 0; k < pts.size(); ++k) {
+                    const Vec2d d = pts[k].cast<double>() - centre;
+                    double a = std::atan2(d.y(), d.x()) - target;
+                    a = std::atan2(std::sin(a), std::cos(a));
+                    if (std::abs(a) < bd) { bd = std::abs(a); best = k; }
+                }
+                return best;
+            };
+            size_t use = idx_at_angle(seam_jitter_rad * seam_jitter_walk(0));
+            for (size_t l = 1; l <= layer_index; ++l) {
+                const double th = double(l) * seam_step_rad
+                                + seam_jitter_rad * seam_jitter_walk(l);
+                const size_t cand = idx_at_angle(th);
+                if ((pts[cand] - pts[use]).cast<double>().norm() <= 3.0 * ring_spacing)
+                    use = cand;
+            }
+            if (use > 0) std::rotate(pts.begin(), pts.begin() + use, pts.end());
         } else {
             anchor_to_angle(pts, ring_angle[ri]);
         }
@@ -4601,7 +4636,7 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
                                        scarf_len, scarf_floor, chain.plan.get(), cs_layer_h_scaled,
                                        chain.width_fn.get(),
                                        chain.ring_slot.empty() ? nullptr : &chain.ring_slot,
-                                       hint);
+                                       hint, chain.interpolated);
         if (sub.points.size() >= 2 && sub.points.size() == flags.size() && sub.points.size() == zoff.size()
             && sub.points.size() == widths.size())
             // A chain carries the Z-wave only when its interior was actually thinned AND its
@@ -4677,16 +4712,15 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         direct.points = { from, to };
         if (merged.front().contains(direct))
             return {};                                    // straight hop stays in material
-        // A hop whose only AIR is over a bore may cross it as a short half-flow bridge
-        // instead of detouring the long way round on the rail - the user's call, made for
-        // the multibore, whose one genuinely distant chain pair sits on opposite sides of
-        // a bore and paid a 7-17 mm rail arc for a 4 mm crossing. Bounded: the hop must
-        // stay inside the OUTER contour (never through the world), and the unsupported
-        // span is capped at 4 mm - what TPU bridges without sagging into a functional
-        // channel. CS_BORE_CHORD=0 reverts to rail-only routing.
+        // RETIRED TO OPT-IN, and the doctrine that retired it: no movement crosses a bore
+        // void, EVER. The first reading of the user's "split across a bore" built this -
+        // a short bridge over the void - and they corrected it on sight: the suggestion
+        // was about splitting LOGICAL cells, whose edge at a bore is the bore's own wall,
+        // never a printed line through the channel. CS_BORE_CHORD=1 re-enables it for
+        // experiments only; the rail is the routing that respects the void.
         static const bool bore_chord = [] {
             const char *s = std::getenv("CS_BORE_CHORD");
-            return s == nullptr || std::atoi(s) != 0;
+            return s != nullptr && std::atoi(s) != 0;
         }();
         if (bore_chord && !merged.front().holes.empty()
             && ExPolygon(merged.front().contour).contains(direct)) {
@@ -4699,20 +4733,40 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
         }
         if (rails.empty())
             return {};
-        // Pick the rail with the closest approach to both endpoints.
+        // Pick the rail with the closest approach to both endpoints - by CONTAINED chords.
+        // The globally nearest rail vertex is worthless if the chord to it crosses a bore:
+        // the direct hop was containment-checked but the two rail approaches never were, and
+        // in the multibore's reflow zone the landings chorded 7-10 mm straight through a
+        // bore at full connector flow - the doctrine's one absolute (no movement crosses a
+        // bore void, EVER) violated by the router built to uphold it. Each endpoint now
+        // takes the nearest rail vertex whose approach chord stays in material.
+        auto nearest_contained = [&](const Points &pts, const Point &p, size_t &k_out) -> double {
+            std::vector<std::pair<double, size_t>> byd;
+            byd.reserve(pts.size());
+            for (size_t k = 0; k < pts.size(); ++k)
+                byd.emplace_back((pts[k] - p).cast<double>().squaredNorm(), k);
+            std::sort(byd.begin(), byd.end());
+            const size_t probe = std::min<size_t>(byd.size(), 64);
+            for (size_t q = 0; q < probe; ++q) {
+                Polyline chord;
+                chord.points = { p, pts[byd[q].second] };
+                if (merged.front().contains(chord)) {
+                    k_out = byd[q].second;
+                    return std::sqrt(byd[q].first);
+                }
+            }
+            return -1.0;
+        };
         size_t best_rail = 0, ia = 0, ib = 0;
         double best_sum = std::numeric_limits<double>::max();
         for (size_t r = 0; r < rails.size(); ++r) {
             const Points &pts = rails[r].points;
             if (pts.size() < 3) continue;
-            size_t ka = 0, kb = 0; double da = 1e300, db = 1e300;
-            for (size_t k = 0; k < pts.size(); ++k) {
-                const double d1 = (pts[k] - from).cast<double>().squaredNorm();
-                const double d2 = (pts[k] - to).cast<double>().squaredNorm();
-                if (d1 < da) { da = d1; ka = k; }
-                if (d2 < db) { db = d2; kb = k; }
-            }
-            const double sum = std::sqrt(da) + std::sqrt(db);
+            size_t ka = 0, kb = 0;
+            const double da = nearest_contained(pts, from, ka);
+            const double db = nearest_contained(pts, to, kb);
+            if (da < 0.0 || db < 0.0) continue;
+            const double sum = da + db;
             if (sum < best_sum) { best_sum = sum; best_rail = r; ia = ka; ib = kb; }
         }
         if (best_sum >= 1e300 || ia == ib)
@@ -4965,7 +5019,12 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
     // mid-limb, so its layer ended ~11 mm from its start and - travels stripped - the
     // inter-layer join extruded 12.6 mm straight across the concave notch, every layer.
     // Marched single chains keep the old gate: their fences are byte-for-byte.
+    // ANNULAR singles only: a solid chain ends at its buried core by design, and its layer
+    // joins are handled by the per-layer reversal parity - closing IT drew a floor-width
+    // bead from the core to the outer seam straight through the lattice, every layer, on
+    // every bore-less shape (the orange diagonals the user caught at once).
     const bool close_single = subs.size() == 1 && chains.size() == 1 && chains.front().interpolated
+                           && chains.front().has_bore
                            && spiral.points.size() >= 2
                            && (spiral.points.back() - spiral.points.front()).cast<double>().norm()
                                   > 2.0 * ring_spacing;
