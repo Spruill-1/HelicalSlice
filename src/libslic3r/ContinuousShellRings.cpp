@@ -9,7 +9,26 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
+
+// The field build's inner loops run SERIALLY. They are nested inside the layer loop, which is
+// already TBB-parallel and, for any real part, saturates the cores on its own - so fanning out
+// again here bought almost nothing. It also exposed a non-deterministic failure: a multibore
+// section declined the interpolated field on 16-21 RANDOM layers (a different set each run) once
+// top-shell processing added enough concurrent geometry work to perturb scheduling; serializing
+// these three loops made it deterministic (the SAME field every run) and the random declines
+// vanished. The raster and refine write disjoint cells and the distancers are re-entrant, so the
+// serial and parallel results are identical WHEN the parallel run is not corrupted - this just
+// removes the window in which it can be. CS_FIELD_PARALLEL restores the nested fan-out for
+// benchmarking only.
+namespace {
+inline bool cs_field_parallel() { static const bool s = std::getenv("CS_FIELD_PARALLEL") != nullptr; return s; }
+template<class F> inline void cs_pfor(size_t n, F &&f) {
+    if (cs_field_parallel()) tbb::parallel_for(tbb::blocked_range<size_t>(0, n), std::forward<F>(f));
+    else f(tbb::blocked_range<size_t>(0, n));
+}
+}
 
 // The field raster, registered with the in-tree marching-squares implementation. Only the
 // topology of the level set comes from the raster; every vertex it produces is then Newton-
@@ -229,7 +248,7 @@ bool CsRingField::build(const ExPolygon &interior, double grid_pitch_mm, std::st
         return (std::upper_bound(xs.begin(), xs.end(), x) - xs.begin()) % 2 == 1;
     };
 
-    tbb::parallel_for(tbb::blocked_range<size_t>(0, m_rows), [&](const tbb::blocked_range<size_t> &range) {
+    cs_pfor(m_rows, [&](const tbb::blocked_range<size_t> &range) {
         std::vector<double> xs_all, xs_out;
         for (size_t r = range.begin(); r < range.end(); ++r) {
             const double y = m_origin.y() + double(r) * pitch_s;
@@ -658,8 +677,7 @@ bool CsRingField::level_set(double t, std::vector<CsRing> &out, std::string *fai
             pos[i] = Vec2d(m_origin.x() + double(ring[i].c) * m_pitch,
                            m_origin.y() + double(ring[i].r) * m_pitch);
         std::vector<char> ok(ring.size(), 0);
-        tbb::parallel_for(tbb::blocked_range<size_t>(0, pos.size()),
-                          [&](const tbb::blocked_range<size_t> &range) {
+        cs_pfor(pos.size(), [&](const tbb::blocked_range<size_t> &range) {
             for (size_t i = range.begin(); i < range.end(); ++i)
                 ok[i] = this->refine(pos[i], t, ext[i], lab[i]) ? 1 : 0;
         });
@@ -703,8 +721,7 @@ bool CsRingField::level_set(double t, std::vector<CsRing> &out, std::string *fai
                 const Vec2d &b = pos[(i + 1) % pos.size()];
                 sm[i] = 0.25 * a + 0.5 * pos[i] + 0.25 * b;
             }
-            tbb::parallel_for(tbb::blocked_range<size_t>(0, sm.size()),
-                              [&](const tbb::blocked_range<size_t> &range) {
+            cs_pfor(sm.size(), [&](const tbb::blocked_range<size_t> &range) {
                 for (size_t i = range.begin(); i < range.end(); ++i)
                     if (ok[i])
                         ok[i] = this->refine(sm[i], t, ext[i], lab[i]) ? 1 : 0;
