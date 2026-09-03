@@ -4451,6 +4451,219 @@ bool build_serpentine_cap(const ExPolygon &region, const Flow &flow, double laye
     return true;
 }
 
+// Walk the region's own boundary from `from` to `to`, staying in material. This is how a
+// serpentine over a HOLED or CONCAVE cap stays one continuous bead: where a bore or a notch
+// splits a scan row, the two runs are joined by riding the boundary between them - the bore's
+// own wall, or the concave edge - instead of chording across the void (which the plain
+// serpentine declines on). Points are in the caller's frame; `region` is in that same frame.
+Polyline route_along_boundary(const ExPolygon &region, const Point &from, const Point &to)
+{
+    auto densify = [](const Polygon &poly) -> Polygon {
+        const double step = scale_(0.4);
+        const size_t n = std::clamp<size_t>(size_t(poly.length() / step), size_t(16), size_t(8192));
+        std::vector<Point> pts = resample_closed(poly, n);
+        return pts.empty() ? poly : Polygon(Points(pts.begin(), pts.end()));
+    };
+    std::vector<Polygon> loops;
+    loops.push_back(densify(region.contour));
+    for (const Polygon &h : region.holes)
+        loops.push_back(densify(h));
+    // The loop whose nearest vertices to `from` and `to` are closest overall: the bore that sits
+    // between two split runs is the one both endpoints hug.
+    const Polygon *best = nullptr; size_t bi = 0, bj = 0; double bcost = std::numeric_limits<double>::max();
+    for (const Polygon &loop : loops) {
+        if (loop.points.size() < 3) continue;
+        size_t ia = 0, ib = 0; double da = std::numeric_limits<double>::max(), db = da;
+        for (size_t k = 0; k < loop.points.size(); ++k) {
+            const double d1 = (loop.points[k] - from).cast<double>().squaredNorm();
+            const double d2 = (loop.points[k] - to).cast<double>().squaredNorm();
+            if (d1 < da) { da = d1; ia = k; }
+            if (d2 < db) { db = d2; ib = k; }
+        }
+        const double cost = std::sqrt(da) + std::sqrt(db);
+        if (cost < bcost) { bcost = cost; best = &loop; bi = ia; bj = ib; }
+    }
+    Polyline arc;
+    if (best == nullptr || bi == bj) return arc;
+    const Points &pts = best->points; const size_t n = pts.size();
+    // Both ways round the loop connect bi to bj; the RIGHT one is whichever stays in material
+    // (walks the near side of a bore, not the far side across the part). Prefer the side that
+    // keeps every step inside the region; tie-break on length. `region` here is the WHOLE cap
+    // region, so its own contour and holes are the containment test.
+    const ExPolygons grown = offset_ex(ExPolygons{ region }, float(scale_(0.05)));
+    auto side_score = [&](bool forward) -> std::pair<int, double> {
+        int out = 0; double len = 0.;
+        for (size_t k = bi; k != bj; ) {
+            const size_t nk = forward ? (k + 1) % n : (k + n - 1) % n;
+            len += (pts[nk] - pts[k]).cast<double>().norm();
+            bool in = false; for (const ExPolygon &ep : grown) if (ep.contains(pts[nk])) { in = true; break; }
+            if (!in) ++out;
+            k = nk;
+        }
+        return { out, len };
+    };
+    const auto fs = side_score(true), bs = side_score(false);
+    const bool forward = (fs.first != bs.first) ? (fs.first < bs.first) : (fs.second <= bs.second);
+    for (size_t k = bi; ; k = forward ? (k + 1) % n : (k + n - 1) % n) { arc.points.push_back(pts[k]); if (k == bj) break; }
+    return arc;
+}
+
+// serpentine_fill's full-coverage cousin for a region that has bores or a concave outline: the
+// same boustrophedon, but a scan-row join that leaves the material is spliced with a boundary
+// walk (route_along_boundary) instead of declining the whole fill. Every point of the region is
+// still covered by a scan line; the routing only changes how the runs are threaded together.
+Polyline serpentine_routed(const ExPolygon &region, coord_t spacing, double angle_rad, const Point &center)
+{
+    if (spacing <= 0)
+        return {};
+    ExPolygon rot = region;
+    rot.rotate(-angle_rad, center);
+    const BoundingBox bb = rot.contour.bounding_box();
+    Polylines lines;
+    for (coord_t y = bb.min.y() + spacing / 2; y <= bb.max.y(); y += spacing) {
+        Polyline l;
+        l.points.emplace_back(bb.min.x() - spacing, y);
+        l.points.emplace_back(bb.max.x() + spacing, y);
+        lines.push_back(std::move(l));
+    }
+    Polylines segs = intersection_pl(lines, rot);
+    if (segs.empty())
+        return {};
+    if (std::getenv("CS_CAPDBG")) {
+        size_t longs = 0; for (const Polyline &s : segs) if (s.length() > scale_(8.0)) ++longs;
+        std::fprintf(stderr, "CS_CAPDBG serpentine: region holes=%zu, %zu scan segs, %zu longer than 8mm\n",
+                     rot.holes.size(), segs.size(), longs);
+    }
+    for (Polyline &s : segs)
+        if (s.points.size() >= 2 && s.points.front().x() > s.points.back().x())
+            std::reverse(s.points.begin(), s.points.end());
+    std::sort(segs.begin(), segs.end(), [](const Polyline &a, const Polyline &b) {
+        if (a.points.front().y() != b.points.front().y()) return a.points.front().y() < b.points.front().y();
+        return a.points.front().x() < b.points.front().x();
+    });
+    // Order the clipped runs into boustrophedon rows (bottom->top, alternating direction).
+    std::vector<Polyline> ordered;
+    coord_t last_y = std::numeric_limits<coord_t>::min();
+    long row = -1;
+    std::vector<Polyline> row_segs;
+    auto flush_row = [&]() {
+        if (row_segs.empty()) return;
+        if (row % 2 == 1) {
+            std::reverse(row_segs.begin(), row_segs.end());
+            for (Polyline &s : row_segs) std::reverse(s.points.begin(), s.points.end());
+        }
+        for (Polyline &s : row_segs) ordered.push_back(std::move(s));
+        row_segs.clear();
+    };
+    for (Polyline &s : segs) {
+        if (s.points.empty()) continue;
+        if (s.points.front().y() != last_y) { flush_row(); ++row; last_y = s.points.front().y(); }
+        row_segs.push_back(s);
+    }
+    flush_row();
+    // Assemble, routing any join whose midpoint leaves the (slightly grown) material.
+    const ExPolygons rot_grown = offset_ex(ExPolygons{ rot }, float(spacing) / 4.f);
+    auto in_material = [&](const Point &p) {
+        for (const ExPolygon &ep : rot_grown) if (ep.contains(p)) return true;
+        return false;
+    };
+    // A join is safe only if the WHOLE chord stays in material, not just its midpoint - a long
+    // join that clips a bore near one end has an in-material midpoint and would otherwise be laid
+    // straight across the void. Sample the chord; if any sample leaves material, ride the boundary.
+    auto chord_clear = [&](const Point &a, const Point &b) {
+        const double L = (b - a).cast<double>().norm();
+        const int steps = std::max(2, int(L / (double(spacing) / 2.0)));
+        for (int k = 0; k <= steps; ++k)
+            if (!in_material(Point(a + (b - a) * k / steps))) return false;
+        return true;
+    };
+    bool failed = false;
+    Polyline serp;
+    for (const Polyline &s : ordered) {
+        if (s.points.empty()) continue;
+        if (!serp.points.empty()) {
+            const Point a = serp.points.back(), b = s.points.front();
+            if (!chord_clear(a, b)) {
+                const Polyline detour = route_along_boundary(rot, a, b);
+                for (const Point &p : detour.points) serp.points.push_back(p);
+                // The detour hands off to the next run at pts[bj], a densify step from b; if that
+                // last hop still crosses (the boundary could not bridge these two), the fill is
+                // not clean - fail so the caller drops to the concentric marcher (gaps, but the
+                // doctrine's absolute holds: never a bead across the void).
+                const Point last = serp.points.empty() ? a : serp.points.back();
+                if (!chord_clear(last, b)) failed = true;
+            }
+        }
+        for (const Point &p : s.points) serp.points.push_back(p);
+    }
+    if (failed)
+        return {};
+    const double c = std::cos(angle_rad), sn = std::sin(angle_rad);
+    for (Point &p : serp.points) {
+        const double dx = double(p.x() - center.x()), dy = double(p.y() - center.y());
+        p = Point(center.x() + coord_t(std::llround(dx * c - dy * sn)),
+                  center.y() + coord_t(std::llround(dx * sn + dy * c)));
+    }
+    return serp;
+}
+
+// A full-coverage solid cap for a region the plain serpentine declines - a multibore or a
+// concave outline. One outer perimeter loop per bore boundary and the contour seals the edges;
+// the routed serpentine fills everything inside as one bead. Returns false (region untouched) if
+// the fill comes back empty, so the caller can still fall to the concentric spiral.
+bool build_solid_cap_routed(const ExPolygon &region, const Flow &flow, double layer_height,
+                            const PrintRegionConfig *config, size_t layer_index,
+                            ExtrusionEntityCollection &entities, std::string *reason)
+{
+    const coord_t spacing = flow.scaled_spacing();
+    const coord_t width   = flow.scaled_width();
+    if (spacing <= 0 || width <= 0) { if (reason) *reason = "routed cap: bad flow"; return false; }
+    const Point  center = region.contour.bounding_box().center();
+    const double angle  = M_PI / 4.0 + double(layer_index % 2) * (M_PI / 2.0);
+
+    // ONE perimeter ring hugging the OUTER contour, so the cap's rim is a clean loop rather than
+    // the ragged ends of scan lines. The bores get NO separate ring: the serpentine's own scan
+    // lines end on each bore wall and its boundary routing rides those walls, so the edges are
+    // sealed anyway - and a per-bore ring would have to be reached by a hop between bores, which
+    // is the one move that crosses the void (it drew 15mm beads straight across a bore).
+    ExPolygons peel = offset_ex(ExPolygons{ region }, -float(width) / 2.f);
+    if (peel.size() != 1) { if (reason) *reason = "routed cap: contour ring split"; return false; }
+    std::vector<Polygon> rings;
+    rings.push_back(peel.front().contour);
+
+    // Half a bead further in, so the serpentine's outer scan line ABUTS the perimeter bead (the
+    // ring covers [0, width] from each boundary; the fill starts at width) instead of leaving an
+    // annular seam - a full-spacing inset here left a ~0.2 mm ring gap, most of the residual open
+    // area. The same offset grows the bore holes, so the fill abuts the bore rings too.
+    ExPolygons inside = offset_ex(peel, -float(width) / 2.f);
+    Polyline serp = (inside.size() == 1) ? serpentine_routed(inside.front(), spacing, angle, center) : Polyline{};
+
+    // Anchor every ring's seam to the serpentine entry so the ring->ring and ring->fill hops are
+    // short local steps, not a diagonal chord across the cap.
+    const Point anchor = serp.points.size() >= 2 ? serp.points.front()
+                       : (rings.empty() || rings.front().points.empty() ? center : rings.front().points.front());
+    Polyline path;
+    for (Polygon &ring : rings) {
+        if (ring.points.size() < 3) continue;
+        size_t best = 0; double bd = std::numeric_limits<double>::max();
+        for (size_t k = 0; k < ring.points.size(); ++k) {
+            const double d = (ring.points[k] - anchor).cast<double>().squaredNorm();
+            if (d < bd) { bd = d; best = k; }
+        }
+        std::rotate(ring.points.begin(), ring.points.begin() + best, ring.points.end());
+        for (const Point &p : ring.points) path.points.push_back(p);
+        path.points.push_back(ring.points.front());
+    }
+    for (const Point &p : serp.points) path.points.push_back(p);
+    if (path.points.size() < 4) { if (reason) *reason = "routed cap: empty fill"; return false; }
+    ExtrusionMultiPath mp;
+    mp.paths.emplace_back(make_path(Polyline3(path), flow, layer_height));
+    entities.clear();
+    entities.no_sort = false;
+    entities.append(std::move(mp));
+    return true;
+}
+
 } // namespace
 
 bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, const Flow &flow, double layer_height,
@@ -4488,12 +4701,23 @@ bool ContinuousShellPathBuilder::build_cross_section(const Surfaces &surfaces, c
 
     // A solid cap/shell with a rectilinear-family surface pattern (top surface pattern): fill the
     // interior with a connected serpentine rotated 45/-45 per layer (cross-hatch inter-layer interlock,
-    // clean surface) instead of concentric rings. SOLID (no-bore) planes only; on a split or annular
-    // plane build_serpentine_cap declines and we fall through to the concentric spiral below.
-    if (force_solid && config != nullptr && merged.front().holes.empty()
-        && cs_serpentine_pattern(config->top_surface_pattern.value)
-        && build_serpentine_cap(merged.front(), flow, layer_height, config, layer_index, entities, reason)) {
-        return true;
+    // clean surface) instead of concentric rings. SOLID (no-bore) convex planes take build_serpentine_cap
+    // unchanged - that is what the fences pin. A plane it declines - one with BORES, or a concave
+    // outline - would otherwise fall to the concentric spiral, which cannot tile a Voronoi cell's acute
+    // corners or the medial between bores and left the printed multibore lid ~13% open (holes straight
+    // through to the infill). build_solid_cap_routed fills those: a boustrophedon whose split-row joins
+    // ride the bore wall or the concave edge, so the whole cap is covered as one bead.
+    if (force_solid && config != nullptr && cs_serpentine_pattern(config->top_surface_pattern.value)) {
+        if (merged.front().holes.empty()
+            && build_serpentine_cap(merged.front(), flow, layer_height, config, layer_index, entities, reason))
+            return true;
+        // Only a MULTI-bore cap needs the routed fill: a single annulus and a concave no-bore plane
+        // both tile fully by the concentric marcher (an annulus has no corners; a crescent's tips
+        // fall to its medial), and those two keep their existing path and its notes - the routed
+        // fill is scoped to the Voronoi-cell case, where the corners and the medial go uncovered.
+        if (merged.front().holes.size() >= 2
+            && build_solid_cap_routed(merged.front(), flow, layer_height, config, layer_index, entities, reason))
+            return true;
     }
 
     WovenInfill woven;
