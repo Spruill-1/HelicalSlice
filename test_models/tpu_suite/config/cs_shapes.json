@@ -1,6 +1,6 @@
 {
  "type": "process",
- "name": "CS shapes",
+ "name": "CS interpolated",
  "from": "system",
  "instantiation": "true",
  "adaptive_layer_height": "0",
@@ -184,9 +184,9 @@
  "seam_slope_gap": "0",
  "seam_slope_min_length": "10",
  "symmetric_infill_y_axis": "0",
- "top_shell_layers": "5",
+ "top_shell_layers": "0",
  "top_color_penetration_layers": "5",
- "top_shell_thickness": "1.0",
+ "top_shell_thickness": "0",
  "top_surface_line_width": "0.42",
  "top_surface_pattern": "monotonicline",
  "top_surface_speed": [
@@ -375,5 +375,11 @@
  "continuous_shell_interlock": "0",
  "continuous_shell_scarf_length": "0",
  "continuous_shell_adaptive_beading": "1",
- "continuous_shell_interior_spiral": "1"
+ "continuous_shell_interior_spiral": "0",
+ "continuous_shell_infill_density": "25",
+ "continuous_shell_interpolated_rings": "1",
+ "continuous_shell_interior_serpentine": "0",
+ "continuous_shell_infill_weave": "50",
+ "continuous_shell_swirl": "15",
+ "continuous_shell_weld_strength": "40"
 }
