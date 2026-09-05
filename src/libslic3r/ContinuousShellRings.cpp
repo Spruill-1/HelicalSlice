@@ -1017,18 +1017,28 @@ bool CsRingField::distance_family(coord_t spacing, CsRingFamily &out, std::strin
         out.rings.push_back(std::move(cr));
     };
 
+    // The synthetic level orders the family into ONE monotone nesting so the downstream
+    // containment stack threads it as a single annular chain (surface -> medial -> bore) instead
+    // of fragmenting: wall offsets run 0 -> 0.5 as they march in toward the medial, bore offsets
+    // run 1 -> 0.5 as they march OUT from the bore, and both families meet at the medial (t=0.5).
+    // If they carried the same level - offset depth alone - the wall ring and the bore ring at
+    // each depth would collide at one level and the stack would split on the double child.
+    const double medial_s = 0.5 * Wmax_s;                       // depth of the medial at the widest place
     for (int k = 0; k < 512; ++k) {
         const double c = half + double(k) * sp;                 // scaled offset depth
         ExPolygons off = offset_ex(ExPolygons{ m_region }, -float(c));
         if (off.empty())
             break;                                              // region fully consumed: done
-        const double t = std::min(0.999, c / Wmax_s);
+        const double frac = std::min(1.0, c / std::max(medial_s, 1.0));   // 0 at a surface, ~1 at the medial
         for (const ExPolygon &e : off) {
-            add_ring(e.contour, t);                             // wall-side offset (d_out = c)
+            add_ring(e.contour, 0.5 * frac);                    // wall-side offset (d_out=c): 0 -> 0.5
             for (const Polygon &h : e.holes)
-                add_ring(h, t);                                 // bore-side offset (d_in = c)
+                add_ring(h, 1.0 - 0.5 * frac);                  // bore-side offset (d_in=c): 1 -> 0.5
         }
     }
+    // Level order for the group-by-level walk (outer surface first).
+    std::sort(out.rings.begin(), out.rings.end(),
+              [](const CsRing &a, const CsRing &b) { return a.t < b.t; });
     if (out.rings.empty()) {
         if (fail) *fail = "continuous shell ring field: distance family produced no rings";
         return false;
