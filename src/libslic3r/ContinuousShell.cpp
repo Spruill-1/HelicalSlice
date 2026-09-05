@@ -4611,6 +4611,38 @@ Polyline serpentine_routed(const ExPolygon &region, coord_t spacing, double angl
 // concave outline. One outer perimeter loop per bore boundary and the contour seals the edges;
 // the routed serpentine fills everything inside as one bead. Returns false (region untouched) if
 // the fill comes back empty, so the caller can still fall to the concentric spiral.
+// The point on `contour` where the object's outer seam lands at this layer - the SAME arc-length
+// precession spiralize_rings anchors ring 0 to (nearest vertex to the bbox (maxx,maxy) corner,
+// advanced seam_step_rad * mean-radius of arc per layer). A flat cap that starts here joins the
+// spiral body below it with a short step along the contour, not a chord across the interior.
+static Point cs_seam_point(const Polygon &contour, size_t layer_index, const PrintRegionConfig *config)
+{
+    const Points &pts = contour.points;
+    const size_t n = pts.size();
+    if (n < 3) return pts.empty() ? Point(0, 0) : pts.front();
+    std::vector<double> arc(n + 1, 0.0);
+    for (size_t k = 0; k < n; ++k)
+        arc[k + 1] = arc[k] + (pts[(k + 1) % n] - pts[k]).cast<double>().norm();
+    const double perim = std::max(arc[n], 1.0);
+    coord_t mx = pts[0].x(), my = pts[0].y();
+    for (const Point &p : pts) { mx = std::max(mx, p.x()); my = std::max(my, p.y()); }
+    size_t ref = 0; double bd = std::numeric_limits<double>::max();
+    for (size_t k = 0; k < n; ++k) {
+        const double d = (pts[k] - Point(mx, my)).cast<double>().squaredNorm();
+        if (d < bd) { bd = d; ref = k; }
+    }
+    Vec2d c(0, 0); for (const Point &p : pts) c += p.cast<double>(); c /= double(n);
+    double r_ref = 0.; for (const Point &p : pts) r_ref += (p.cast<double>() - c).norm();
+    r_ref = std::max(1.0, r_ref / double(n));
+    const double step = config != nullptr
+        ? 0.02 * (config->continuous_shell_seam_step.value / 100.0) + config->continuous_shell_swirl.value * M_PI / 180.0
+        : 0.02;
+    double s = std::fmod(arc[ref] + double(layer_index) * step * r_ref, perim);
+    if (s < 0.0) s += perim;
+    size_t use = 0; while (use + 1 < n && arc[use + 1] < s) ++use;
+    return pts[use];
+}
+
 bool build_solid_cap_routed(const ExPolygon &region, const Flow &flow, double layer_height,
                             const PrintRegionConfig *config, size_t layer_index,
                             ExtrusionEntityCollection &entities, std::string *reason)
@@ -4638,21 +4670,39 @@ bool build_solid_cap_routed(const ExPolygon &region, const Flow &flow, double la
     ExPolygons inside = offset_ex(peel, -float(width) / 2.f);
     Polyline serp = (inside.size() == 1) ? serpentine_routed(inside.front(), spacing, angle, center) : Polyline{};
 
-    // Anchor every ring's seam to the serpentine entry so the ring->ring and ring->fill hops are
-    // short local steps, not a diagonal chord across the cap.
-    const Point anchor = serp.points.size() >= 2 ? serp.points.front()
-                       : (rings.empty() || rings.front().points.empty() ? center : rings.front().points.front());
+    // START the cap where the SPIRAL BODY beneath it ended - at the same arc-length seam the
+    // rest of the object precesses through (bbox-corner reference, seam_step per layer). The flat
+    // cap used to start at its serpentine entry, an arbitrary corner; the honest inter-layer join
+    // from the body's seam to that corner then ran ~25 mm straight across a bore, one visible bead
+    // per cap face. Anchored to the seam, that join is a short step along the contour instead.
+    // Start the cap at the arc-length seam the spiral body precesses through (bbox-corner
+    // reference, seam_step per layer) so the honest inter-layer join from the body BELOW a top
+    // cap is a short step along the contour, not a chord across a bore. The generator picks which
+    // end of the flat cap it emits from, so this reliably lands the body->cap boundary on the
+    // seam; the cap->body boundary below a BOTTOM cap is the generator's to place and is left as
+    // a documented residual.
+    const Point seam = cs_seam_point(region.contour, layer_index, config);
     Polyline path;
     for (Polygon &ring : rings) {
         if (ring.points.size() < 3) continue;
         size_t best = 0; double bd = std::numeric_limits<double>::max();
         for (size_t k = 0; k < ring.points.size(); ++k) {
-            const double d = (ring.points[k] - anchor).cast<double>().squaredNorm();
+            const double d = (ring.points[k] - seam).cast<double>().squaredNorm();
             if (d < bd) { bd = d; best = k; }
         }
         std::rotate(ring.points.begin(), ring.points.begin() + best, ring.points.end());
         for (const Point &p : ring.points) path.points.push_back(p);
         path.points.push_back(ring.points.front());
+    }
+    // The ring closes at the seam, so the ring->fill hop may cross a bore; ride the boundary if
+    // the straight chord leaves the material, the same containment the fill's split-row joins use.
+    if (serp.points.size() >= 2 && !path.points.empty()) {
+        const Point a = path.points.back(), b = serp.points.front();
+        bool clear = true;
+        const int steps = std::max(2, int((b - a).cast<double>().norm() / (double(spacing) / 2.0)));
+        for (int k = 0; k <= steps && clear; ++k) clear = region.contains(Point(a + (b - a) * k / steps));
+        if (!clear)
+            for (const Point &p : route_along_boundary(region, a, b).points) path.points.push_back(p);
     }
     for (const Point &p : serp.points) path.points.push_back(p);
     if (path.points.size() < 4) { if (reason) *reason = "routed cap: empty fill"; return false; }
