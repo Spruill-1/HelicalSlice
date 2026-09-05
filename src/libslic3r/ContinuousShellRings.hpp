@@ -138,6 +138,15 @@ public:
     bool level_set(double t, std::vector<CsRing> &out, std::string *fail) const;
     bool family(size_t n, CsRingFamily &out, std::string *fail) const;
 
+    // DISTANCE-anchored rings (arc-capable work, phase 1): rings at a fixed DISTANCE from each
+    // boundary - offsets at (k+1/2)*spacing - rather than a fixed FRACTION of the local extent.
+    // Where the wall is thick the offsets nest as usual; where it thins, the deep offsets simply
+    // do not exist, so the ring count follows the local thickness and the thin flank stops
+    // crowding. Wall offsets (each ExPolygon's contour) and bore offsets (its holes) are both
+    // returned, meeting at the medial. `t` is a synthetic monotone level (offset depth normalised)
+    // only so the downstream group-by-level still orders them outer->inner.
+    bool distance_family(coord_t spacing, CsRingFamily &out, std::string *fail) const;
+
     // Rings by MORPH: the point at fraction t is the straight blend of the two boundary points
     // at equal normalised arc length. Between two circles this returns circles, which the level
     // sets do not - they return Cartesian ovals, off by up to 0.357 mm on a 7.5 mm wall, and

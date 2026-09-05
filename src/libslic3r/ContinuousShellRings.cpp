@@ -977,4 +977,63 @@ bool CsRingField::family(size_t n, CsRingFamily &out, std::string *fail) const
     return true;
 }
 
+bool CsRingField::distance_family(coord_t spacing, CsRingFamily &out, std::string *fail) const
+{
+    out.rings.clear();
+    if (! m_valid) {
+        if (fail) *fail = "continuous shell ring field: distance family asked of an unbuilt field";
+        return false;
+    }
+    if (spacing <= 0) {
+        if (fail) *fail = "continuous shell ring field: distance family needs positive spacing";
+        return false;
+    }
+    const double sp   = double(spacing);
+    const double half = 0.5 * sp;
+    // Normalise the synthetic level so it stays roughly in (0,1) and strictly increases with
+    // offset depth - the group-by-level downstream only needs it monotone and distinct per depth.
+    const double Wmax_s = std::max(scale_(extent_percentile(1.0)), sp);
+
+    auto nearest_bore = [&](const Point &q) -> int {
+        if (m_n_bores == 0) return -1;
+        const auto [d, li, pi] = m_impl->bores.template distance_from_lines_extra<false>(q);
+        (void) d; (void) pi;
+        return (li < m_bore_of_line.size()) ? int(m_bore_of_line[li]) : -1;
+    };
+    auto add_ring = [&](Polygon poly, double t) {
+        if (poly.points.size() < 8) return;
+        // Every ring outward-facing (CCW), matching level_set, so the downstream stack sees one
+        // consistent winding whether the loop encircles material or a bore.
+        poly.make_counter_clockwise();
+        CsRing cr;
+        cr.t = t;
+        cr.extent.reserve(poly.points.size());
+        cr.bore.reserve(poly.points.size());
+        for (const Point &q : poly.points) {
+            cr.extent.push_back(float(this->extent_at(q.cast<double>())));
+            cr.bore.push_back(nearest_bore(q));
+        }
+        cr.poly = std::move(poly);
+        out.rings.push_back(std::move(cr));
+    };
+
+    for (int k = 0; k < 512; ++k) {
+        const double c = half + double(k) * sp;                 // scaled offset depth
+        ExPolygons off = offset_ex(ExPolygons{ m_region }, -float(c));
+        if (off.empty())
+            break;                                              // region fully consumed: done
+        const double t = std::min(0.999, c / Wmax_s);
+        for (const ExPolygon &e : off) {
+            add_ring(e.contour, t);                             // wall-side offset (d_out = c)
+            for (const Polygon &h : e.holes)
+                add_ring(h, t);                                 // bore-side offset (d_in = c)
+        }
+    }
+    if (out.rings.empty()) {
+        if (fail) *fail = "continuous shell ring field: distance family produced no rings";
+        return false;
+    }
+    return true;
+}
+
 } // namespace Slic3r

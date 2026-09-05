@@ -3685,7 +3685,22 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
     // A medial-closed field is NOT the outer-to-bore interpolation the morph computes - the
     // morph would place rings the closed count law never measured. Level sets follow the
     // field wherever it came from, so they carry the closure.
-    const bool morphed = interior.holes.size() == 1 && !field.close_medial()
+    // ARC-CAPABLE (CS_ARCRINGS, phase 1): distance-anchored rings instead of fraction level
+    // sets, so the thin flank stops crowding. Closed rings only for now (the taper that closes
+    // the tip void is phase 2); it goes through the same group-by-level + containment stack.
+    static const bool arc_rings = [] {
+        const char *s = std::getenv("CS_ARCRINGS");
+        return s != nullptr && std::atoi(s) != 0;
+    }();
+    bool morphed = false;
+    if (arc_rings && n > 0) {
+        if (!field.distance_family(spacing, fam, &why)) {
+            add_note(degrade_note, "interpolated rings declined (arc): " + why);
+            return {};
+        }
+        add_note(degrade_note, "interpolated rings: DISTANCE-anchored (arc phase 1)");
+    } else {
+    morphed = interior.holes.size() == 1 && !field.close_medial()
                       && field.morph_family(n, fam, &morph_why);
     if (! morphed) {
         if (interior.holes.size() == 1 && n > 0 && !field.close_medial())
@@ -3694,6 +3709,7 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
             add_note(degrade_note, "interpolated rings declined: " + why);
             return {};
         }
+    }
     }
 
     // Group by level. Past a saddle - where two bores or two re-section sites separate - one
