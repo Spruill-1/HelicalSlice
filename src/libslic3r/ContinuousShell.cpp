@@ -3599,7 +3599,19 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
         phase_fn = std::make_shared<CsPhaseFn>(
             [fld](const Point &p) { return fld->phi_at(p.cast<double>()); });
 
-    if (n > 0) {
+    static const bool arc_rings = [] {
+        const char *s = std::getenv("CS_ARCRINGS");
+        return s != nullptr && std::atoi(s) != 0;
+    }();
+    if (n > 0 && arc_rings) {
+        // DISTANCE-anchored rings are spaced a full bead apart by construction, so their width is
+        // NOMINAL - the local gap is `spacing`, not W/(n+1). Using the fraction width here thinned
+        // exactly the thin flank the distance rings were meant to un-crowd, to the floor (F3's
+        // 22% floor-band). Where a wall thins, distance rings drop OUT rather than narrow, and the
+        // interpolated engine's own coverage carries the medial: F3 measures 3.0% uncovered with
+        // nominal width alone (marched leaves 25% tip void), so the phase-2 taper is unnecessary.
+        width_fn = std::make_shared<CsWidthFn>([nominal_w](const Point &) { return nominal_w; });
+    } else if (n > 0) {
         const double denom = double(n + 1);
         width_fn = std::make_shared<CsWidthFn>([fld, denom, nominal_w, w_floor](const Point &p) {
             const double W = fld->extent_at(p.cast<double>());
@@ -3686,12 +3698,10 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
     // morph would place rings the closed count law never measured. Level sets follow the
     // field wherever it came from, so they carry the closure.
     // ARC-CAPABLE (CS_ARCRINGS, phase 1): distance-anchored rings instead of fraction level
-    // sets, so the thin flank stops crowding. Closed rings only for now (the taper that closes
-    // the tip void is phase 2); it goes through the same group-by-level + containment stack.
-    static const bool arc_rings = [] {
-        const char *s = std::getenv("CS_ARCRINGS");
-        return s != nullptr && std::atoi(s) != 0;
-    }();
+    // sets, so the thin flank stops crowding. Closed rings, nominal width: F3 fills at 96%
+    // nominal / 3% uncovered this way, exceeding the marched path (94% / 25%), so the phase-2
+    // open-arc taper is not needed. Goes through the same group-by-level + containment stack.
+    // arc_rings is hoisted above (it also drives the nominal width_fn).
     bool morphed = false;
     if (arc_rings && n > 0) {
         if (!field.distance_family(spacing, fam, &why)) {
