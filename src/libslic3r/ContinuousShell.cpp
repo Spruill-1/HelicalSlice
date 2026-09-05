@@ -3371,6 +3371,16 @@ Points cs_farthest_sites(const ExPolygon &region, size_t k, coord_t step)
     return out;
 }
 
+// CS_ARCRINGS: distance-anchored ("arc") interior rings instead of fraction level sets. Read once.
+static bool cs_arc_rings()
+{
+    static const bool s = [] {
+        const char *e = std::getenv("CS_ARCRINGS");
+        return e != nullptr && std::atoi(e) != 0;
+    }();
+    return s;
+}
+
 // The ring family for ONE region, and the chains it becomes. Called on a whole peeled interior,
 // or on a single cell of one when the interior has been subsectioned so each cell can choose its
 // own ring count. `attach_skin` is what distinguishes the two: an interior owns the surface skin
@@ -3599,10 +3609,7 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
         phase_fn = std::make_shared<CsPhaseFn>(
             [fld](const Point &p) { return fld->phi_at(p.cast<double>()); });
 
-    static const bool arc_rings = [] {
-        const char *s = std::getenv("CS_ARCRINGS");
-        return s != nullptr && std::atoi(s) != 0;
-    }();
+    const bool arc_rings = cs_arc_rings();
     if (n > 0 && arc_rings) {
         // DISTANCE-anchored rings are spaced a full bead apart by construction, so their width is
         // NOMINAL - the local gap is `spacing`, not W/(n+1). Using the fraction width here thinned
@@ -4007,6 +4014,51 @@ std::vector<ContourChain> interpolated_chains(const ExPolygon &region, const Flo
     }
 
     const ExPolygon &interior = peel.back();
+
+    // ARC (CS_ARCRINGS) MULTIBORE. The distance family threads a SINGLE-bore region cleanly: at the
+    // medial the wall's innermost ring still contains the bore's outermost (grown) ring, so the
+    // containment walk crosses from the wall side to the bore side. In a MULTI-bore region the
+    // geometry is not concentric - the bore side grows past the wall's small innermost rings, the
+    // walk cannot cross, and EVERY bore is orphaned unwelded (F7: 3 bores/layer "not reached", two
+    // big inter-bore voids). Partition by nearest bore so each cell is single-bore - the concentric
+    // case that threads - emit the skin once, whole and uncut, and thread each cell with the same
+    // machinery the fraction cells use. The nearest-bore cut is the bores' own equidistant set, so
+    // the cells meet there. (Fraction level sets do not need this: u->1 at each bore already gives
+    // one loop per bore. This is only for the distance family.)
+    if (cs_arc_rings() && interior.holes.size() >= 2) {
+        Points bore_sites;
+        bore_sites.reserve(interior.holes.size());
+        for (const Polygon &h : interior.holes)
+            bore_sites.push_back(h.centroid());
+        const ExPolygons cells = cs_voronoi_cells(interior, bore_sites);
+        if (cells.size() >= 2) {
+            std::vector<ContourChain> out;
+            ContourChain skin;
+            for (size_t k = 0; k < sl; ++k)
+                skin.loops.push_back(peel[k].contour);
+            for (size_t h = 0; h < peel.back().holes.size(); ++h)
+                for (size_t k = sl; k-- > 0; )
+                    skin.loops.push_back(peel[k].holes[h]);
+            skin.has_bore = !peel.back().holes.empty();
+            if (skin.loops.size() >= 2)
+                out.push_back(std::move(skin));
+            size_t filled = 0;
+            for (const ExPolygon &cell : cells) {
+                std::vector<ContourChain> cc =
+                    cs_interior_chains(cell, peel, sl, false, flow, layer_index, woven, spacing,
+                                       degrade_note, nullptr);
+                if (cc.empty())
+                    continue;
+                ++filled;
+                for (ContourChain &c : cc)
+                    out.push_back(std::move(c));
+            }
+            if (filled >= 1 && !out.empty())
+                return out;
+        }
+        // Partition failed, or no cell filled: fall through to the whole-interior attempt, which at
+        // least prints the wall side rather than declining the layer outright.
+    }
 
     // ONE region, one ring count. This is the shipped path, and the count it chooses has to
     // serve the whole region: the gap is W(p)/(n+1), so a region whose extent varies more than
