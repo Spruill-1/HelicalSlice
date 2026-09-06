@@ -57,6 +57,7 @@ struct WovenInfill {
     double zamp        = 0.0;       // Z amplitude, fraction of layer_height
     double zphase      = 1.5708;    // quadrature offset (rad) between the radial and Z waves
     bool   serpentine  = false;     // radial-traverse interior instead of concentric rings
+    bool   arc_rings   = false;     // distance-anchored rings + per-bore cells (needs interpolated)
     // Where this layer must stay SOLID, when that is only part of the cross-section.
     //
     // force_solid is a whole-layer boolean: if any part of the section has air within the shell
@@ -100,6 +101,7 @@ WovenInfill woven_infill_params(const PrintRegionConfig *config)
         w.zamp  = 0.0;
     }
     w.serpentine = config->continuous_shell_interior_serpentine.value;
+    w.arc_rings  = config->continuous_shell_arc_rings.value;
     return w;
 }
 
@@ -3371,8 +3373,10 @@ Points cs_farthest_sites(const ExPolygon &region, size_t k, coord_t step)
     return out;
 }
 
-// CS_ARCRINGS: distance-anchored ("arc") interior rings instead of fraction level sets. Read once.
-static bool cs_arc_rings()
+// CS_ARCRINGS env override: forces distance-anchored ("arc") interior rings on for the whole
+// slice, regardless of the per-region continuous_shell_arc_rings config. Kept for the sim
+// harness and sweeps; production uses the config (woven.arc_rings). Read once.
+static bool cs_arc_rings_env()
 {
     static const bool s = [] {
         const char *e = std::getenv("CS_ARCRINGS");
@@ -3609,7 +3613,7 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
         phase_fn = std::make_shared<CsPhaseFn>(
             [fld](const Point &p) { return fld->phi_at(p.cast<double>()); });
 
-    const bool arc_rings = cs_arc_rings();
+    const bool arc_rings = woven.arc_rings || cs_arc_rings_env();
     if (n > 0 && arc_rings) {
         // DISTANCE-anchored rings are spaced a full bead apart by construction, so their width is
         // NOMINAL - the local gap is `spacing`, not W/(n+1). Using the fraction width here thinned
@@ -4025,7 +4029,7 @@ std::vector<ContourChain> interpolated_chains(const ExPolygon &region, const Flo
     // machinery the fraction cells use. The nearest-bore cut is the bores' own equidistant set, so
     // the cells meet there. (Fraction level sets do not need this: u->1 at each bore already gives
     // one loop per bore. This is only for the distance family.)
-    if (cs_arc_rings() && interior.holes.size() >= 2) {
+    if ((woven.arc_rings || cs_arc_rings_env()) && interior.holes.size() >= 2) {
         Points bore_sites;
         bore_sites.reserve(interior.holes.size());
         for (const Polygon &h : interior.holes)

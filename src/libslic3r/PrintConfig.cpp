@@ -6125,6 +6125,19 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
+    def = this->add("continuous_shell_arc_rings", coBool);
+    def->label = L("Continuous shell arc rings");
+    def->category = L("Strength");
+    def->tooltip = L("Anchors the interpolated interior rings at a fixed DISTANCE from each boundary (like "
+                     "Arachne) rather than at a fixed FRACTION of the local wall thickness. Fraction-spaced rings "
+                     "crowd wherever the wall varies in thickness - a crescent's tapering flank thins its beads to "
+                     "the floor - while distance-anchored rings stay a full bead apart and fill at nominal width. "
+                     "A section with several bores is partitioned by nearest bore into single-bore cells so each "
+                     "threads and welds, and the outer surface stays a single uncut ring per layer. Requires "
+                     "interpolated rings. Experimental, off by default.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("continuous_shell_interior_spiral", coBool);
     def->label = L("Continuous shell interior spiral");
     def->category = L("Strength");
