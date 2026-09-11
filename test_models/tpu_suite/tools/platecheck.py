@@ -7,11 +7,13 @@ arc validation plate (PlateMB_arcpeel) exposed on plastic that the earlier sim m
              segment whose straight span exceeds BRIDGE_MM. Bore-crossing bridges are called out
              separately - those are the worst (a bead strung across an open bore).
 
-  VOID     - the largest ring-free gap inside the material, with BRIDGES EXCLUDED FROM FILL. A
-             bridge stretched across a void must NOT read as coverage: that blindness (2D coverage,
-             one layer, bridges counted as fill) is exactly why the old metric called arc's 10.2%
-             "uncovered" a win over fraction's 31.7%. With bridges excluded, arc's inter-column
-             stripes and fraction's inter-bore saddle void both show as the real holes they are.
+  WELD-GAP - the largest bead-free pocket inside the material (its inscribed diameter is the gap a
+             bead there must weld across). Measured against ALL beads, bridges INCLUDED: a bridge is
+             a real bead and bridging is its own metric above; the earlier version excluded bridges,
+             which turned every bridge SPAN into a phantom void that beat the real inter-bore pocket.
+             The domain is the bead footprint WITHOUT expanding past the outermost bead (a `close`
+             rim otherwise reads as a spurious edge void). Flags fraction's inter-bore pinch and
+             (with the bridge metric) arc's inter-column holes; passes the coupons that welded.
 
 Reads the sliced gcode (what we screen BEFORE printing). Validated to reproduce the plate verdict:
 arc = heavy bridges + big voids; fraction = few bridges but a central saddle void.
@@ -119,19 +121,26 @@ def analyze(name, segs):
     xs0 = min(min(s[0], s[2]) for s in segs); xs1 = max(max(s[0], s[2]) for s in segs)
     ys0 = min(min(s[1], s[3]) for s in segs); ys1 = max(max(s[1], s[3]) for s in segs)
     xs = np.arange(xs0 - 1, xs1 + 1, G); ys = np.arange(ys0 - 1, ys1 + 1, G)
-    cov_all  = raster(segs, only_beads=False, xs=xs, ys=ys)
-    cov_bead = raster(segs, only_beads=True,  xs=xs, ys=ys)
-    rc = int(round(CLOSE_MM / G))
-    footprint = erode(dilate(cov_all, rc), rc)            # material outline; bores (r>close) survive as holes
-    # bores = holes in the footprint that don't touch the border, above a min area
-    holes = [c for c in components(~footprint) if not touches_border(c, footprint.shape) and len(c) * G * G > 2.0]
-    bore = np.zeros(footprint.shape, bool)
-    for c in holes:
-        for a, b in c: bore[a, b] = True
-    domain = footprint & ~bore
-    void = domain & ~cov_bead
-    vcomps = sorted(components(void), key=len, reverse=True)
+    cov = raster(segs, only_beads=False, xs=xs, ys=ys)    # ALL beads (bridges included - see below)
+    # DOMAIN = the material cross-section WITHOUT expanding past the outermost bead. Fill the small
+    # foam gaps the beads enclose (they are material); keep the bores (large enclosed holes) and the
+    # outside open. A footprint from `close` pushes the boundary ~CLOSE_MM past the beads and its rim
+    # then reads as a phantom edge void.
+    domain = cov.copy(); bore = np.zeros(cov.shape, bool)
+    for c in components(~cov):
+        if touches_border(c, cov.shape): continue         # the outside
+        if len(c) * G * G > 2.0:                           # a bore: keep it as a hole
+            for a, b in c: bore[a, b] = True
+        else:
+            for a, b in c: domain[a, b] = True             # a small foam gap: it is material
+    # WELD-GAP = the largest pocket the beads leave inside the material, measured against ALL beads.
+    # Bridges are INCLUDED here: a bridge IS a real bead, and bridging is already its own metric;
+    # excluding bridges (the old cov_bead) turned every bridge span into a phantom void that beat the
+    # real inter-bore pocket. The pocket's inscribed diameter is the gap a bead there must weld across.
+    void = domain & ~cov
+    vcomps = sorted((c for c in components(void) if not touches_border(c, void.shape)), key=len, reverse=True)
     big = vcomps[0] if vcomps else []
+    big_ctr = (float(np.mean([xs[a] for a, b in big])), float(np.mean([ys[b] for a, b in big]))) if big else (0.0, 0.0)
     # bridges
     bridges = [s for s in segs if s[4] >= BRIDGE_MM]
     bore_cross = 0
@@ -151,6 +160,7 @@ def analyze(name, segs):
         "bore_cross":    bore_cross,
         "worst_void_mm2": len(big) * G * G,
         "worst_void_w":  void_width_mm(big, void.shape) if big else 0.0,
+        "worst_void_at": big_ctr,
         "n_voids":       len(vcomps),
         "domain_mm2":    int(domain.sum()) * G * G,
     }
@@ -177,7 +187,8 @@ def main():
         if r['worst_void_w'] > 1.2: flags.append("WELD-GAP")     # gap wider than the weld distance
         verdict = " ".join(flags) if flags else "ok"
         print(f"{name:14s} {r['weight_g']:5.2f} {r['n_bridge']:8d} {r['bridge_mm']:6.0f} {r['bridge_max']:6.1f} "
-              f"{r['bore_cross']:5d} {r['worst_void_mm2']:8.1f}mm2 {r['worst_void_w']:5.2f}  {verdict}")
+              f"{r['bore_cross']:5d} {r['worst_void_mm2']:8.1f}mm2 {r['worst_void_w']:5.2f}  {verdict}  "
+              f"@({r['worst_void_at'][0]:.1f},{r['worst_void_at'][1]:.1f})")
 
 
 if __name__ == '__main__':
