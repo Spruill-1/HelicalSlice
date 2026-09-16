@@ -58,6 +58,7 @@ struct WovenInfill {
     double zphase      = 1.5708;    // quadrature offset (rad) between the radial and Z waves
     bool   serpentine  = false;     // radial-traverse interior instead of concentric rings
     bool   arc_rings   = false;     // distance-anchored rings + per-bore cells (needs interpolated)
+    bool   saddle_fill = false;     // thread extra level sets through the inter-bore saddle (needs interpolated)
     // Where this layer must stay SOLID, when that is only part of the cross-section.
     //
     // force_solid is a whole-layer boolean: if any part of the section has air within the shell
@@ -102,6 +103,7 @@ WovenInfill woven_infill_params(const PrintRegionConfig *config)
     }
     w.serpentine = config->continuous_shell_interior_serpentine.value;
     w.arc_rings  = config->continuous_shell_arc_rings.value;
+    w.saddle_fill = config->continuous_shell_saddle_fill.value;
     return w;
 }
 
@@ -3726,12 +3728,33 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
     if (! morphed) {
         if (interior.holes.size() == 1 && n > 0 && !field.close_medial())
             add_note(degrade_note, "interpolated rings fell back to level sets: " + morph_why);
-        if (!field.family(n, fam, &why)) {
+        // SADDLE DENSIFICATION (continuous_shell_saddle_fill). The uniform count answers to the
+        // widest place, so its W/(n+1) bound holds everywhere EXCEPT the inter-bore saddle: there
+        // u has a critical point, the level sets are singular, they spread as |grad u|->0, and the
+        // corridor opens past the weld limit however high the count goes (measured density-invariant
+        // on the plate's MB2e_frac, the strip it peeled along). family_saddle threads extra level
+        // sets through any corridor still wider than the WELD DISTANCE - biasing the ring count
+        // toward the strip without cutting the section - so the guarantee holds at the saddle too.
+        // Needs >=2 bores (a saddle is an inter-bore feature); off by default, so single/no-bore
+        // sections and the density-0 fences are untouched. CS_SADDLE_SLOTS overrides the target
+        // (in slots) for sweeps; the config uses the weld distance itself.
+        static const double saddle_env = [] {
+            const char *s = std::getenv("CS_SADDLE_SLOTS");
+            return s ? std::atof(s) : -1.0;            // <0: unset, defer to the config
+        }();
+        const double saddle_target = saddle_env >= 0.0 ? saddle_env * sp_mm
+                                   : (woven.saddle_fill ? max_gap_mm : 0.0);
+        const bool use_saddle = saddle_target > 0.0 && interior.holes.size() >= 2 && n > 0;
+        const bool ok = use_saddle
+            ? field.family_saddle(n, saddle_target, size_t(3 * n + 8), fam, &why)
+            : field.family(n, fam, &why);
+        if (!ok) {
             add_note(degrade_note, "interpolated rings declined: " + why);
             return {};
         }
     }
     }
+
 
     // Group by level. Past a saddle - where two bores or two re-section sites separate - one
     // level is genuinely several loops, and that is correct topology for the field rather than
@@ -3974,6 +3997,7 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
     }
     if (n == 0 && attach_skin)
         add_note(degrade_note, "continuous shell: wall too thin to sparsify - printed solid");
+
     if (collapse_out) *collapse_out = collapse_share;
     return out;
 }

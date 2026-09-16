@@ -138,6 +138,19 @@ public:
     bool level_set(double t, std::vector<CsRing> &out, std::string *fail) const;
     bool family(size_t n, CsRingFamily &out, std::string *fail) const;
 
+    // SPATIALLY-VARYING family: the uniform count answers to the WIDEST place, which puts the
+    // inter-bore saddle - where the level sets spread as |grad u|->0 - right at the weld limit,
+    // the strip the plate peeled along. This starts from the n uniform levels and, wherever two
+    // consecutive level sets sit physically farther apart than `saddle_gap_mm` (measured as the
+    // max distance from one to the next, which is largest exactly at the saddle), splices in
+    // enough intermediate levels to bring that corridor under the target. The extra levels are
+    // full level sets of the same field - they thread the wide corridor and only crowd elsewhere,
+    // where the weave and adaptive width already absorb crowding - so the saddle densifies without
+    // cutting the section or adding a stitch. `cap` bounds the total ring count against a
+    // pathological field. saddle_gap_mm <= 0 falls back to the uniform family.
+    bool family_saddle(size_t n, double saddle_gap_mm, size_t cap,
+                       CsRingFamily &out, std::string *fail) const;
+
     // DISTANCE-anchored rings (arc-capable work, phase 1): rings at a fixed DISTANCE from each
     // boundary - offsets at (k+1/2)*spacing - rather than a fixed FRACTION of the local extent.
     // Where the wall is thick the offsets nest as usual; where it thins, the deep offsets simply

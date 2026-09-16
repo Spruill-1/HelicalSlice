@@ -6138,6 +6138,21 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
+    def = this->add("continuous_shell_saddle_fill", coBool);
+    def->label = L("Continuous shell saddle fill");
+    def->category = L("Strength");
+    def->tooltip = L("Densifies the under-dense strip between bores. The interpolated rings are level "
+                     "sets whose count is set by the widest place, which keeps them within the weld "
+                     "distance everywhere EXCEPT the inter-bore saddle: there the field has a critical "
+                     "point, the level sets spread apart however high the count goes, and the strip "
+                     "opens past what a bead can weld across and peels. This threads extra level sets "
+                     "through any corridor still wider than the weld distance, biasing the ring count "
+                     "toward that strip without cutting the section, so the weave stays fully connected. "
+                     "Requires interpolated rings and a section with two or more bores. Experimental, "
+                     "off by default.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("continuous_shell_interior_spiral", coBool);
     def->label = L("Continuous shell interior spiral");
     def->category = L("Strength");

@@ -1043,6 +1043,7 @@ static std::vector<std::string> s_Preset_print_options{
     "continuous_shell_adaptive_beading",
     "continuous_shell_interpolated_rings",
     "continuous_shell_arc_rings",
+    "continuous_shell_saddle_fill",
     "continuous_shell_swirl",
     "continuous_shell_weld_strength",
     "continuous_shell_interior_spiral",

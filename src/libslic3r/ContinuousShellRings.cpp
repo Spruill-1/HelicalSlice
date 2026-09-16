@@ -977,6 +977,91 @@ bool CsRingField::family(size_t n, CsRingFamily &out, std::string *fail) const
     return true;
 }
 
+bool CsRingField::family_saddle(size_t n, double saddle_gap_mm, size_t cap,
+                                CsRingFamily &out, std::string *fail) const
+{
+    out.rings.clear();
+    if (! m_valid) {
+        if (fail) *fail = "continuous shell ring field: saddle family asked of an unbuilt field";
+        return false;
+    }
+    if (n == 0)
+        return true;
+    if (saddle_gap_mm <= 0.)
+        return family(n, out, fail);                 // no target: the plain uniform family
+
+    // The physical gap from level set A to level set B: the FARTHEST a point of A sits from B.
+    // Between two consecutive levels that is largest exactly where the field spreads - the saddle -
+    // so it is the corridor width the extra levels must close. Multi-loop levels (past the saddle,
+    // one loop per bore) contribute all their segments to B, so the split side is measured too.
+    auto gap_between = [](const std::vector<CsRing> &A, const std::vector<CsRing> &B) -> double {
+        Lines segs;
+        for (const CsRing &r : B) {
+            Lines ll = r.poly.lines();
+            segs.insert(segs.end(), ll.begin(), ll.end());
+        }
+        if (segs.size() < 4 || A.empty())
+            return 0.;
+        const AABBTreeLines::LinesDistancer<Line> to_b{ std::move(segs) };
+        double worst = 0.;
+        for (const CsRing &r : A)
+            for (const Point &p : r.poly.points)
+                worst = std::max(worst, std::abs(to_b.distance_from_lines<false>(p)));
+        return worst;                                // scaled
+    };
+
+    const double gap_s = scale_(saddle_gap_mm);
+    const size_t hard  = std::min<size_t>(cap == 0 ? 64 : cap, 64);
+
+    // Extract the n uniform levels once, in ascending t, then between each consecutive pair splice
+    // as many evenly-spaced intermediate levels as the corridor needs. Emit strictly in ascending
+    // t so the group-by-level stack downstream still sees each level whole.
+    std::vector<std::vector<CsRing>> base(n);
+    for (size_t j = 0; j < n; ++j) {
+        const double t = double(j + 1) / double(n + 1);
+        if (! this->level_set(t, base[j], fail)) {
+            // A bore-less field closes onto a point: once a level is empty every inner one is too,
+            // which is the family ending, not a failure (mirrors family()).
+            if (m_n_bores == 0 && j > 0) { if (fail) fail->clear(); base.resize(j); break; }
+            return false;
+        }
+    }
+    if (base.empty())
+        return true;
+
+    auto emit = [&](std::vector<CsRing> &lvl) {
+        for (CsRing &r : lvl)
+            out.rings.emplace_back(std::move(r));
+    };
+
+    size_t spliced = 0;
+    emit(base[0]);
+    for (size_t j = 1; j < base.size(); ++j) {
+        const double ta = double(j)     / double(n + 1);   // t of base[j-1]
+        const double tb = double(j + 1) / double(n + 1);   // t of base[j]
+        const double gap = gap_between(base[j - 1], base[j]);
+        if (gap > gap_s && out.rings.size() < hard) {
+            // How many extra levels bring this corridor under the target: it holds n_extra+1
+            // sub-gaps, each ~gap/(n_extra+1), so need gap/(n_extra+1) <= target.
+            size_t need = size_t(std::ceil(gap / gap_s - 1e-9));
+            if (need >= 1) --need; else need = 0;          // n_extra to make need+1 sub-gaps
+            need = std::min(need, hard - out.rings.size());
+            for (size_t m = 1; m <= need; ++m) {
+                const double t = ta + (tb - ta) * double(m) / double(need + 1);
+                std::vector<CsRing> mid;
+                if (this->level_set(t, mid, nullptr) && ! mid.empty()) {
+                    emit(mid);
+                    ++spliced;
+                }
+                if (out.rings.size() >= hard) break;
+            }
+        }
+        emit(base[j]);
+    }
+    (void) spliced;
+    return true;
+}
+
 bool CsRingField::distance_family(coord_t spacing, CsRingFamily &out, std::string *fail) const
 {
     out.rings.clear();
