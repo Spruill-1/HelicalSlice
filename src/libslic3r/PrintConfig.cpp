@@ -6153,6 +6153,18 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
+    def = this->add("continuous_shell_saddle_budget", coInt);
+    def->label = L("Continuous shell saddle budget");
+    def->category = L("Strength");
+    def->tooltip = L("Caps how many extra ring levels saddle fill may add, spent on the widest inter-bore "
+                     "corridors first. A section with several bores has several saddles; bringing every one "
+                     "under the weld distance at once can fill the whole section solid and, in a flexible "
+                     "material, cost it its compliance. A small budget closes only the worst saddle(s) - the "
+                     "lightest densification that still stops the peel. 0 means unlimited (bring every corridor "
+                     "under the weld distance). Only applies when saddle fill is on. Experimental.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInt(0));
+
     def = this->add("continuous_shell_interior_spiral", coBool);
     def->label = L("Continuous shell interior spiral");
     def->category = L("Strength");

@@ -147,8 +147,11 @@ public:
     // full level sets of the same field - they thread the wide corridor and only crowd elsewhere,
     // where the weave and adaptive width already absorb crowding - so the saddle densifies without
     // cutting the section or adding a stitch. `cap` bounds the total ring count against a
-    // pathological field. saddle_gap_mm <= 0 falls back to the uniform family.
-    bool family_saddle(size_t n, double saddle_gap_mm, size_t cap,
+    // pathological field. `max_extra` budgets how many intermediate levels may be added, spent
+    // WIDEST-corridor-first (0 = unlimited: bring every corridor under the target); a small budget
+    // closes only the worst saddle(s), a light densification that keeps a multi-saddle section from
+    // printing solid. saddle_gap_mm <= 0 falls back to the uniform family.
+    bool family_saddle(size_t n, double saddle_gap_mm, size_t cap, size_t max_extra,
                        CsRingFamily &out, std::string *fail) const;
 
     // DISTANCE-anchored rings (arc-capable work, phase 1): rings at a fixed DISTANCE from each

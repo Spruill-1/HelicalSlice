@@ -977,7 +977,7 @@ bool CsRingField::family(size_t n, CsRingFamily &out, std::string *fail) const
     return true;
 }
 
-bool CsRingField::family_saddle(size_t n, double saddle_gap_mm, size_t cap,
+bool CsRingField::family_saddle(size_t n, double saddle_gap_mm, size_t cap, size_t max_extra,
                                 CsRingFamily &out, std::string *fail) const
 {
     out.rings.clear();
@@ -1034,31 +1034,52 @@ bool CsRingField::family_saddle(size_t n, double saddle_gap_mm, size_t cap,
             out.rings.emplace_back(std::move(r));
     };
 
-    size_t spliced = 0;
+    // Corridor gaps, WIDEST FIRST. Adding a level to the widest corridor buys the most weld, so when
+    // a budget limits how many extra levels may be added (max_extra), spend it on the widest saddles
+    // first - which is what lets a light densification close the worst saddle without filling every
+    // corridor and printing the section solid (the plate's F7 lesson: at the weld distance a 3-bore
+    // section subdivides every corridor at once and loses its squish). max_extra == 0 is unlimited:
+    // every corridor is brought under the target, the original per-corridor behaviour.
+    struct Corr { size_t j; double gap; };
+    std::vector<Corr> corrs;
+    for (size_t j = 1; j < base.size(); ++j) {
+        const double gap = gap_between(base[j - 1], base[j]);
+        if (gap > gap_s)
+            corrs.push_back({ j, gap });
+    }
+    std::sort(corrs.begin(), corrs.end(), [](const Corr &a, const Corr &b) { return a.gap > b.gap; });
+
+    const size_t ring_room = hard > base.size() ? hard - base.size() : 0;   // rings left under the cap
+    const size_t budget    = std::min(max_extra == 0 ? ring_room : max_extra, ring_room);
+    std::vector<size_t> extra(base.size(), 0);   // extra[j] = intermediate levels in pair (j-1, j)
+    size_t added = 0;
+    for (const Corr &c : corrs) {
+        if (added >= budget)
+            break;
+        // Intermediates that bring this corridor under the target: n_extra+1 sub-gaps of gap/(n_extra+1).
+        size_t need = size_t(std::ceil(c.gap / gap_s - 1e-9));
+        need = need >= 1 ? need - 1 : 0;
+        need = std::min(need, budget - added);
+        extra[c.j] = need;
+        added += need;
+    }
+
+    // Emit strictly ascending-t so the group-by-level stack downstream sees each level whole.
     emit(base[0]);
     for (size_t j = 1; j < base.size(); ++j) {
-        const double ta = double(j)     / double(n + 1);   // t of base[j-1]
-        const double tb = double(j + 1) / double(n + 1);   // t of base[j]
-        const double gap = gap_between(base[j - 1], base[j]);
-        if (gap > gap_s && out.rings.size() < hard) {
-            // How many extra levels bring this corridor under the target: it holds n_extra+1
-            // sub-gaps, each ~gap/(n_extra+1), so need gap/(n_extra+1) <= target.
-            size_t need = size_t(std::ceil(gap / gap_s - 1e-9));
-            if (need >= 1) --need; else need = 0;          // n_extra to make need+1 sub-gaps
-            need = std::min(need, hard - out.rings.size());
-            for (size_t m = 1; m <= need; ++m) {
-                const double t = ta + (tb - ta) * double(m) / double(need + 1);
+        const size_t k = extra[j];
+        if (k > 0) {
+            const double ta = double(j)     / double(n + 1);
+            const double tb = double(j + 1) / double(n + 1);
+            for (size_t m = 1; m <= k; ++m) {
+                const double t = ta + (tb - ta) * double(m) / double(k + 1);
                 std::vector<CsRing> mid;
-                if (this->level_set(t, mid, nullptr) && ! mid.empty()) {
+                if (this->level_set(t, mid, nullptr) && ! mid.empty())
                     emit(mid);
-                    ++spliced;
-                }
-                if (out.rings.size() >= hard) break;
             }
         }
         emit(base[j]);
     }
-    (void) spliced;
     return true;
 }
 

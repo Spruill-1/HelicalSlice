@@ -1,106 +1,137 @@
-"""Inter-bore SADDLE-STRIP density, the defect platecheck's single-pocket void_w is blind to.
+"""Two print-quality metrics for the inter-bore region, validated against PlateMB_saddle's six
+printed coupons (testlog/platemb_saddle/PlateSummary.md). void_w (platecheck's single-inscribed-disc)
+could not tell a coupon that PEELS from one that holds, nor one that went SOLID from one that stayed
+squishy - the two axes the plate actually judged on. These two, together, reproduce the plate ranking:
 
-The printed plate's fraction coupons failed the same way: "the area in between the two bores is
-much less dense... and peels too easily" (MB2e_frac), "space directly between the bores is not
-dense enough" (F7_frac). That is a distributed under-dense STRIP where the u-level-sets spread
-(|grad u|->0 at the saddle), not a single fillable pocket - so void_w (largest inscribed bead-free
-disc) barely moves while the strip stays weak.
+  COMPLIANCE  = solid-fraction: the fraction of the material cross-section covered by beads. TPU's
+                value is squish, so a HIGH solid-fraction is a part that lost its compliance. F7_son
+                (printed "basically solid, no squish") scores 0.89; every squishy coupon is <= 0.79.
+                > SOLID_MAX flags "closed the peel but went solid."
 
-This measures bead COVERAGE in a band around the inter-bore saddle line and compares it to coverage
-in the rest of the material. The saddle line is taken between the two nearest bore centroids; the
-band is +/-BAND_MM of it. A well-knit saddle scores near the body coverage (ratio ~1.0); the peel
-line shows as ratio < 1. Reports coverage_saddle, coverage_body, and their ratio per object.
+  PEEL-RISK   = inter-bore band coverage: bead coverage in a BAND_MM band around the line joining the
+                two nearest bores - the strip the plate peeled along. The two coupons that peeled
+                (F7_soff 0.47, MB2e_soff 0.51) are the two lowest; every coupon that held is >= 0.54.
+                < PEEL_MIN flags a peel-prone under-dense strip - which void_w missed on F7_soff.
 
-    python saddlecheck.py <plate.gcode.3mf> [layer=24] [obj_substr ...]
+Bores are the enclosed holes that are BIG (> BORE_MM2) AND ROUND (compactness > 0.5); foam gaps are
+small or stringy and are counted as material. Metrics are averaged over several mid-height layers to
+damp single-layer raster noise. The thresholds are the midpoints of the plate's peel/hold and
+solid/squishy gaps - re-calibrate them if the material or nozzle changes.
+
+    python saddlecheck.py <plate.gcode.3mf> [obj_substr ...]
 """
 import sys, zipfile, math
 import numpy as np
 import platecheck as pc
 
-BAND_MM = 1.6     # half-width of the saddle band (a couple of bead spacings each side of the line)
+BORE_MM2 = 8.0      # an enclosed hole bigger than this AND round is a bore, not a foam gap
+BAND_MM  = 1.6      # half-width of the inter-bore band
+LAYERS   = [16, 20, 24, 28, 32]   # averaged, to damp per-layer raster noise
+# Thresholds calibrated on PlateMB_saddle (averaged over LAYERS): peel F7_soff 0.50 / MB2e_soff 0.55,
+# hold MB2u_soff 0.58, so PEEL_MIN 0.56 flags both peels and passes the holds. The metric is ROBUST at
+# the extremes (F7's dramatic peel at 0.50, and the solid F7_son at 0.89 vs squishy <=0.80) and THIN in
+# the middle (mild-peel MB2e_soff 0.55 vs hold MB2u_soff 0.58 is within raster noise) - for a borderline
+# coupon the physical peel stays the arbiter. Re-calibrate if the material/nozzle/bead width changes.
+PEEL_MIN = 0.56     # inter-bore band coverage below this = peel-prone
+SOLID_MAX = 0.85    # solid-fraction above this = lost its squish
 
 
-def bore_centroids(cov, xs, ys):
-    """centroids (mm) and cell-sets of the large enclosed holes = bores, reusing platecheck's rule."""
-    out = []
+def bore_split(cov, xs, ys):
+    """material mask (foam gaps kept, bores removed) and the bore centroids."""
+    domain = cov.copy(); bore = np.zeros(cov.shape, bool); bores = []
     for c in pc.components(~cov):
         if pc.touches_border(c, cov.shape):
             continue
-        if len(c) * pc.G * pc.G > 2.0:      # a bore (same threshold as platecheck's domain)
-            cx = float(np.mean([xs[a] for a, b in c])); cy = float(np.mean([ys[b] for a, b in c]))
-            out.append(((cx, cy), c))
-    return out
+        a = len(c) * pc.G * pc.G
+        cells = set(c); perim = 0
+        for (i, j) in c:
+            for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                if (i + di, j + dj) not in cells:
+                    perim += pc.G
+        comp = 4 * math.pi * a / (perim * perim) if perim > 0 else 0.0
+        if a > BORE_MM2 and comp > 0.5:                     # big and round = a bore
+            for i, j in c: bore[i, j] = True
+            bores.append((float(np.mean([xs[i] for i, j in c])),
+                          float(np.mean([ys[j] for i, j in c]))))
+        else:
+            for i, j in c: domain[i, j] = True              # small/stringy = material
+    return (domain & ~bore), bores
 
 
-def analyze_saddle(name, segs):
+def layer_metrics(segs):
     if not segs:
         return None
     xs0 = min(min(s[0], s[2]) for s in segs); xs1 = max(max(s[0], s[2]) for s in segs)
     ys0 = min(min(s[1], s[3]) for s in segs); ys1 = max(max(s[1], s[3]) for s in segs)
     xs = np.arange(xs0 - 1, xs1 + 1, pc.G); ys = np.arange(ys0 - 1, ys1 + 1, pc.G)
     cov = pc.raster(segs, only_beads=False, xs=xs, ys=ys)
-    # material domain = cov with small enclosed foam gaps filled, bores kept open (platecheck's rule)
-    domain = cov.copy(); bore = np.zeros(cov.shape, bool)
-    for c in pc.components(~cov):
-        if pc.touches_border(c, cov.shape):
+    mat, bores = bore_split(cov, xs, ys)
+    if not mat.any():
+        return None
+    cov_all = float(cov[mat].mean())                        # solid-fraction (compliance)
+    cov_ib = float('nan')
+    if len(bores) >= 2:
+        XX, YY = np.meshgrid(xs, ys, indexing='ij')
+        best = None
+        for i in range(len(bores)):
+            for j in range(i + 1, len(bores)):
+                A = np.array(bores[i]); B = np.array(bores[j]); AB = B - A; L2 = float(AB @ AB)
+                if L2 < 1e-9:
+                    continue
+                t = np.clip(((np.stack([XX, YY], -1) - A) @ AB) / L2, 0, 1)
+                proj = A + t[..., None] * AB
+                dist = np.hypot(XX - proj[..., 0], YY - proj[..., 1])
+                band = mat & (dist <= BAND_MM)
+                if band.any():
+                    c = float(cov[band].mean())
+                    if best is None or c < best:            # weakest inter-bore line
+                        best = c
+        cov_ib = best if best is not None else float('nan')
+    return cov_all, cov_ib, len(bores)
+
+
+def analyze(name, per_layer):
+    accA, accI, nb = [], [], 0
+    for segs in per_layer:
+        m = layer_metrics(segs)
+        if m is None:
             continue
-        if len(c) * pc.G * pc.G > 2.0:
-            for a, b in c: bore[a, b] = True
-        else:
-            for a, b in c: domain[a, b] = True
-    bores = bore_centroids(cov, xs, ys)
-    if len(bores) < 2:
-        return {"n_bore": len(bores)}
-    # the saddle line = between the two nearest bore centroids
-    cens = [c for c, _ in bores]
-    best = None
-    for i in range(len(cens)):
-        for j in range(i + 1, len(cens)):
-            d = math.hypot(cens[i][0] - cens[j][0], cens[i][1] - cens[j][1])
-            if best is None or d < best[0]:
-                best = (d, cens[i], cens[j])
-    _, A, B = best
-    A = np.array(A); B = np.array(B); AB = B - A; L2 = float(AB @ AB)
-    # per material cell: distance to the saddle SEGMENT; band = within BAND_MM
-    XX, YY = np.meshgrid(xs, ys, indexing='ij')
-    P = np.stack([XX, YY], axis=-1)
-    t = np.clip(((P - A) @ AB) / max(L2, 1e-9), 0.0, 1.0)
-    proj = A + t[..., None] * AB
-    dist = np.hypot(P[..., 0] - proj[..., 0], P[..., 1] - proj[..., 1])
-    mat = domain & ~bore                      # solid material cells (exclude bores)
-    band = mat & (dist <= BAND_MM)
-    body = mat & (dist > BAND_MM)
-    cov_saddle = float(cov[band].mean()) if band.any() else float('nan')
-    cov_body = float(cov[body].mean()) if body.any() else float('nan')
-    ratio = cov_saddle / cov_body if cov_body and cov_body == cov_body else float('nan')
-    return {"n_bore": len(bores), "cov_saddle": cov_saddle, "cov_body": cov_body,
-            "ratio": ratio, "band_mm2": int(band.sum()) * pc.G * pc.G,
-            "saddle_mid": ((A + B) / 2).tolist()}
+        accA.append(m[0])
+        if m[1] == m[1]:
+            accI.append(m[1])
+        nb = max(nb, m[2])
+    if not accA:
+        return None
+    return {"cov_all": float(np.mean(accA)),
+            "cov_ibore": float(np.mean(accI)) if accI else float('nan'),
+            "n_bore": nb}
 
 
 def main():
     path = sys.argv[1]
-    layer = int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else 24
-    wants = [a for a in sys.argv[3:]]
+    wants = [a for a in sys.argv[2:]]
     with zipfile.ZipFile(path) as z:
         nm = next(n for n in z.namelist() if n.endswith('plate_1.gcode'))
         g = z.read(nm).decode('utf-8', 'replace')
-    per = pc.layer_segments(g, layer)
-    print(f"layer {layer}  |  BAND_MM={BAND_MM}  (saddle coverage vs body coverage)\n")
-    hdr = f"{'object':14s} {'bores':>5s} {'cov_saddle':>10s} {'cov_body':>9s} {'ratio':>6s}  verdict"
+    per = {L: pc.layer_segments(g, L) for L in LAYERS}
+    names = sorted({n for L in LAYERS for n in per[L]})
+    print(f"layers {LAYERS}  |  PEEL_MIN={PEEL_MIN}  SOLID_MAX={SOLID_MAX}\n")
+    hdr = f"{'object':14s} {'bores':>5s} {'solid_frac':>10s} {'ibore_cov':>9s}  verdict"
     print(hdr); print("-" * len(hdr))
-    for name in sorted(per):
+    for name in names:
         if wants and not any(w in name for w in wants):
             continue
-        r = analyze_saddle(name, per[name])
+        r = analyze(name, [per[L].get(name, []) for L in LAYERS])
         if r is None:
             continue
-        if r.get("n_bore", 0) < 2:
-            print(f"{name:14s} {r.get('n_bore',0):>5d}   (need >=2 bores)")
-            continue
-        verdict = "SADDLE-THIN" if r["ratio"] < 0.85 else "ok"
-        print(f"{name:14s} {r['n_bore']:>5d} {r['cov_saddle']:>10.2f} {r['cov_body']:>9.2f} "
-              f"{r['ratio']:>6.2f}  {verdict}")
+        flags = []
+        if r['n_bore'] >= 2 and r['cov_ibore'] == r['cov_ibore'] and r['cov_ibore'] < PEEL_MIN:
+            flags.append("PEEL-RISK")
+        if r['cov_all'] > SOLID_MAX:
+            flags.append("OVER-SOLID")
+        verdict = " ".join(flags) if flags else "ok"
+        ib = f"{r['cov_ibore']:.2f}" if r['cov_ibore'] == r['cov_ibore'] else "  - "
+        print(f"{name:14s} {r['n_bore']:>5d} {r['cov_all']:>10.2f} {ib:>9s}  {verdict}")
 
 
 if __name__ == '__main__':

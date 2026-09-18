@@ -59,6 +59,7 @@ struct WovenInfill {
     bool   serpentine  = false;     // radial-traverse interior instead of concentric rings
     bool   arc_rings   = false;     // distance-anchored rings + per-bore cells (needs interpolated)
     bool   saddle_fill = false;     // thread extra level sets through the inter-bore saddle (needs interpolated)
+    size_t saddle_budget = 0;       // cap on extra saddle levels, widest-first (0 = unlimited)
     // Where this layer must stay SOLID, when that is only part of the cross-section.
     //
     // force_solid is a whole-layer boolean: if any part of the section has air within the shell
@@ -104,6 +105,7 @@ WovenInfill woven_infill_params(const PrintRegionConfig *config)
     w.serpentine = config->continuous_shell_interior_serpentine.value;
     w.arc_rings  = config->continuous_shell_arc_rings.value;
     w.saddle_fill = config->continuous_shell_saddle_fill.value;
+    w.saddle_budget = size_t(std::max(0, config->continuous_shell_saddle_budget.value));
     return w;
 }
 
@@ -3742,11 +3744,16 @@ static const size_t CS_MAX_RESECTION_SITES = 2;
             const char *s = std::getenv("CS_SADDLE_SLOTS");
             return s ? std::atof(s) : -1.0;            // <0: unset, defer to the config
         }();
+        static const int saddle_cap_env = [] {
+            const char *s = std::getenv("CS_SADDLE_CAP");
+            return s ? std::max(0, std::atoi(s)) : -1;                  // <0: unset, use the config budget
+        }();
+        const size_t saddle_budget = saddle_cap_env >= 0 ? size_t(saddle_cap_env) : woven.saddle_budget;
         const double saddle_target = saddle_env >= 0.0 ? saddle_env * sp_mm
                                    : (woven.saddle_fill ? max_gap_mm : 0.0);
         const bool use_saddle = saddle_target > 0.0 && interior.holes.size() >= 2 && n > 0;
         const bool ok = use_saddle
-            ? field.family_saddle(n, saddle_target, size_t(3 * n + 8), fam, &why)
+            ? field.family_saddle(n, saddle_target, size_t(3 * n + 8), saddle_budget, fam, &why)
             : field.family(n, fam, &why);
         if (!ok) {
             add_note(degrade_note, "interpolated rings declined: " + why);
